@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "outDir": ".tmp-tests",
+    "rootDir": ".",
+    "noEmit": false
+  },
+  "include": [
+    "src/utils/linkage.ts",
+    "src/utils/project.ts",
+    "src/types/project.ts"
+  ]
+}

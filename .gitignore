@@ -1,0 +1,34 @@
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Build outputs
+node_modules/
+dist/
+src-tauri/target/
+.tmp-tests/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Archives / binaries
+*.tar.gz
+*.dmg
+*.app
+
+# Unrelated nested repositories in this workspace
+ClaudeBar/
+cc-switch/
+claude-code-tool-manager/
+infisical/
+Personal_AI_Infrastructure/
+shipkey/
+文档/
+
+# Large local screenshots/assets
+image*.png
+image copy*.png

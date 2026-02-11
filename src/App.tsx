@@ -1,0 +1,903 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import './App.css'
+import KeyList from './components/KeyList'
+import KeyForm from './components/KeyForm'
+import ImportModal from './components/ImportModal'
+import ProviderManager from './components/ProviderManager'
+import ProjectManager from './components/ProjectManager'
+import PromptManager, { PromptTemplate } from './components/PromptManager'
+import UsageDashboard from './components/UsageDashboard'
+import GlobalSettings from './components/GlobalSettings'
+import ApplicationManager from './components/ApplicationManager'
+import { ProviderConfig } from './types/provider'
+import type { Project } from './types/project'
+import { normalizeProjectLabel } from './utils/project'
+import { getProviderDisplayName } from './utils/provider'
+import { getQuotaStatus, type QuotaStatus } from './utils/usage'
+import { buildProviderContextMap, resolveCredentialProjectName } from './utils/linkage'
+
+interface Credential {
+  id: string
+  provider: string
+  name: string
+  key: string
+  created_at: string
+  is_active: boolean
+  source?: string | null
+}
+
+interface PromptTemplateRecord extends PromptTemplate {}
+
+interface ParsedKey {
+  provider: string
+  name: string
+  key: string
+  source?: string
+  variable?: string
+}
+
+type View = 'dashboard' | 'keys' | 'projects' | 'providers' | 'apps' | 'prompts' | 'settings'
+
+type UsageQuota = {
+  percent_remaining: number
+}
+
+type UsageSnapshot = {
+  provider_id: string
+  quotas: UsageQuota[]
+}
+
+type ProviderUsageStatus = {
+  provider_id: string
+  enabled: boolean
+  snapshot?: UsageSnapshot | null
+}
+
+const statusOrder: Record<QuotaStatus, number> = {
+  healthy: 0,
+  warning: 1,
+  critical: 2,
+  depleted: 3,
+}
+
+const NOTIFY_COOLDOWN_MS = 6 * 60 * 60 * 1000
+const STATUS_STORAGE_KEY = 'mykey-usage-status'
+const LEGACY_PROJECT_LABELS_STORAGE_KEY = 'mykey-project-labels'
+
+function evaluateStatus(percentRemaining: number): QuotaStatus {
+  return getQuotaStatus(percentRemaining)
+}
+
+function loadLegacyProjectLabelState(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(LEGACY_PROJECT_LABELS_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const normalized: Record<string, string> = {}
+    Object.entries(parsed).forEach(([key, value]) => {
+      if (typeof value !== 'string') return
+      const label = normalizeProjectLabel(value)
+      if (label) normalized[key] = label
+    })
+    return normalized
+  } catch {
+    return {}
+  }
+}
+
+function resolveProjectLabel(
+  credential: Credential,
+  projectLabelsByCredential: Record<string, string>,
+  projects: Project[]
+) {
+  return resolveCredentialProjectName(credential, projectLabelsByCredential, projects)
+}
+
+function providerLabel(providerId: string) {
+  return getProviderDisplayName(providerId)
+}
+
+function loadStatusState(): Record<string, { status: QuotaStatus; lastNotifiedAt: number }> {
+  try {
+    const raw = localStorage.getItem(STATUS_STORAGE_KEY)
+    return raw ? JSON.parse(raw) : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveStatusState(state: Record<string, { status: QuotaStatus; lastNotifiedAt: number }>) {
+  try {
+    localStorage.setItem(STATUS_STORAGE_KEY, JSON.stringify(state))
+  } catch {
+    // ignore
+  }
+}
+
+async function sendSystemNotification(title: string, body: string) {
+  if (!('Notification' in window)) return
+  if (Notification.permission === 'default') {
+    try {
+      await Notification.requestPermission()
+    } catch {
+      return
+    }
+  }
+  if (Notification.permission === 'granted') {
+    new Notification(title, { body })
+  }
+}
+
+function App() {
+  const [credentials, setCredentials] = useState<Credential[]>([])
+  const [providers, setProviders] = useState<ProviderConfig[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
+  const [prompts, setPrompts] = useState<PromptTemplateRecord[]>([])
+  const [selectedKey, setSelectedKey] = useState<Credential | null>(null)
+  const [selectedProvider, setSelectedProvider] = useState<ProviderConfig | null>(null)
+  const [selectedPrompt, setSelectedPrompt] = useState<PromptTemplateRecord | null>(null)
+  const [view, setView] = useState<View>('dashboard')
+  const [showForm, setShowForm] = useState(false)
+  const [showImport, setShowImport] = useState(false)
+  const [masterPassword, setMasterPassword] = useState('')
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [loadingKeys, setLoadingKeys] = useState(false)
+  const [loadingProviders, setLoadingProviders] = useState(false)
+  const [loadingPrompts, setLoadingPrompts] = useState(false)
+  const [hasPassword, setHasPassword] = useState<boolean | null>(null)
+  const [projectLabelsByCredential, setProjectLabelsByCredential] = useState<Record<string, string>>({})
+  const hasMigratedLegacyProjectLabels = useRef(false)
+
+  const loadProjectLabels = async (credentialIds?: string[]) => {
+    if (!masterPassword) return
+    try {
+      const labels = await invoke<Record<string, string>>('get_credential_project_labels', {
+        masterPassword,
+      })
+      if (!credentialIds) {
+        setProjectLabelsByCredential(labels)
+        return
+      }
+      const idSet = new Set(credentialIds)
+      const filtered = Object.fromEntries(
+        Object.entries(labels).filter(([credentialId]) => idSet.has(credentialId))
+      )
+      setProjectLabelsByCredential(filtered)
+    } catch (error) {
+      console.error('Failed to load project labels:', error)
+      setProjectLabelsByCredential({})
+    }
+  }
+
+  const migrateLegacyProjectLabels = async (credentialIds: string[]) => {
+    const legacy = loadLegacyProjectLabelState()
+    const entries = Object.entries(legacy)
+    if (!entries.length) return
+
+    const idSet = new Set(credentialIds)
+    try {
+      for (const [credentialId, label] of entries) {
+        if (!idSet.has(credentialId)) continue
+        const normalized = normalizeProjectLabel(label)
+        if (!normalized) continue
+        await invoke('set_credential_project_label', {
+          credentialId,
+          label: normalized,
+          masterPassword,
+        })
+      }
+    } catch (error) {
+      console.error('Failed to migrate legacy project labels:', error)
+      return
+    }
+
+    localStorage.removeItem(LEGACY_PROJECT_LABELS_STORAGE_KEY)
+  }
+
+  const loadCredentials = async () => {
+    if (!masterPassword) return
+    try {
+      setLoadingKeys(true)
+      const result = await invoke<Credential[]>('get_credentials', { masterPassword })
+      const sorted = [...result].sort((a, b) => {
+        const providerCompare = a.provider.localeCompare(b.provider)
+        if (providerCompare !== 0) return providerCompare
+        return a.name.localeCompare(b.name)
+      })
+      setCredentials(sorted)
+      setSelectedKey((prev) => (prev ? sorted.find((item) => item.id === prev.id) || null : null))
+
+      const credentialIds = sorted.map((item) => item.id)
+      if (!hasMigratedLegacyProjectLabels.current) {
+        hasMigratedLegacyProjectLabels.current = true
+        await migrateLegacyProjectLabels(credentialIds)
+      }
+      await loadProjectLabels(credentialIds)
+    } catch (error) {
+      console.error('Failed to load credentials:', error)
+    } finally {
+      setLoadingKeys(false)
+    }
+  }
+
+  const loadProviders = async () => {
+    if (!masterPassword) return
+    try {
+      setLoadingProviders(true)
+      const result = await invoke<ProviderConfig[]>('get_providers', { masterPassword })
+      setProviders(result)
+      setSelectedProvider((prev) => {
+        if (prev) {
+          return result.find((item) => item.provider === prev.provider) || result[0] || null
+        }
+        return result[0] || null
+      })
+    } catch (error) {
+      console.error('Failed to load providers:', error)
+    } finally {
+      setLoadingProviders(false)
+    }
+  }
+
+  const loadProjects = async () => {
+    if (!masterPassword) return
+    try {
+      const result = await invoke<Project[]>('get_projects', { masterPassword })
+      setProjects(result)
+    } catch (error) {
+      console.error('Failed to load projects:', error)
+      setProjects([])
+    }
+  }
+
+  const loadPrompts = async () => {
+    if (!masterPassword) return
+    try {
+      setLoadingPrompts(true)
+      const result = await invoke<PromptTemplateRecord[]>('get_prompts', { masterPassword })
+      setPrompts(result)
+      setSelectedPrompt((prev) => (prev ? result.find((item) => item.id === prev.id) || null : null))
+    } catch (error) {
+      console.error('Failed to load prompts:', error)
+    } finally {
+      setLoadingPrompts(false)
+    }
+  }
+
+  useEffect(() => {
+    invoke<boolean>('is_password_set')
+      .then((isSet) => {
+        setHasPassword(isSet)
+      })
+      .catch((error) => console.error('Error checking password:', error))
+  }, [])
+
+  useEffect(() => {
+    if (isAuthenticated && masterPassword) {
+      loadCredentials()
+      loadProviders()
+      loadProjects()
+      loadPrompts()
+    }
+  }, [isAuthenticated, masterPassword])
+
+  const providerContextById = useMemo(
+    () => buildProviderContextMap(credentials, projectLabelsByCredential, projects),
+    [credentials, projectLabelsByCredential, projects]
+  )
+
+  useEffect(() => {
+    if (!isAuthenticated) return
+    let timer: number | null = null
+
+    const notifyIfNeeded = async (statuses: ProviderUsageStatus[]) => {
+      const now = Date.now()
+      const stored = loadStatusState()
+      const updated: Record<string, { status: QuotaStatus; lastNotifiedAt: number }> = {
+        ...stored,
+      }
+
+      for (const status of statuses) {
+        if (!status.enabled || !status.snapshot || status.snapshot.quotas.length === 0) {
+          continue
+        }
+        const minRemaining = Math.min(
+          ...status.snapshot.quotas.map((quota) => quota.percent_remaining)
+        )
+        const currentStatus = evaluateStatus(minRemaining)
+        const previous = stored[status.provider_id]
+        const previousStatus = previous?.status
+        const isWorse =
+          previousStatus !== undefined &&
+          statusOrder[currentStatus] > statusOrder[previousStatus]
+        const cooldownPassed =
+          !previous || now - (previous.lastNotifiedAt || 0) > NOTIFY_COOLDOWN_MS
+
+        if (isWorse && cooldownPassed) {
+          await sendSystemNotification(
+            `${providerLabel(status.provider_id)} 用量提醒`,
+            `状态已降级为 ${currentStatus.toUpperCase()}，剩余 ${Math.round(minRemaining)}%`
+          )
+          updated[status.provider_id] = { status: currentStatus, lastNotifiedAt: now }
+        } else {
+          updated[status.provider_id] = {
+            status: currentStatus,
+            lastNotifiedAt: previous?.lastNotifiedAt ?? 0,
+          }
+        }
+      }
+
+      saveStatusState(updated)
+    }
+
+    const refreshUsage = async () => {
+      try {
+        const result = await invoke<ProviderUsageStatus[]>('usage_refresh_all')
+        await notifyIfNeeded(result)
+      } catch (error) {
+        console.warn('Usage refresh failed:', error)
+      }
+    }
+
+    refreshUsage()
+    timer = window.setInterval(refreshUsage, 120000)
+
+    return () => {
+      if (timer) window.clearInterval(timer)
+    }
+  }, [isAuthenticated])
+
+  const handleSetPassword = async (password: string) => {
+    try {
+      await invoke('set_master_password', { password })
+      setMasterPassword(password)
+      setIsAuthenticated(true)
+    } catch (error) {
+      console.error('Failed to set password:', error)
+      alert('Failed to set password')
+    }
+  }
+
+  const handleAuthenticate = async (password: string) => {
+    try {
+      const result = await invoke<boolean>('authenticate', { password })
+      if (result) {
+        setMasterPassword(password)
+        setIsAuthenticated(true)
+      } else {
+        alert('Invalid password')
+      }
+    } catch (error) {
+      console.error('Authentication failed:', error)
+      alert('Authentication failed')
+    }
+  }
+
+  const handleAddKey = async (
+    provider: string,
+    name: string,
+    key: string,
+    source?: string,
+    projectLabel?: string
+  ) => {
+    try {
+      const created = await invoke<Credential>('add_credential', {
+        provider,
+        name,
+        key,
+        source,
+        masterPassword,
+      })
+      const normalizedProject = normalizeProjectLabel(projectLabel)
+      if (normalizedProject) {
+        await invoke('set_credential_project_label', {
+          credentialId: created.id,
+          label: normalizedProject,
+          masterPassword,
+        })
+        setProjectLabelsByCredential((prev) => ({
+          ...prev,
+          [created.id]: normalizedProject,
+        }))
+      }
+      setShowForm(false)
+      setSelectedKey(null)
+      loadCredentials()
+    } catch (error) {
+      console.error('Failed to add credential:', error)
+      alert(`Failed to add credential: ${String(error)}`)
+    }
+  }
+
+  const handleUpdateKey = async (
+    id: string,
+    provider: string,
+    name: string,
+    key: string,
+    projectLabel?: string
+  ) => {
+    try {
+      await invoke('update_credential', {
+        id,
+        provider,
+        name,
+        key,
+        masterPassword,
+      })
+      const normalizedProject = normalizeProjectLabel(projectLabel)
+      await invoke('set_credential_project_label', {
+        credentialId: id,
+        label: normalizedProject ?? null,
+        masterPassword,
+      })
+      setProjectLabelsByCredential((prev) => {
+        const existing = prev[id]
+        if (normalizedProject) {
+          if (existing === normalizedProject) return prev
+          return {
+            ...prev,
+            [id]: normalizedProject,
+          }
+        }
+        if (!existing) return prev
+        const { [id]: _removed, ...rest } = prev
+        return rest
+      })
+      setShowForm(false)
+      setSelectedKey(null)
+      loadCredentials()
+    } catch (error) {
+      console.error('Failed to update credential:', error)
+      alert(`Failed to update credential: ${String(error)}`)
+    }
+  }
+
+  const handleDeleteKey = async (id: string) => {
+    if (!confirm('确定要删除这个密钥吗？')) return
+
+    try {
+      await invoke('delete_credential', { id })
+      setProjectLabelsByCredential((prev) => {
+        if (!prev[id]) return prev
+        const { [id]: _removed, ...rest } = prev
+        return rest
+      })
+      setSelectedKey(null)
+      loadCredentials()
+    } catch (error) {
+      console.error('Failed to delete credential:', error)
+      alert(`Failed to delete credential: ${String(error)}`)
+    }
+  }
+
+  const handleImportKeys = async (items: ParsedKey[]) => {
+    if (!items.length) {
+      alert('No keys selected for import')
+      return
+    }
+
+    try {
+      for (const item of items) {
+        await invoke('add_credential', {
+          provider: item.provider,
+          name: item.name,
+          key: item.key,
+          source: item.source,
+          masterPassword,
+        })
+      }
+      setShowImport(false)
+      loadCredentials()
+    } catch (error) {
+      console.error('Failed to import keys:', error)
+      alert(`Failed to import keys: ${String(error)}`)
+    }
+  }
+
+  const handleSaveProvider = async (
+    provider: string,
+    apiKey: string,
+    baseUrl: string,
+    models: string[]
+  ) => {
+    try {
+      const result = await invoke<ProviderConfig>('upsert_provider', {
+        provider,
+        apiKey,
+        baseUrl,
+        models,
+        masterPassword,
+      })
+      setProviders((prev) => prev.map((item) => (item.provider === result.provider ? result : item)))
+      setSelectedProvider(result)
+    } catch (error) {
+      console.error('Failed to update provider:', error)
+      alert(`Failed to update provider: ${String(error)}`)
+    }
+  }
+
+  const handleSavePrompt = async (
+    id: string | null,
+    title: string,
+    content: string,
+    model: string,
+    variables: string[]
+  ) => {
+    try {
+      const result = await invoke<PromptTemplateRecord>('upsert_prompt', {
+        id,
+        title,
+        content,
+        model,
+        variables,
+        masterPassword,
+      })
+      setPrompts((prev) => {
+        const exists = prev.find((item) => item.id === result.id)
+        if (exists) {
+          return prev.map((item) => (item.id === result.id ? result : item))
+        }
+        return [result, ...prev]
+      })
+      setSelectedPrompt(result)
+    } catch (error) {
+      console.error('Failed to save prompt:', error)
+      alert(`Failed to save prompt: ${String(error)}`)
+    }
+  }
+
+  const handleDeletePrompt = async (id: string) => {
+    if (!confirm('确定要删除这个提示词吗？')) return
+    try {
+      await invoke('delete_prompt', { id, masterPassword })
+      setPrompts((prev) => prev.filter((item) => item.id !== id))
+      setSelectedPrompt(null)
+    } catch (error) {
+      console.error('Failed to delete prompt:', error)
+      alert(`Failed to delete prompt: ${String(error)}`)
+    }
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="auth-container">
+        <div className="auth-card">
+          <h1>MyKey</h1>
+          <p>AI 资产保险箱</p>
+          <AuthForm
+            onSubmit={handleSetPassword}
+            onAuthenticate={handleAuthenticate}
+            defaultMode={hasPassword ? 'login' : 'setup'}
+          />
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">MK</div>
+          <div>
+            <div className="brand-title">MyKey</div>
+            <div className="brand-subtitle">Local AI Vault</div>
+          </div>
+        </div>
+        <nav className="nav">
+          <button
+            className={`nav-item ${view === 'dashboard' ? 'active' : ''}`}
+            onClick={() => setView('dashboard')}
+          >
+            Dashboard
+          </button>
+          <button
+            className={`nav-item ${view === 'keys' ? 'active' : ''}`}
+            onClick={() => setView('keys')}
+          >
+            密钥库
+          </button>
+          <button
+            className={`nav-item ${view === 'projects' ? 'active' : ''}`}
+            onClick={() => setView('projects')}
+          >
+            项目
+          </button>
+          <button
+            className={`nav-item ${view === 'providers' ? 'active' : ''}`}
+            onClick={() => setView('providers')}
+          >
+            提供商
+          </button>
+          <button
+            className={`nav-item ${view === 'apps' ? 'active' : ''}`}
+            onClick={() => setView('apps')}
+          >
+            应用
+          </button>
+          <button
+            className={`nav-item ${view === 'prompts' ? 'active' : ''}`}
+            onClick={() => setView('prompts')}
+          >
+            提示词
+          </button>
+          <button
+            className={`nav-item ${view === 'settings' ? 'active' : ''}`}
+            onClick={() => setView('settings')}
+          >
+            全局设置
+          </button>
+        </nav>
+        {view === 'keys' && (
+          <div className="sidebar-actions">
+            <button className="btn btn-primary" onClick={() => setShowForm(true)}>
+              + 添加密钥
+            </button>
+            <button className="btn btn-secondary" onClick={() => setShowImport(true)}>
+              扫描导入
+            </button>
+          </div>
+        )}
+      </aside>
+
+      <section className="app-content">
+        <header className="content-header">
+          <div>
+            <h1>
+              {view === 'dashboard'
+                ? '监控总览'
+                : view === 'keys'
+                  ? '密钥库'
+                  : view === 'projects'
+                    ? '项目'
+                  : view === 'providers'
+                    ? '提供商设置'
+                    : view === 'apps'
+                      ? '应用配置'
+                    : view === 'prompts'
+                      ? '提示词库'
+                      : '全局设置'}
+            </h1>
+            <p>
+              {view === 'dashboard'
+                ? '实时查看用量、成本与预算风险。'
+                : view === 'keys'
+                  ? '集中管理所有 API Key 与配置。'
+                  : view === 'projects'
+                    ? '按项目管理目录与默认密钥。'
+                  : view === 'providers'
+                    ? '统一维护模型与 API 的接入配置。'
+                    : view === 'apps'
+                      ? '按应用绑定提供商与模型，快速切换 AI Key 路由。'
+                    : view === 'prompts'
+                      ? '集中管理系统提示词与模板。'
+                      : '统一管理服务、集成、诊断与备份。'}
+            </p>
+          </div>
+          {view === 'keys' && (
+            <div className="header-actions">
+              <button className="btn btn-primary" onClick={() => setShowForm(true)}>
+                + 添加密钥
+              </button>
+              <button className="btn btn-secondary" onClick={() => setShowImport(true)}>
+                批量导入
+              </button>
+            </div>
+          )}
+          {view === 'prompts' && (
+            <div className="header-actions">
+              <button
+                className="btn btn-primary"
+                onClick={() => {
+                  setSelectedPrompt(null)
+                }}
+              >
+                + 新建提示词
+              </button>
+            </div>
+          )}
+        </header>
+
+        <main className="content-main">
+          {view === 'dashboard' ? (
+            <UsageDashboard providerContextById={providerContextById} />
+          ) : view === 'keys' ? (
+            <div className="keys-view">
+              <section className="panel">
+                <div className="panel-header">
+                  <h2>我的密钥</h2>
+                  <span className="panel-count">{credentials.length}</span>
+                </div>
+                {loadingKeys ? (
+                  <div className="panel-loading">加载中...</div>
+                ) : credentials.length === 0 ? (
+                  <div className="panel-empty">
+                    <p>还没有添加任何密钥</p>
+                    <button className="btn btn-primary" onClick={() => setShowForm(true)}>
+                      添加第一个密钥
+                    </button>
+                  </div>
+                ) : (
+                  <KeyList
+                    credentials={credentials}
+                    projects={projects}
+                    projectLabelsByCredential={projectLabelsByCredential}
+                    selectedKey={selectedKey}
+                    onSelectKey={setSelectedKey}
+                    onEditKey={(key) => {
+                      setSelectedKey(key)
+                      setShowForm(true)
+                    }}
+                    onDeleteKey={handleDeleteKey}
+                  />
+                )}
+              </section>
+
+              <section className="panel detail-panel">
+                <div className="panel-header">
+                  <h2>密钥详情</h2>
+                </div>
+                {selectedKey ? (
+                  <div className="key-details">
+                    <div className="detail-item">
+                      <label>提供商</label>
+                      <p>{providerLabel(selectedKey.provider)}</p>
+                    </div>
+                    <div className="detail-item">
+                      <label>名称</label>
+                      <p>{selectedKey.name}</p>
+                    </div>
+                    <div className="detail-item">
+                      <label>项目</label>
+                      <p>{resolveProjectLabel(selectedKey, projectLabelsByCredential, projects)}</p>
+                    </div>
+                    <div className="detail-item">
+                      <label>密钥</label>
+                      <code className="key-display">{maskKey(selectedKey.key)}</code>
+                    </div>
+                    <div className="detail-item">
+                      <label>创建时间</label>
+                      <p>{new Date(selectedKey.created_at).toLocaleString()}</p>
+                    </div>
+                    {selectedKey.source && (
+                      <div className="detail-item">
+                        <label>来源路径</label>
+                        <p>{selectedKey.source}</p>
+                      </div>
+                    )}
+                    <button className="btn btn-primary" onClick={() => setShowForm(true)}>
+                      编辑密钥
+                    </button>
+                  </div>
+                ) : (
+                  <div className="panel-empty">
+                    <p>选择一个密钥查看详情</p>
+                  </div>
+                )}
+              </section>
+            </div>
+          ) : view === 'projects' ? (
+            <ProjectManager
+              credentials={credentials}
+              projects={projects}
+              projectLabelsByCredential={projectLabelsByCredential}
+              masterPassword={masterPassword}
+              onProjectsChanged={setProjects}
+              onError={(msg) => alert(msg)}
+            />
+          ) : view === 'providers' ? (
+            <ProviderManager
+              providers={providers}
+              selectedProvider={selectedProvider}
+              onSelectProvider={setSelectedProvider}
+              onSaveProvider={handleSaveProvider}
+              credentials={credentials}
+              projects={projects}
+              projectLabelsByCredential={projectLabelsByCredential}
+              loading={loadingProviders}
+            />
+          ) : view === 'apps' ? (
+            <ApplicationManager
+              masterPassword={masterPassword}
+              providers={providers}
+            />
+          ) : view === 'settings' ? (
+            <GlobalSettings masterPassword={masterPassword} />
+          ) : (
+            <PromptManager
+              prompts={prompts}
+              selectedPrompt={selectedPrompt}
+              onSelectPrompt={setSelectedPrompt}
+              onSavePrompt={handleSavePrompt}
+              onDeletePrompt={handleDeletePrompt}
+              loading={loadingPrompts}
+            />
+          )}
+        </main>
+      </section>
+
+      {showForm && (
+        <KeyForm
+          key={selectedKey?.id}
+          credential={selectedKey}
+          initialProjectLabel={selectedKey ? projectLabelsByCredential[selectedKey.id] : ''}
+          providers={providers}
+          onSave={(provider, name, key, projectLabel) => {
+            if (selectedKey) {
+              handleUpdateKey(selectedKey.id, provider, name, key, projectLabel)
+            } else {
+              handleAddKey(provider, name, key, undefined, projectLabel)
+            }
+          }}
+          onCancel={() => {
+            setShowForm(false)
+            setSelectedKey(null)
+          }}
+        />
+      )}
+
+      {showImport && (
+        <ImportModal
+          masterPassword={masterPassword}
+          onImport={handleImportKeys}
+          onCancel={() => setShowImport(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+interface AuthFormProps {
+  onSubmit: (password: string) => void
+  onAuthenticate: (password: string) => void
+  defaultMode: 'setup' | 'login'
+}
+
+function AuthForm({ onSubmit, onAuthenticate, defaultMode }: AuthFormProps) {
+  const [password, setPassword] = useState('')
+  const [mode, setMode] = useState<'setup' | 'login'>(defaultMode)
+
+  useEffect(() => {
+    setMode(defaultMode)
+  }, [defaultMode])
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (mode === 'setup') {
+      onSubmit(password)
+    } else {
+      onAuthenticate(password)
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="auth-form">
+      <input
+        type="password"
+        placeholder="主密码"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        required
+      />
+      <button type="submit" className="btn btn-primary">
+        {mode === 'setup' ? '设置密码' : '登录'}
+      </button>
+      <button
+        type="button"
+        className="btn btn-link"
+        onClick={() => setMode(mode === 'setup' ? 'login' : 'setup')}
+      >
+        {mode === 'setup' ? '已有账户？登录' : '首次使用？设置密码'}
+      </button>
+    </form>
+  )
+}
+
+const maskKey = (value: string) => {
+  if (!value) return ''
+  if (value.length <= 12) return value
+  return `${value.slice(0, 8)}...${value.slice(-6)}`
+}
+
+export default App

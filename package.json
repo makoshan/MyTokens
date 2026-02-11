@@ -1,0 +1,32 @@
+{
+  "name": "mykey",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "MyKey - AI Asset Vault",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test:linkage": "rm -rf .tmp-tests && tsc -p tsconfig.tests.json && printf '{\"type\":\"commonjs\"}\\n' > .tmp-tests/package.json && node --test tests/linkage.test.cjs",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "tauri:build:dmg": "tauri build --target universal-apple-darwin",
+    "tauri:build:intel": "tauri build --target x86_64-apple-darwin",
+    "tauri:build:arm": "tauri build --target aarch64-apple-darwin"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-dialog": "^2.6.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.0",
+    "@types/react": "^19.2.13",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  }
+}
