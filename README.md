@@ -71,21 +71,39 @@
 
 ### 方式 2: 从源码构建
 
-如果你更喜欢折腾，可以自己编译：
+如果你更喜欢折腾，可以自己编译。我们提供了便捷的构建脚本。
+
+**前置要求**:
+- macOS 10.13+
+- Rust 1.77+
+- Node.js 18+
 
 ```bash
 # 1. 克隆仓库
 git clone https://github.com/makoshan/Mykey.git
 cd Mykey
 
-# 2. 安装依赖
+# 2. 快速构建 DMG (推荐)
+# 此脚本会自动检查环境、安装依赖并生成通用二进制 DMG
+./build-dmg.sh
+
+# 构建产物位于: src-tauri/target/release/bundle/dmg/
+```
+
+或者手动分步构建：
+
+```bash
+# 安装依赖
 npm install
 
-# 3. 运行开发模式
+# 运行开发模式
 npm run tauri:dev
 
-# 4. 构建发布版本
+# 构建应用 (.app)
 npm run tauri:build
+
+# 构建 DMG (Universal)
+npm run tauri:build -- --target universal-apple-darwin
 ```
 
 ---
