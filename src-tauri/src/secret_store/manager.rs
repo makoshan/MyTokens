@@ -87,6 +87,18 @@ impl SecretManager {
         self.primary = name.into();
     }
 
+    pub fn primary_name(&self) -> Option<&str> {
+        if !self.primary.is_empty()
+            && self
+                .providers
+                .iter()
+                .any(|(name, _)| name == &self.primary)
+        {
+            return Some(self.primary.as_str());
+        }
+        self.providers.first().map(|(name, _)| name.as_str())
+    }
+
     pub fn get(&self, key_id: &str) -> Result<Secret, SecretStoreError> {
         for (_, provider) in &self.providers {
             let guard = provider.lock().unwrap_or_else(|e| e.into_inner());

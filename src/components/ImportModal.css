@@ -62,6 +62,21 @@
   word-break: break-all;
 }
 
+.shipkey-report {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--panel-alt);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shipkey-report-line {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .import-textarea {
   width: 100%;
   padding: 12px;

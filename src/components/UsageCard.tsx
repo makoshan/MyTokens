@@ -26,8 +26,11 @@ export default function UsageCard({ providerId, error, snapshot, onRefresh, load
     const minRemaining = snapshot?.quotas.length
         ? Math.min(...snapshot.quotas.map((quota) => quota.percent_remaining))
         : null
+    const hasCostOnly = Boolean(snapshot && snapshot.cost_usage && snapshot.quotas.length === 0)
     const health: CardStatus = error
         ? 'critical'
+        : hasCostOnly
+            ? 'warning'
         : minRemaining === null
             ? 'depleted'
             : getQuotaStatus(minRemaining)

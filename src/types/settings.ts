@@ -47,3 +47,42 @@ export interface GatewayRequestLog {
   error_code?: string | null
   estimated_cost_usd?: number | null
 }
+
+export interface GatewayTrafficGroup {
+  key: string
+  requests: number
+  success_requests: number
+  error_requests: number
+  blocked_requests: number
+  avg_latency_ms?: number | null
+  p95_latency_ms?: number | null
+}
+
+export interface GatewayErrorSummary {
+  code: string
+  requests: number
+}
+
+export interface GatewayTrafficPoint {
+  minute: string
+  requests: number
+  error_requests: number
+  avg_latency_ms?: number | null
+}
+
+export interface GatewayTrafficMetrics {
+  window_minutes: number
+  total_requests: number
+  success_requests: number
+  client_error_requests: number
+  server_error_requests: number
+  blocked_requests: number
+  requests_per_minute: number
+  avg_latency_ms?: number | null
+  p95_latency_ms?: number | null
+  estimated_cost_usd: number
+  by_app: GatewayTrafficGroup[]
+  by_provider: GatewayTrafficGroup[]
+  top_errors: GatewayErrorSummary[]
+  timeline: GatewayTrafficPoint[]
+}

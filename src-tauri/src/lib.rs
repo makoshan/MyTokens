@@ -46,9 +46,59 @@ pub struct ProviderConfig {
     pub updated_at: String,
     pub is_active: bool,
     pub models: Vec<String>,
+    pub details: ProviderDetails,
     pub endpoints: Vec<ProviderEndpoint>,
     pub env_vars: Vec<ProviderEnvVar>,
     pub app_bindings: Vec<ProviderAppBinding>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProviderDetails {
+    pub website_url: String,
+    pub notes: String,
+    pub main_model: String,
+    pub reasoning_model: String,
+    pub default_haiku_model: String,
+    pub default_sonnet_model: String,
+    pub default_opus_model: String,
+    pub settings_json: String,
+    pub use_common_config: bool,
+    pub test_config_enabled: bool,
+    pub test_model: String,
+    pub test_timeout_secs: Option<i64>,
+    pub test_prompt: String,
+    pub test_degraded_threshold_ms: Option<i64>,
+    pub test_max_retries: Option<i64>,
+    pub proxy_config_enabled: bool,
+    pub proxy_url: String,
+    pub proxy_username: String,
+    pub proxy_password: String,
+}
+
+impl Default for ProviderDetails {
+    fn default() -> Self {
+        Self {
+            website_url: String::new(),
+            notes: String::new(),
+            main_model: String::new(),
+            reasoning_model: String::new(),
+            default_haiku_model: String::new(),
+            default_sonnet_model: String::new(),
+            default_opus_model: String::new(),
+            settings_json: "{\n  \"env\": {},\n  \"includeCoAuthoredBy\": false\n}".to_string(),
+            use_common_config: false,
+            test_config_enabled: false,
+            test_model: String::new(),
+            test_timeout_secs: None,
+            test_prompt: String::new(),
+            test_degraded_threshold_ms: None,
+            test_max_retries: None,
+            proxy_config_enabled: false,
+            proxy_url: String::new(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -108,6 +158,32 @@ pub struct ProviderAppBinding {
     pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProviderEndpointInput {
+    pub id: Option<String>,
+    pub base_url: String,
+    pub headers: Option<String>,
+    pub timeout_ms: Option<i64>,
+    pub proxy_url: Option<String>,
+    pub is_primary: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProviderEnvVarInput {
+    pub id: Option<String>,
+    pub key: String,
+    pub value: String,
+    pub is_secret: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProviderAppBindingInput {
+    pub id: Option<String>,
+    pub app_type: String,
+    pub config_path: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -204,6 +280,49 @@ pub struct GatewayRequestLog {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GatewayTrafficGroup {
+    pub key: String,
+    pub requests: i64,
+    pub success_requests: i64,
+    pub error_requests: i64,
+    pub blocked_requests: i64,
+    pub avg_latency_ms: Option<f64>,
+    pub p95_latency_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GatewayErrorSummary {
+    pub code: String,
+    pub requests: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GatewayTrafficPoint {
+    pub minute: String,
+    pub requests: i64,
+    pub error_requests: i64,
+    pub avg_latency_ms: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GatewayTrafficMetrics {
+    pub window_minutes: i64,
+    pub total_requests: i64,
+    pub success_requests: i64,
+    pub client_error_requests: i64,
+    pub server_error_requests: i64,
+    pub blocked_requests: i64,
+    pub requests_per_minute: f64,
+    pub avg_latency_ms: Option<f64>,
+    pub p95_latency_ms: Option<i64>,
+    pub estimated_cost_usd: f64,
+    pub by_app: Vec<GatewayTrafficGroup>,
+    pub by_provider: Vec<GatewayTrafficGroup>,
+    pub top_errors: Vec<GatewayErrorSummary>,
+    pub timeline: Vec<GatewayTrafficPoint>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Project {
     pub id: String,
     pub name: String,
@@ -247,10 +366,15 @@ pub fn run() {
             commands::set_credential_project_label,
             commands::parse_env_file,
             commands::scan_env_dir,
+            commands::scan_shipkey_dir,
+            commands::generate_mykey_sync_config,
+            commands::backup_scanned_projects_to_onepassword,
+            commands::restore_scanned_projects_from_onepassword,
             commands::get_providers,
             commands::upsert_provider,
             commands::set_provider_active,
             commands::delete_provider,
+            commands::test_provider_endpoint,
             commands::get_prompts,
             commands::upsert_prompt,
             commands::delete_prompt,
@@ -269,6 +393,7 @@ pub fn run() {
             commands::set_gateway_circuit_breaker,
             commands::set_gateway_daily_budget,
             commands::get_gateway_request_logs,
+            commands::get_gateway_traffic_metrics,
             commands::get_app_routes,
             commands::set_app_route,
             commands::detect_app_route_from_live_config,
@@ -279,7 +404,9 @@ pub fn run() {
             commands::get_claude_tool_manager_mcps,
             commands::get_claude_tool_manager_skills,
             commands::get_gateway_access_credentials,
+            commands::clippy_codex_chat,
             commands::backup_now,
+            commands::restore_backup,
             commands::open_path,
             commands::add_project,
             commands::get_projects,

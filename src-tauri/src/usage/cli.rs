@@ -61,7 +61,7 @@ pub fn probe_gemini_cli(
     cli_path_override: Option<&str>,
 ) -> Result<UsageSnapshot, String> {
     let binary_path = resolve_gemini_binary(cli_path_override)?;
-    let output = run_interactive_command(&binary_path, &[], "/stats\n/quit\n", 7)?;
+    let output = run_interactive_command(&binary_path, &[], "/stats\n/quit\n", 10)?;
     parse_gemini_usage(&output, provider_id)
 }
 
@@ -97,10 +97,7 @@ pub fn probe_kimi_cli(
         }
     }
 
-    Err(format!(
-        "Kimi CLI probe failed: {}",
-        errors.join("; ")
-    ))
+    Err(format!("Kimi CLI probe failed: {}", errors.join("; ")))
 }
 
 fn run_claude_command(binary_path: &str, command_arg: &str) -> Result<String, String> {
@@ -191,8 +188,7 @@ fn resolve_binary(
             }
             return Err(format!(
                 "Configured {} '{}' is not executable or not found",
-                override_var_name,
-                trimmed
+                override_var_name, trimmed
             ));
         }
     }
@@ -218,8 +214,7 @@ fn resolve_binary_candidates(
             }
             return Err(format!(
                 "Configured {} '{}' is not executable or not found",
-                override_var_name,
-                trimmed
+                override_var_name, trimmed
             ));
         }
     }
@@ -655,7 +650,11 @@ fn parse_amp_usage(stdout: &str, provider_id: &str) -> Result<UsageSnapshot, Str
 
     let mut quotas = Vec::new();
     let mut account_tier = None;
-    for line in clean_out.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in clean_out
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         let Some(caps) = credit_line_re.captures(line) else {
             continue;
         };
@@ -712,6 +711,12 @@ fn parse_gemini_usage(stdout: &str, provider_id: &str) -> Result<UsageSnapshot, 
         || lower_out.contains("waiting for auth")
     {
         return Err("Gemini CLI not logged in".to_string());
+    }
+    if lower_out.contains("gemini_api_key environment variable not found") {
+        return Err("GEMINI_API_KEY environment variable not found".to_string());
+    }
+    if lower_out.contains("api key") && lower_out.contains("not found") {
+        return Err("Gemini API key not configured".to_string());
     }
 
     // Matches table style output like: gemini-2.5-pro ... 100.0% (Resets in 24h)
@@ -782,8 +787,12 @@ fn parse_kimi_usage(stdout: &str, provider_id: &str) -> Result<UsageSnapshot, St
 }
 
 fn parse_generic_percent_quotas(text: &str) -> Result<Vec<UsageQuota>, String> {
-    let line_re = Regex::new(
-        r"(?i)^(?P<label>[A-Za-z][A-Za-z0-9 .()/_:-]{1,100}?)\s*[:\-]?\s*(?P<pct>\d{1,3}(?:\.\d+)?)\s*%\s*(?P<mode>left|remaining|used)?(?:\s*\((?P<reset>[^)]+)\))?",
+    let label_first_re = Regex::new(
+        r"(?i)^(?P<label>[\p{L}\p{N}][\p{L}\p{N} .()/_:-]{1,120}?)\s*[:\-]?\s*(?P<pct>\d{1,3}(?:\.\d+)?)\s*%\s*(?P<mode>left|remaining|used)?(?:\s*\((?P<reset>[^)]+)\))?",
+    )
+    .unwrap();
+    let pct_first_re = Regex::new(
+        r"(?i)^(?P<pct>\d{1,3}(?:\.\d+)?)\s*%\s*(?P<mode>left|remaining|used)?\s*(?:for|on|in)?\s*(?P<label>[\p{L}\p{N}][\p{L}\p{N} .()/_:-]{1,120})?(?:\s*\((?P<reset>[^)]+)\))?",
     )
     .unwrap();
     let credit_line_re = Regex::new(
@@ -824,7 +833,10 @@ fn parse_generic_percent_quotas(text: &str) -> Result<Vec<UsageQuota>, String> {
             continue;
         }
 
-        let Some(caps) = line_re.captures(line) else {
+        let caps = label_first_re
+            .captures(line)
+            .or_else(|| pct_first_re.captures(line));
+        let Some(caps) = caps else {
             continue;
         };
         let pct = caps
@@ -835,6 +847,7 @@ fn parse_generic_percent_quotas(text: &str) -> Result<Vec<UsageQuota>, String> {
         let raw_label = caps
             .name("label")
             .map(|m| m.as_str())
+            .filter(|value| !value.trim().is_empty())
             .unwrap_or("Quota");
         let mode = caps
             .name("mode")

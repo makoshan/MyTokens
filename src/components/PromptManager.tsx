@@ -49,6 +49,7 @@ export default function PromptManager({
   const [variables, setVariables] = useState<string[]>([])
   const [newVariable, setNewVariable] = useState('')
   const [saving, setSaving] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
 
   useEffect(() => {
     if (selectedPrompt) {
@@ -78,6 +79,24 @@ export default function PromptManager({
     )
   }, [selectedPrompt, title, content, model, variables])
 
+  const filteredPrompts = useMemo(() => {
+    const keyword = searchQuery.trim().toLowerCase()
+    if (!keyword) return prompts
+    return prompts.filter((prompt) => {
+      const haystack = `${prompt.title} ${prompt.model || ''} ${(prompt.variables || []).join(' ')}`
+      return haystack.toLowerCase().includes(keyword)
+    })
+  }, [prompts, searchQuery])
+
+  const contentStats = useMemo(() => {
+    const text = content.trim()
+    if (!text) return { chars: 0, lines: 0 }
+    return {
+      chars: text.length,
+      lines: text.split(/\r?\n/).length,
+    }
+  }, [content])
+
   const handleSave = async () => {
     if (!title.trim()) {
       alert('标题不能为空')
@@ -100,35 +119,55 @@ export default function PromptManager({
       <section className="panel prompt-list-panel">
         <div className="panel-header">
           <h2>提示词库</h2>
-          <span className="panel-count">{prompts.length}</span>
+          <span className="panel-count">{filteredPrompts.length}/{prompts.length}</span>
         </div>
+        <input
+          className="prompt-search"
+          type="text"
+          placeholder="搜索标题、模型、变量"
+          value={searchQuery}
+          onChange={(event) => setSearchQuery(event.target.value)}
+        />
         {loading ? (
           <div className="panel-loading">加载中...</div>
+        ) : filteredPrompts.length === 0 ? (
+          <div className="panel-empty">
+            <p>{prompts.length === 0 ? '还没有提示词' : '没有匹配的提示词'}</p>
+          </div>
         ) : (
           <div className="prompt-list">
-            {prompts.map((prompt) => (
+            {filteredPrompts.map((prompt) => (
               <button
                 key={prompt.id}
                 className={`prompt-row ${selectedPrompt?.id === prompt.id ? 'active' : ''}`}
                 onClick={() => onSelectPrompt(prompt)}
               >
-                <div>
-                  <div className="prompt-title">{prompt.title}</div>
-                  <div className="prompt-meta">
-                    {prompt.model || 'default'} · {formatDate(prompt.updated_at)}
+                  <div>
+                    <div className="prompt-title">{prompt.title}</div>
+                    <div className="prompt-meta">
+                      {prompt.model || 'default'} · {formatDate(prompt.updated_at)}
+                    </div>
+                    <div className="prompt-row-tags">
+                      <span className="prompt-row-tag">变量 {prompt.variables?.length || 0}</span>
+                    </div>
                   </div>
-                </div>
-              </button>
-            ))}
-          </div>
+                </button>
+              ))}
+            </div>
         )}
       </section>
 
       <section className="panel prompt-detail-panel">
         <div className="panel-header">
           <h2>{selectedPrompt ? '提示词详情' : '新建提示词'}</h2>
+          {selectedPrompt ? <span className="panel-count">已选中</span> : <span className="panel-count">草稿</span>}
         </div>
         <div className="prompt-details">
+          <div className="prompt-summary-row">
+            <span className="prompt-summary-chip">变量 {variables.length}</span>
+            <span className="prompt-summary-chip">字符 {contentStats.chars}</span>
+            <span className="prompt-summary-chip">行数 {contentStats.lines}</span>
+          </div>
           <div className="form-group">
             <label>ID</label>
             <input type="text" value={selectedPrompt?.id || '自动生成'} disabled />
@@ -201,8 +240,9 @@ export default function PromptManager({
                   </span>
                 ))}
               </div>
-            )}
+              )}
           </div>
+          <div className="helper-text">提示：可在内容中使用 {'{{variable}}'} 作为占位符。</div>
           <div className="prompt-actions">
             <button
               className="btn btn-primary"

@@ -39,6 +39,81 @@
   overflow: auto;
 }
 
+.app-manager-shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.7fr) minmax(360px, 1fr);
+  gap: 14px;
+  min-height: 0;
+  flex: 1;
+}
+
+.app-manager-nav {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel-alt);
+  padding: 10px;
+  min-height: 0;
+}
+
+.app-manager-nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  max-height: 100%;
+}
+
+.app-manager-nav-item {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  padding: 10px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.app-manager-nav-item.active {
+  border-color: rgba(249, 115, 22, 0.35);
+  background: rgba(249, 115, 22, 0.12);
+}
+
+.app-manager-nav-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.app-manager-nav-subtitle {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.app-manager-nav-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.app-manager-search {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.app-manager-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(255, 107, 61, 0.15);
+}
+
 .app-manager-item {
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -47,6 +122,11 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.app-manager-detail-item {
+  min-height: 0;
+  overflow: auto;
 }
 
 .app-manager-head {
@@ -356,6 +436,10 @@
 }
 
 @media (max-width: 860px) {
+  .app-manager-shell {
+    grid-template-columns: 1fr;
+  }
+
   .app-manager-controls {
     grid-template-columns: 1fr;
   }

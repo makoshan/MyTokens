@@ -1,4 +1,7 @@
-use crate::{ProviderAppBinding, ProviderConfig, ProviderEndpoint, ProviderEnvVar, ProviderModel};
+use crate::{
+    ProviderAppBinding, ProviderConfig, ProviderDetails, ProviderEndpoint, ProviderEnvVar,
+    ProviderModel,
+};
 use chrono::Local;
 use uuid::Uuid;
 
@@ -433,6 +436,7 @@ pub fn default_templates() -> Vec<ProviderTemplate> {
             label: "Kimi",
             base_url: "https://api.moonshot.ai/v1",
             models: vec![
+                "kimi-for-coding",
                 "kimi-k2-0711-preview",
                 "kimi-k2-0905-preview",
                 "kimi-k2-thinking",
@@ -450,6 +454,34 @@ pub fn default_templates() -> Vec<ProviderTemplate> {
                 },
                 EndpointTemplate {
                     base_url: "https://api.moonshot.cn/v1",
+                    headers: None,
+                    timeout_ms: Some(60000),
+                    proxy_url: None,
+                    is_primary: false,
+                },
+            ],
+            app_bindings: vec![AppBindingTemplate {
+                app_type: "openai-compatible",
+                config_path: "",
+                enabled: true,
+            }],
+        },
+        ProviderTemplate {
+            provider: "kimi-for-coding",
+            label: "Kimi for Coding",
+            base_url: "https://api.kimi.com/coding",
+            models: vec!["kimi-for-coding"],
+            env_vars: vec!["KIMI_API_KEY"],
+            endpoints: vec![
+                EndpointTemplate {
+                    base_url: "https://api.kimi.com/coding",
+                    headers: None,
+                    timeout_ms: Some(60000),
+                    proxy_url: None,
+                    is_primary: true,
+                },
+                EndpointTemplate {
+                    base_url: "https://api.moonshot.ai/v1",
                     headers: None,
                     timeout_ms: Some(60000),
                     proxy_url: None,
@@ -729,6 +761,7 @@ pub fn template_to_provider_config(template: &ProviderTemplate) -> ProviderConfi
             .iter()
             .map(|model| (*model).to_string())
             .collect(),
+        details: ProviderDetails::default(),
         endpoints: Vec::new(),
         env_vars: Vec::new(),
         app_bindings: Vec::new(),

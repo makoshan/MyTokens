@@ -75,13 +75,6 @@
   border-color: rgba(255, 107, 61, 0.4);
 }
 
-.sidebar-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: auto;
-}
-
 .app-content {
   display: flex;
   flex-direction: column;
@@ -176,6 +169,93 @@
   gap: 16px;
 }
 
+.key-detail-hero {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-alt);
+  padding: 12px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.key-detail-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.key-detail-subtitle {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
+.key-detail-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.detail-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+button.detail-chip {
+  cursor: pointer;
+}
+
+.detail-chip.healthy {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.12);
+  color: #166534;
+}
+
+.detail-chip.warning {
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.12);
+  color: #92400e;
+}
+
+.detail-section {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.detail-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.detail-item-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.detail-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .detail-item {
   display: flex;
   flex-direction: column;
@@ -194,6 +274,10 @@
   font-size: 14px;
   color: var(--text);
   word-break: break-all;
+}
+
+.detail-link-btn {
+  align-self: flex-start;
 }
 
 .key-display {
@@ -416,6 +500,10 @@
     grid-template-columns: 1fr;
   }
 
+  .detail-item-grid {
+    grid-template-columns: 1fr;
+  }
+
 }
 
 @media (max-width: 768px) {
@@ -432,10 +520,6 @@
   }
 
   .nav {
-    flex-direction: row;
-  }
-
-  .sidebar-actions {
     flex-direction: row;
   }
 

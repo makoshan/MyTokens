@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import './ProviderManager.css'
 import {
+  DEFAULT_PROVIDER_DETAILS,
+  ProviderAppBindingInput,
   ProviderConfig,
-  ProviderEnvVar,
+  ProviderDetails,
+  ProviderEndpointInput,
+  ProviderEnvVarInput,
 } from '../types/provider'
 import {
   getProviderCategory,
@@ -19,9 +24,14 @@ interface ProviderManagerProps {
   onSelectProvider: (provider: ProviderConfig) => void
   onSaveProvider: (
     provider: string,
+    label: string,
     apiKey: string,
     baseUrl: string,
-    models: string[]
+    models: string[],
+    details?: ProviderDetails,
+    endpoints?: ProviderEndpointInput[],
+    envVars?: ProviderEnvVarInput[],
+    appBindings?: ProviderAppBindingInput[]
   ) => Promise<void> | void
   onToggleProviderActive: (provider: string, isActive: boolean) => Promise<void> | void
   onDeleteProvider: (provider: string) => Promise<void> | void
@@ -32,6 +42,63 @@ interface ProviderManagerProps {
 }
 
 const CATEGORY_ORDER: ProviderCategory[] = ['model', 'translation', 'search', 'ocr', 'other']
+const createLocalId = () =>
+  `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+type EditableEndpoint = Required<ProviderEndpointInput>
+type EditableEnvVar = Required<ProviderEnvVarInput>
+type EditableBinding = Required<ProviderAppBindingInput>
+type EndpointSpeedTestResult = {
+  requested_url: string
+  tested_url?: string | null
+  success: boolean
+  status_code?: number | null
+  latency_ms?: number | null
+  error?: string | null
+}
+
+const sanitizeDetails = (details: ProviderDetails): ProviderDetails => {
+  const normalized: ProviderDetails = {
+    ...DEFAULT_PROVIDER_DETAILS,
+    ...details,
+  }
+  normalized.website_url = normalized.website_url.trim()
+  normalized.notes = normalized.notes.trim()
+  normalized.main_model = normalized.main_model.trim()
+  normalized.reasoning_model = normalized.reasoning_model.trim()
+  normalized.default_haiku_model = normalized.default_haiku_model.trim()
+  normalized.default_sonnet_model = normalized.default_sonnet_model.trim()
+  normalized.default_opus_model = normalized.default_opus_model.trim()
+  normalized.settings_json =
+    normalized.settings_json.trim() || DEFAULT_PROVIDER_DETAILS.settings_json
+  normalized.test_model = normalized.test_model.trim()
+  normalized.test_prompt = normalized.test_prompt.trim()
+  normalized.proxy_url = normalized.proxy_url.trim()
+  normalized.proxy_username = normalized.proxy_username.trim()
+  normalized.proxy_password = normalized.proxy_password.trim()
+  if (normalized.test_timeout_secs !== null && normalized.test_timeout_secs !== undefined) {
+    normalized.test_timeout_secs =
+      normalized.test_timeout_secs > 0 ? normalized.test_timeout_secs : null
+  }
+  if (
+    normalized.test_degraded_threshold_ms !== null &&
+    normalized.test_degraded_threshold_ms !== undefined
+  ) {
+    normalized.test_degraded_threshold_ms =
+      normalized.test_degraded_threshold_ms > 0 ? normalized.test_degraded_threshold_ms : null
+  }
+  if (normalized.test_max_retries !== null && normalized.test_max_retries !== undefined) {
+    normalized.test_max_retries = normalized.test_max_retries >= 0 ? normalized.test_max_retries : null
+  }
+  return normalized
+}
+
+const resolveDetails = (provider: ProviderConfig): ProviderDetails => {
+  return sanitizeDetails({
+    ...DEFAULT_PROVIDER_DETAILS,
+    ...(provider.details || {}),
+  })
+}
 
 export default function ProviderManager({
   providers,
@@ -49,6 +116,8 @@ export default function ProviderManager({
   const [baseUrl, setBaseUrl] = useState('')
   const [models, setModels] = useState<string[]>([])
   const [newModel, setNewModel] = useState('')
+  const [providerLabel, setProviderLabel] = useState('')
+  const [details, setDetails] = useState<ProviderDetails>(DEFAULT_PROVIDER_DETAILS)
   const [showKey, setShowKey] = useState(false)
   const [saving, setSaving] = useState(false)
   const [togglingProvider, setTogglingProvider] = useState<string | null>(null)
@@ -58,12 +127,19 @@ export default function ProviderManager({
   const [status, setStatus] = useState<'idle' | 'saved' | 'error'>('idle')
   const [categoryFilter, setCategoryFilter] = useState<ProviderCategory | 'all'>('all')
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [editableEndpoints, setEditableEndpoints] = useState<EditableEndpoint[]>([])
+  const [editableEnvVars, setEditableEnvVars] = useState<EditableEnvVar[]>([])
+  const [editableAppBindings, setEditableAppBindings] = useState<EditableBinding[]>([])
+  const [testingEndpointId, setTestingEndpointId] = useState<string | null>(null)
+  const [testResults, setTestResults] = useState<Record<string, EndpointSpeedTestResult>>({})
+  const [testingBaseUrl, setTestingBaseUrl] = useState(false)
+  const [baseUrlTestResult, setBaseUrlTestResult] = useState<EndpointSpeedTestResult | null>(null)
 
   const activeProvider = selectedProvider
   const activeCategory = activeProvider ? getProviderCategory(activeProvider.provider) : null
-  const endpoints = activeProvider?.endpoints ?? []
-  const envVars = activeProvider?.env_vars ?? []
-  const appBindings = activeProvider?.app_bindings ?? []
+  const endpoints = editableEndpoints
+  const envVars = editableEnvVars
+  const appBindings = editableAppBindings
   const formProfile = useMemo(() => getFormProfile(activeCategory), [activeCategory])
   const showEmptyAdvancedCards = activeCategory === 'model'
   const visibleAdvancedCards = useMemo(() => {
@@ -108,37 +184,112 @@ export default function ProviderManager({
   }, [categoryFilter, providerGroups])
   useEffect(() => {
     if (activeProvider) {
+      const resolvedDetails = resolveDetails(activeProvider)
+      setProviderLabel(activeProvider.label || activeProvider.provider)
       setApiKey(activeProvider.api_key || '')
       setBaseUrl(activeProvider.base_url || '')
       setModels(activeProvider.models || [])
+      setDetails(resolvedDetails)
       setNewModel('')
       setShowKey(false)
       setStatus('idle')
       setShowAdvanced(getProviderCategory(activeProvider.provider) === 'model')
+      setTestingEndpointId(null)
+      setTestingBaseUrl(false)
+      setTestResults({})
+      setBaseUrlTestResult(null)
+      setEditableEndpoints(
+        (activeProvider.endpoints || []).map((item) => ({
+          id: item.id || createLocalId(),
+          base_url: item.base_url || '',
+          headers: item.headers || null,
+          timeout_ms: item.timeout_ms ?? null,
+          proxy_url: item.proxy_url || null,
+          is_primary: !!item.is_primary,
+        }))
+      )
+      setEditableEnvVars(
+        (activeProvider.env_vars || []).map((item) => ({
+          id: item.id || createLocalId(),
+          key: item.key || '',
+          value: item.value || '',
+          is_secret: item.is_secret,
+        }))
+      )
+      setEditableAppBindings(
+        (activeProvider.app_bindings || []).map((item) => ({
+          id: item.id || createLocalId(),
+          app_type: item.app_type || '',
+          config_path: item.config_path || '',
+          enabled: item.enabled,
+        }))
+      )
+    } else {
+      setProviderLabel('')
+      setDetails(DEFAULT_PROVIDER_DETAILS)
+      setEditableEndpoints([])
+      setEditableEnvVars([])
+      setEditableAppBindings([])
+      setTestResults({})
+      setBaseUrlTestResult(null)
     }
   }, [activeProvider])
 
   const dirty = useMemo(() => {
     if (!activeProvider) return false
+    const currentDetails = resolveDetails(activeProvider)
     return (
+      providerLabel.trim() !== (activeProvider.label || activeProvider.provider) ||
       apiKey !== (activeProvider.api_key || '') ||
       baseUrl !== (activeProvider.base_url || '') ||
-      models.join('|') !== (activeProvider.models || []).join('|')
+      models.join('|') !== (activeProvider.models || []).join('|') ||
+      serializeDetails(details) !== serializeDetails(currentDetails) ||
+      serializeEndpoints(editableEndpoints) !== serializeEndpoints(activeProvider.endpoints || []) ||
+      serializeEnvVars(editableEnvVars) !== serializeEnvVars(activeProvider.env_vars || []) ||
+      serializeBindings(editableAppBindings) !== serializeBindings(activeProvider.app_bindings || [])
     )
-  }, [activeProvider, apiKey, baseUrl, models])
+  }, [
+    activeProvider,
+    providerLabel,
+    apiKey,
+    baseUrl,
+    models,
+    details,
+    editableEndpoints,
+    editableEnvVars,
+    editableAppBindings,
+  ])
 
   useEffect(() => {
     if (status !== 'idle') {
       setStatus('idle')
     }
-  }, [apiKey, baseUrl, models])
+  }, [providerLabel, apiKey, baseUrl, models, details, editableEndpoints, editableEnvVars, editableAppBindings])
 
   const handleSave = async () => {
     if (!activeProvider || !dirty) return
+    const normalizedDetails = sanitizeDetails(details)
+    try {
+      JSON.parse(normalizedDetails.settings_json)
+    } catch {
+      alert('配置 JSON 格式错误，请修复后再保存。')
+      return
+    }
+
     setSaving(true)
     setStatus('idle')
     try {
-      await onSaveProvider(activeProvider.provider, apiKey.trim(), baseUrl.trim(), models)
+      await onSaveProvider(
+        activeProvider.provider,
+        providerLabel.trim() || activeProvider.provider,
+        apiKey.trim(),
+        baseUrl.trim().replace(/\/+$/, ''),
+        models,
+        normalizedDetails,
+        sanitizeEndpoints(editableEndpoints),
+        sanitizeEnvVars(editableEnvVars),
+        sanitizeBindings(editableAppBindings)
+      )
       setStatus('saved')
     } catch (error) {
       console.error(error)
@@ -179,7 +330,7 @@ export default function ProviderManager({
       return
     }
 
-    await onSaveProvider(normalized, '', '', [])
+    await onSaveProvider(normalized, normalized, '', '', [], DEFAULT_PROVIDER_DETAILS)
     setShowCreateProviderForm(false)
     setNewProviderId('')
   }
@@ -194,6 +345,70 @@ export default function ProviderManager({
       console.error(error)
     } finally {
       setDeletingProvider(null)
+    }
+  }
+
+  const runEndpointTest = async (targetUrl: string, endpointId?: string, headers?: string | null) => {
+    const normalizedUrl = targetUrl.trim().replace(/\/+$/, '')
+    if (!normalizedUrl) {
+      alert('请先填写请求地址')
+      return
+    }
+    if (endpointId) {
+      setTestingEndpointId(endpointId)
+    } else {
+      setTestingBaseUrl(true)
+    }
+    try {
+      const result = await invoke<EndpointSpeedTestResult>('test_provider_endpoint', {
+        url: normalizedUrl,
+        apiKey: apiKey.trim() || null,
+        headers: headers || null,
+        timeoutMs: 8000,
+      })
+      if (endpointId) {
+        setTestResults((prev) => ({
+          ...prev,
+          [endpointId]: result,
+        }))
+      } else {
+        setBaseUrlTestResult(result)
+      }
+    } catch (error) {
+      const fallback: EndpointSpeedTestResult = {
+        requested_url: normalizedUrl,
+        tested_url: null,
+        success: false,
+        status_code: null,
+        latency_ms: null,
+        error: String(error),
+      }
+      if (endpointId) {
+        setTestResults((prev) => ({
+          ...prev,
+          [endpointId]: fallback,
+        }))
+      } else {
+        setBaseUrlTestResult(fallback)
+      }
+    } finally {
+      if (endpointId) {
+        setTestingEndpointId(null)
+      } else {
+        setTestingBaseUrl(false)
+      }
+    }
+  }
+
+  const handleFormatSettingsJson = () => {
+    try {
+      const parsed = JSON.parse(details.settings_json || '{}')
+      setDetails((prev) => ({
+        ...prev,
+        settings_json: JSON.stringify(parsed, null, 2),
+      }))
+    } catch {
+      alert('配置 JSON 格式错误，无法格式化。')
     }
   }
 
@@ -363,9 +578,48 @@ export default function ProviderManager({
               <div className="helper-text">{formProfile.description}</div>
             </div>
 
+            <div className="provider-grid">
+              <div className="form-group">
+                <label htmlFor="provider-name">供应商名称</label>
+                <input
+                  id="provider-name"
+                  type="text"
+                  placeholder="例如：Claude 官方"
+                  value={providerLabel}
+                  onChange={(event) => setProviderLabel(event.target.value)}
+                />
+              </div>
+              <div className="form-group">
+                <label htmlFor="provider-notes">备注</label>
+                <input
+                  id="provider-notes"
+                  type="text"
+                  placeholder="例如：公司专用账号"
+                  value={details.notes}
+                  onChange={(event) =>
+                    setDetails((prev) => ({
+                      ...prev,
+                      notes: event.target.value,
+                    }))
+                  }
+                />
+              </div>
+            </div>
+
             <div className="form-group">
-              <label htmlFor="provider-name">服务名称</label>
-              <input id="provider-name" type="text" value={activeProvider.label} readOnly />
+              <label htmlFor="provider-website">官网链接</label>
+              <input
+                id="provider-website"
+                type="text"
+                placeholder="https://example.com（可选）"
+                value={details.website_url}
+                onChange={(event) =>
+                  setDetails((prev) => ({
+                    ...prev,
+                    website_url: event.target.value,
+                  }))
+                }
+              />
             </div>
 
             <div className="form-group">
@@ -374,7 +628,7 @@ export default function ProviderManager({
                 <input
                   id="provider-key"
                   type={showKey ? 'text' : 'password'}
-                  placeholder="输入 API Key"
+                  placeholder="只需要填这里，下方配置会自动填充"
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
                 />
@@ -390,7 +644,19 @@ export default function ProviderManager({
 
             {formProfile.showBaseUrl ? (
               <div className="form-group">
-                <label htmlFor="provider-base">{formProfile.baseUrlLabel}</label>
+                <div className="section-header">
+                  <label htmlFor="provider-base">{formProfile.baseUrlLabel || '请求地址'}</label>
+                  <button
+                    type="button"
+                    className="btn btn-link provider-mini-link"
+                    onClick={() => {
+                      setShowAdvanced(true)
+                      void runEndpointTest(baseUrl)
+                    }}
+                  >
+                    管理与测速
+                  </button>
+                </div>
                 <input
                   id="provider-base"
                   type="text"
@@ -398,8 +664,145 @@ export default function ProviderManager({
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
                 />
+                {baseUrlTestResult ? (
+                  <div
+                    className={`endpoint-test-result ${
+                      baseUrlTestResult.success ? 'success' : 'error'
+                    }`}
+                  >
+                    {baseUrlTestResult.success
+                      ? `测速成功：${baseUrlTestResult.latency_ms}ms（HTTP ${baseUrlTestResult.status_code ?? 200}）`
+                      : `测速失败：${baseUrlTestResult.error || '未知错误'}`}
+                  </div>
+                ) : null}
+                <div className="provider-tip">
+                  <span>💡</span>
+                  <span>{formProfile.baseUrlTip}</span>
+                  <button
+                    type="button"
+                    className="btn btn-link provider-mini-link"
+                    disabled={testingBaseUrl}
+                    onClick={() => void runEndpointTest(baseUrl)}
+                  >
+                    {testingBaseUrl ? '测速中...' : '立即测速'}
+                  </button>
+                </div>
               </div>
             ) : null}
+
+            {formProfile.showModels ? (
+              <>
+                <div className="provider-grid">
+                  <div className="form-group">
+                    <label htmlFor="main-model">主模型</label>
+                    <input
+                      id="main-model"
+                      type="text"
+                      value={details.main_model}
+                      onChange={(event) =>
+                        setDetails((prev) => ({
+                          ...prev,
+                          main_model: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="reasoning-model">推理模型 (Thinking)</label>
+                    <input
+                      id="reasoning-model"
+                      type="text"
+                      value={details.reasoning_model}
+                      onChange={(event) =>
+                        setDetails((prev) => ({
+                          ...prev,
+                          reasoning_model: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="haiku-model">Haiku 默认模型</label>
+                    <input
+                      id="haiku-model"
+                      type="text"
+                      value={details.default_haiku_model}
+                      onChange={(event) =>
+                        setDetails((prev) => ({
+                          ...prev,
+                          default_haiku_model: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="sonnet-model">Sonnet 默认模型</label>
+                    <input
+                      id="sonnet-model"
+                      type="text"
+                      value={details.default_sonnet_model}
+                      onChange={(event) =>
+                        setDetails((prev) => ({
+                          ...prev,
+                          default_sonnet_model: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="opus-model">Opus 默认模型</label>
+                    <input
+                      id="opus-model"
+                      type="text"
+                      value={details.default_opus_model}
+                      onChange={(event) =>
+                        setDetails((prev) => ({
+                          ...prev,
+                          default_opus_model: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="helper-text">可选：指定默认使用的 Claude 模型，留空则使用系统默认。</div>
+              </>
+            ) : null}
+
+            <div className="form-group">
+              <div className="section-header">
+                <label htmlFor="settings-json">配置 JSON</label>
+                <div className="provider-json-actions">
+                  <label className="inline-toggle">
+                    <input
+                      type="checkbox"
+                      checked={details.use_common_config}
+                      onChange={(event) =>
+                        setDetails((prev) => ({
+                          ...prev,
+                          use_common_config: event.target.checked,
+                        }))
+                      }
+                    />
+                    写入通用配置
+                  </label>
+                  <button type="button" className="btn btn-link provider-mini-link" onClick={handleFormatSettingsJson}>
+                    格式化
+                  </button>
+                </div>
+              </div>
+              <textarea
+                id="settings-json"
+                rows={8}
+                value={details.settings_json}
+                onChange={(event) =>
+                  setDetails((prev) => ({
+                    ...prev,
+                    settings_json: event.target.value,
+                  }))
+                }
+              />
+            </div>
 
             {formProfile.showModels ? (
               <div className="form-group">
@@ -487,32 +890,329 @@ export default function ProviderManager({
                 </div>
               ) : (
                 <div className="advanced-grid">
+                  <div className="advanced-card">
+                    <div className="advanced-title advanced-title-row">
+                      <span>模型测试配置</span>
+                      <label className="inline-toggle">
+                        <input
+                          type="checkbox"
+                          checked={details.test_config_enabled}
+                          onChange={(event) =>
+                            setDetails((prev) => ({
+                              ...prev,
+                              test_config_enabled: event.target.checked,
+                            }))
+                          }
+                        />
+                        使用单独配置
+                      </label>
+                    </div>
+                    <div className="advanced-list">
+                      <input
+                        type="text"
+                        className="compact-input"
+                        placeholder="测试模型（可选）"
+                        disabled={!details.test_config_enabled}
+                        value={details.test_model}
+                        onChange={(event) =>
+                          setDetails((prev) => ({
+                            ...prev,
+                            test_model: event.target.value,
+                          }))
+                        }
+                      />
+                      <div className="inline-fields">
+                        <input
+                          type="number"
+                          min={1}
+                          className="compact-input compact-input-sm"
+                          placeholder="超时(秒)"
+                          disabled={!details.test_config_enabled}
+                          value={details.test_timeout_secs ?? ''}
+                          onChange={(event) =>
+                            setDetails((prev) => ({
+                              ...prev,
+                              test_timeout_secs: event.target.value
+                                ? Number(event.target.value)
+                                : null,
+                            }))
+                          }
+                        />
+                        <input
+                          type="number"
+                          min={100}
+                          className="compact-input compact-input-sm"
+                          placeholder="降级阈值(ms)"
+                          disabled={!details.test_config_enabled}
+                          value={details.test_degraded_threshold_ms ?? ''}
+                          onChange={(event) =>
+                            setDetails((prev) => ({
+                              ...prev,
+                              test_degraded_threshold_ms: event.target.value
+                                ? Number(event.target.value)
+                                : null,
+                            }))
+                          }
+                        />
+                        <input
+                          type="number"
+                          min={0}
+                          className="compact-input compact-input-sm"
+                          placeholder="最大重试"
+                          disabled={!details.test_config_enabled}
+                          value={details.test_max_retries ?? ''}
+                          onChange={(event) =>
+                            setDetails((prev) => ({
+                              ...prev,
+                              test_max_retries: event.target.value
+                                ? Number(event.target.value)
+                                : null,
+                            }))
+                          }
+                        />
+                      </div>
+                      <input
+                        type="text"
+                        className="compact-input"
+                        placeholder="测试提示词（可选）"
+                        disabled={!details.test_config_enabled}
+                        value={details.test_prompt}
+                        onChange={(event) =>
+                          setDetails((prev) => ({
+                            ...prev,
+                            test_prompt: event.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div className="advanced-card">
+                    <div className="advanced-title advanced-title-row">
+                      <span>代理配置</span>
+                      <label className="inline-toggle">
+                        <input
+                          type="checkbox"
+                          checked={details.proxy_config_enabled}
+                          onChange={(event) =>
+                            setDetails((prev) => ({
+                              ...prev,
+                              proxy_config_enabled: event.target.checked,
+                            }))
+                          }
+                        />
+                        使用单独代理
+                      </label>
+                    </div>
+                    <div className="advanced-list">
+                      <input
+                        type="text"
+                        className="compact-input"
+                        placeholder="http://127.0.0.1:7890 / socks5://127.0.0.1:1080"
+                        disabled={!details.proxy_config_enabled}
+                        value={details.proxy_url}
+                        onChange={(event) =>
+                          setDetails((prev) => ({
+                            ...prev,
+                            proxy_url: event.target.value,
+                          }))
+                        }
+                      />
+                      <div className="inline-fields">
+                        <input
+                          type="text"
+                          className="compact-input"
+                          placeholder="用户名（可选）"
+                          disabled={!details.proxy_config_enabled}
+                          value={details.proxy_username}
+                          onChange={(event) =>
+                            setDetails((prev) => ({
+                              ...prev,
+                              proxy_username: event.target.value,
+                            }))
+                          }
+                        />
+                        <input
+                          type="password"
+                          className="compact-input"
+                          placeholder="密码（可选）"
+                          disabled={!details.proxy_config_enabled}
+                          value={details.proxy_password}
+                          onChange={(event) =>
+                            setDetails((prev) => ({
+                              ...prev,
+                              proxy_password: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+                  </div>
+
                   {visibleAdvancedCards.some((item) => item.id === 'endpoints') ? (
                     <div className="advanced-card">
-                      <div className="advanced-title">端点</div>
+                      <div className="advanced-title advanced-title-row">
+                        <span>端点</span>
+                        <button
+                          type="button"
+                          className="btn btn-link"
+                          onClick={() =>
+                            setEditableEndpoints((prev) => [
+                              ...prev,
+                              {
+                                id: createLocalId(),
+                                base_url: '',
+                                headers: null,
+                                timeout_ms: null,
+                                proxy_url: null,
+                                is_primary: prev.length === 0,
+                              },
+                            ])
+                          }
+                        >
+                          + 添加
+                        </button>
+                      </div>
                       {endpoints.length === 0 ? (
                         <div className="helper-text">暂无端点配置。</div>
                       ) : (
                         <div className="advanced-list">
-                          {endpoints.map((endpoint) => (
+                          {endpoints.map((endpoint, index) => (
                             <div key={endpoint.id} className="endpoint-item">
-                              <div className="endpoint-header">
-                                <span
-                                  className={`endpoint-badge ${
-                                    endpoint.is_primary ? 'primary' : ''
+                              <div className="inline-fields">
+                                <input
+                                  type="text"
+                                  className="compact-input"
+                                  placeholder="https://api.example.com/v1"
+                                  value={endpoint.base_url}
+                                  onChange={(event) =>
+                                    setEditableEndpoints((prev) =>
+                                      prev.map((item) =>
+                                        item.id === endpoint.id
+                                          ? { ...item, base_url: event.target.value }
+                                          : item
+                                      )
+                                    )
+                                  }
+                                />
+                              </div>
+                              <div className="inline-fields">
+                                <input
+                                  type="text"
+                                  className="compact-input"
+                                  placeholder="Headers (可选)"
+                                  value={endpoint.headers || ''}
+                                  onChange={(event) =>
+                                    setEditableEndpoints((prev) =>
+                                      prev.map((item) =>
+                                        item.id === endpoint.id
+                                          ? { ...item, headers: event.target.value || null }
+                                          : item
+                                      )
+                                    )
+                                  }
+                                />
+                                <input
+                                  type="number"
+                                  min={0}
+                                  className="compact-input compact-input-sm"
+                                  placeholder="超时(ms)"
+                                  value={endpoint.timeout_ms ?? ''}
+                                  onChange={(event) =>
+                                    setEditableEndpoints((prev) =>
+                                      prev.map((item) =>
+                                        item.id === endpoint.id
+                                          ? {
+                                              ...item,
+                                              timeout_ms: event.target.value
+                                                ? Number(event.target.value)
+                                                : null,
+                                            }
+                                          : item
+                                      )
+                                    )
+                                  }
+                                />
+                              </div>
+                              <div className="inline-fields">
+                                <input
+                                  type="text"
+                                  className="compact-input"
+                                  placeholder="代理 URL (可选)"
+                                  value={endpoint.proxy_url || ''}
+                                  onChange={(event) =>
+                                    setEditableEndpoints((prev) =>
+                                      prev.map((item) =>
+                                        item.id === endpoint.id
+                                          ? { ...item, proxy_url: event.target.value || null }
+                                          : item
+                                      )
+                                    )
+                                  }
+                                />
+                              </div>
+                              <div className="item-actions">
+                                <label className="inline-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={endpoint.is_primary}
+                                    onChange={(event) =>
+                                      setEditableEndpoints((prev) =>
+                                        prev.map((item, itemIndex) => ({
+                                          ...item,
+                                          is_primary: event.target.checked
+                                            ? item.id === endpoint.id
+                                            : itemIndex === 0,
+                                        }))
+                                      )
+                                    }
+                                  />
+                                  主端点
+                                </label>
+                                <button
+                                  type="button"
+                                  className="btn btn-link"
+                                  disabled={testingEndpointId === endpoint.id}
+                                  onClick={() =>
+                                    void runEndpointTest(
+                                      endpoint.base_url,
+                                      endpoint.id,
+                                      endpoint.headers || null
+                                    )
+                                  }
+                                >
+                                  {testingEndpointId === endpoint.id ? '测速中...' : '测速'}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-link danger-link"
+                                  onClick={() =>
+                                    setEditableEndpoints((prev) => {
+                                      const next = prev.filter((item) => item.id !== endpoint.id)
+                                      if (next.length > 0 && !next.some((item) => item.is_primary)) {
+                                        next[0] = { ...next[0], is_primary: true }
+                                      }
+                                      return next
+                                    })
+                                  }
+                                >
+                                  删除
+                                </button>
+                                <span className="item-index">#{index + 1}</span>
+                              </div>
+                              {testResults[endpoint.id] ? (
+                                <div
+                                  className={`endpoint-test-result ${
+                                    testResults[endpoint.id].success ? 'success' : 'error'
                                   }`}
                                 >
-                                  {endpoint.is_primary ? '主端点' : '备用端点'}
-                                </span>
-                                <span className="endpoint-url">{endpoint.base_url}</span>
-                              </div>
-                              <div className="endpoint-meta">
-                                <span>超时 {formatTimeout(endpoint.timeout_ms)}</span>
-                                {endpoint.proxy_url && <span>代理 {endpoint.proxy_url}</span>}
-                              </div>
-                              {endpoint.headers && (
-                                <div className="endpoint-meta">Headers {endpoint.headers}</div>
-                              )}
+                                  {testResults[endpoint.id].success
+                                    ? `延迟 ${testResults[endpoint.id].latency_ms}ms（HTTP ${
+                                        testResults[endpoint.id].status_code ?? 200
+                                      }）`
+                                    : `测速失败：${testResults[endpoint.id].error || '未知错误'}`}
+                                </div>
+                              ) : null}
                             </div>
                           ))}
                         </div>
@@ -522,19 +1222,92 @@ export default function ProviderManager({
 
                   {visibleAdvancedCards.some((item) => item.id === 'env') ? (
                     <div className="advanced-card">
-                      <div className="advanced-title">环境变量</div>
+                      <div className="advanced-title advanced-title-row">
+                        <span>环境变量</span>
+                        <button
+                          type="button"
+                          className="btn btn-link"
+                          onClick={() =>
+                            setEditableEnvVars((prev) => [
+                              ...prev,
+                              {
+                                id: createLocalId(),
+                                key: '',
+                                value: '',
+                                is_secret: true,
+                              },
+                            ])
+                          }
+                        >
+                          + 添加
+                        </button>
+                      </div>
                       {envVars.length === 0 ? (
                         <div className="helper-text">暂无环境变量。</div>
                       ) : (
                         <div className="advanced-list">
                           {envVars.map((envVar) => (
                             <div key={envVar.id} className="env-item">
-                              <div className="env-key">{envVar.key}</div>
-                              <div className="env-meta">
-                                <span className={`env-tag ${envVar.is_secret ? 'secret' : 'plain'}`}>
-                                  {envVar.is_secret ? '密钥' : '明文'}
-                                </span>
-                                <span className="env-value">{renderEnvValue(envVar)}</span>
+                              <div className="inline-fields">
+                                <input
+                                  type="text"
+                                  className="compact-input"
+                                  placeholder="变量名，如 OPENAI_API_KEY"
+                                  value={envVar.key}
+                                  onChange={(event) =>
+                                    setEditableEnvVars((prev) =>
+                                      prev.map((item) =>
+                                        item.id === envVar.id
+                                          ? { ...item, key: event.target.value }
+                                          : item
+                                      )
+                                    )
+                                  }
+                                />
+                                <input
+                                  type={envVar.is_secret ? 'password' : 'text'}
+                                  className="compact-input"
+                                  placeholder="变量值"
+                                  value={envVar.value}
+                                  onChange={(event) =>
+                                    setEditableEnvVars((prev) =>
+                                      prev.map((item) =>
+                                        item.id === envVar.id
+                                          ? { ...item, value: event.target.value }
+                                          : item
+                                      )
+                                    )
+                                  }
+                                />
+                              </div>
+                              <div className="item-actions">
+                                <label className="inline-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={envVar.is_secret}
+                                    onChange={(event) =>
+                                      setEditableEnvVars((prev) =>
+                                        prev.map((item) =>
+                                          item.id === envVar.id
+                                            ? { ...item, is_secret: event.target.checked }
+                                            : item
+                                        )
+                                      )
+                                    }
+                                  />
+                                  密钥字段
+                                </label>
+                                <button
+                                  type="button"
+                                  className="btn btn-link danger-link"
+                                  onClick={() =>
+                                    setEditableEnvVars((prev) =>
+                                      prev.filter((item) => item.id !== envVar.id)
+                                    )
+                                  }
+                                >
+                                  删除
+                                </button>
                               </div>
                             </div>
                           ))}
@@ -545,21 +1318,92 @@ export default function ProviderManager({
 
                   {visibleAdvancedCards.some((item) => item.id === 'bindings') ? (
                     <div className="advanced-card">
-                      <div className="advanced-title">应用绑定</div>
+                      <div className="advanced-title advanced-title-row">
+                        <span>应用绑定</span>
+                        <button
+                          type="button"
+                          className="btn btn-link"
+                          onClick={() =>
+                            setEditableAppBindings((prev) => [
+                              ...prev,
+                              {
+                                id: createLocalId(),
+                                app_type: '',
+                                config_path: '',
+                                enabled: true,
+                              },
+                            ])
+                          }
+                        >
+                          + 添加
+                        </button>
+                      </div>
                       {appBindings.length === 0 ? (
                         <div className="helper-text">暂无应用绑定。</div>
                       ) : (
                         <div className="advanced-list">
                           {appBindings.map((binding) => (
                             <div key={binding.id} className="binding-item">
-                              <div className="binding-name">{binding.app_type}</div>
-                              <div className="binding-meta">
-                                <span className={`binding-tag ${binding.enabled ? 'on' : 'off'}`}>
-                                  {binding.enabled ? '已启用' : '未启用'}
-                                </span>
-                                <span className="binding-path">
-                                  {binding.config_path ? binding.config_path : '未配置路径'}
-                                </span>
+                              <div className="inline-fields">
+                                <input
+                                  type="text"
+                                  className="compact-input compact-input-sm"
+                                  placeholder="app_type，如 codex"
+                                  value={binding.app_type}
+                                  onChange={(event) =>
+                                    setEditableAppBindings((prev) =>
+                                      prev.map((item) =>
+                                        item.id === binding.id
+                                          ? { ...item, app_type: event.target.value }
+                                          : item
+                                      )
+                                    )
+                                  }
+                                />
+                                <input
+                                  type="text"
+                                  className="compact-input"
+                                  placeholder="配置路径，可留空"
+                                  value={binding.config_path}
+                                  onChange={(event) =>
+                                    setEditableAppBindings((prev) =>
+                                      prev.map((item) =>
+                                        item.id === binding.id
+                                          ? { ...item, config_path: event.target.value }
+                                          : item
+                                      )
+                                    )
+                                  }
+                                />
+                              </div>
+                              <div className="item-actions">
+                                <label className="inline-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={binding.enabled}
+                                    onChange={(event) =>
+                                      setEditableAppBindings((prev) =>
+                                        prev.map((item) =>
+                                          item.id === binding.id
+                                            ? { ...item, enabled: event.target.checked }
+                                            : item
+                                        )
+                                      )
+                                    }
+                                  />
+                                  启用
+                                </label>
+                                <button
+                                  type="button"
+                                  className="btn btn-link danger-link"
+                                  onClick={() =>
+                                    setEditableAppBindings((prev) =>
+                                      prev.filter((item) => item.id !== binding.id)
+                                    )
+                                  }
+                                >
+                                  删除
+                                </button>
                               </div>
                             </div>
                           ))}
@@ -620,6 +1464,7 @@ function getFormProfile(category: ProviderCategory | null) {
       apiKeyLabel: 'API Key',
       showBaseUrl: true,
       baseUrlLabel: '接口地址（可选）',
+      baseUrlTip: '可选：填写翻译服务的端点地址，不要以斜杠结尾。',
       showModels: false,
       modelLabel: '',
       modelPlaceholder: '',
@@ -632,6 +1477,7 @@ function getFormProfile(category: ProviderCategory | null) {
       apiKeyLabel: 'API Key',
       showBaseUrl: true,
       baseUrlLabel: '接口地址',
+      baseUrlTip: '填写搜索服务 API 端点地址，不要以斜杠结尾。',
       showModels: false,
       modelLabel: '',
       modelPlaceholder: '',
@@ -644,6 +1490,7 @@ function getFormProfile(category: ProviderCategory | null) {
       apiKeyLabel: 'API Key',
       showBaseUrl: true,
       baseUrlLabel: '接口地址',
+      baseUrlTip: '填写 OCR 服务 API 端点地址，不要以斜杠结尾。',
       showModels: false,
       modelLabel: '',
       modelPlaceholder: '',
@@ -656,6 +1503,7 @@ function getFormProfile(category: ProviderCategory | null) {
       apiKeyLabel: 'API Key / Token',
       showBaseUrl: true,
       baseUrlLabel: '接口地址',
+      baseUrlTip: '按供应商文档填写服务端点地址，不要以斜杠结尾。',
       showModels: false,
       modelLabel: '',
       modelPlaceholder: '',
@@ -667,6 +1515,7 @@ function getFormProfile(category: ProviderCategory | null) {
     apiKeyLabel: 'API Key',
     showBaseUrl: true,
     baseUrlLabel: 'API Base URL',
+    baseUrlTip: '填写兼容 Claude API 的服务端点地址，不要以斜杠结尾。',
     showModels: true,
     modelLabel: '模型列表',
     modelPlaceholder: '输入模型名称，例如 gpt-4o-mini',
@@ -682,14 +1531,65 @@ const collectUsagePaths = (
   return buildProviderContext(provider, credentials, projectLabelsByCredential, projects).paths
 }
 
-const formatTimeout = (timeoutMs?: number | null) => {
-  if (!timeoutMs || timeoutMs <= 0) return '默认'
-  return `${Math.round(timeoutMs / 1000)}s`
+const sanitizeEndpoints = (items: Array<ProviderEndpointInput>) => {
+  const normalized = items
+    .map((item) => ({
+      id: item.id,
+      base_url: item.base_url.trim(),
+      headers: item.headers?.trim() || null,
+      timeout_ms: item.timeout_ms && item.timeout_ms > 0 ? item.timeout_ms : null,
+      proxy_url: item.proxy_url?.trim() || null,
+      is_primary: item.is_primary,
+    }))
+    .filter((item) => item.base_url.length > 0)
+
+  if (normalized.length > 0 && !normalized.some((item) => item.is_primary)) {
+    normalized[0].is_primary = true
+  }
+  return normalized
 }
 
-const renderEnvValue = (envVar: ProviderEnvVar) => {
-  if (envVar.is_secret) {
-    return envVar.value && envVar.value.trim() ? '已设置' : '未设置'
-  }
-  return envVar.value && envVar.value.trim() ? envVar.value : '未设置'
+const sanitizeEnvVars = (items: Array<ProviderEnvVarInput>) => {
+  return items
+    .map((item) => ({
+      id: item.id,
+      key: item.key.trim(),
+      value: item.value || '',
+      is_secret: item.is_secret,
+    }))
+    .filter((item) => item.key.length > 0)
+}
+
+const sanitizeBindings = (items: Array<ProviderAppBindingInput>) => {
+  const seen = new Set<string>()
+  return items
+    .map((item) => ({
+      id: item.id,
+      app_type: item.app_type.trim(),
+      config_path: item.config_path.trim(),
+      enabled: item.enabled,
+    }))
+    .filter((item) => {
+      if (!item.app_type) return false
+      const key = item.app_type.toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+}
+
+const serializeEndpoints = (items: Array<ProviderEndpointInput>) => {
+  return JSON.stringify(sanitizeEndpoints(items))
+}
+
+const serializeEnvVars = (items: Array<ProviderEnvVarInput>) => {
+  return JSON.stringify(sanitizeEnvVars(items))
+}
+
+const serializeBindings = (items: Array<ProviderAppBindingInput>) => {
+  return JSON.stringify(sanitizeBindings(items))
+}
+
+const serializeDetails = (details: ProviderDetails) => {
+  return JSON.stringify(sanitizeDetails(details))
 }

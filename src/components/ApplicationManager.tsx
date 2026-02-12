@@ -63,7 +63,7 @@ const APP_QUICK_PROVIDER_PRESETS: Record<string, QuickProviderPreset[]> = {
     { provider: 'anthropic', label: 'Claude Official', model: 'claude-sonnet-4-20250514' },
     { provider: 'deepseek', label: 'DeepSeek', model: 'deepseek-chat' },
     { provider: 'glm', label: 'Zhipu GLM', model: 'glm-4.7' },
-    { provider: 'kimi', label: 'Kimi', model: 'kimi-k2-0905-preview' },
+    { provider: 'kimi-for-coding', label: 'Kimi for Coding', model: 'kimi-for-coding' },
   ],
   codex: [
     { provider: 'openai', label: 'OpenAI Official', model: 'gpt-5' },
@@ -220,6 +220,8 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
   const [loading, setLoading] = useState(true)
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [selectedAppType, setSelectedAppType] = useState('')
 
   const [appSnapshots, setAppSnapshots] = useState<Record<string, IntegrationConfigSnapshot>>({})
   const [appDrafts, setAppDrafts] = useState<Record<string, AppConfigDraft>>({})
@@ -232,6 +234,34 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
   const providerSelectGroups = useMemo(() => buildProviderSelectGroups(providers), [providers])
   const providerValueSet = useMemo(() => new Set(providers.map((item) => item.provider)), [providers])
   const routeByApp = useMemo(() => new Map(routes.map((route) => [route.app_type, route])), [routes])
+  const filteredIntegrations = useMemo(() => {
+    const keyword = searchQuery.trim().toLowerCase()
+    if (!keyword) return integrations
+    return integrations.filter((integration) => {
+      const label = appLabel(integration.app_type).toLowerCase()
+      const appType = integration.app_type.toLowerCase()
+      const path = (integration.config_path || '').toLowerCase()
+      return label.includes(keyword) || appType.includes(keyword) || path.includes(keyword)
+    })
+  }, [integrations, searchQuery])
+
+  const selectedIntegration = useMemo(() => {
+    if (filteredIntegrations.length === 0) return null
+    return (
+      filteredIntegrations.find((integration) => integration.app_type === selectedAppType) ||
+      filteredIntegrations[0]
+    )
+  }, [filteredIntegrations, selectedAppType])
+
+  useEffect(() => {
+    if (filteredIntegrations.length === 0) {
+      setSelectedAppType('')
+      return
+    }
+    if (!filteredIntegrations.some((integration) => integration.app_type === selectedAppType)) {
+      setSelectedAppType(filteredIntegrations[0].app_type)
+    }
+  }, [filteredIntegrations, selectedAppType])
 
   const loadManagedConfig = async (appType: string) => {
     const snapshot = await invoke<IntegrationConfigSnapshot>('get_integration_config_snapshot', {
@@ -576,52 +606,97 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
     <section className="panel app-manager-panel">
       <div className="panel-header">
         <h2>应用路由</h2>
-        <span className="panel-count">{integrations.length}</span>
+        <span className="panel-count">{filteredIntegrations.length}/{integrations.length}</span>
       </div>
+      <input
+        type="text"
+        className="app-manager-search"
+        placeholder="搜索应用名称、类型、配置路径"
+        value={searchQuery}
+        onChange={(event) => setSearchQuery(event.target.value)}
+      />
       {notice ? <div className="app-manager-notice">{notice}</div> : null}
-      <div className="app-manager-list">
-        {integrations.map((integration) => {
-          const appType = integration.app_type
-          const draft = drafts[appType] || {
-            provider: routeByApp.get(appType)?.provider || fallbackProvider(appType),
-            model: routeByApp.get(appType)?.model || '',
-          }
-          const currentRoute = routeByApp.get(appType)
-          const selectedProvider = providers.find((provider) => provider.provider === draft.provider) || null
-          const modelOptions = selectedProvider?.models || []
-          const quickModelOptions = uniqueNonEmpty([
-            ...modelOptions.slice(0, 10),
-            ...(APP_MODEL_HINTS[appType] || []),
-            draft.model,
-            currentRoute?.model || '',
-          ]).slice(0, 10)
-          const quickProviderPresets = APP_QUICK_PROVIDER_PRESETS[appType] || []
+      {filteredIntegrations.length === 0 ? (
+        <div className="panel-empty">
+          <p>{integrations.length === 0 ? '暂无应用配置' : '没有匹配的应用'}</p>
+        </div>
+      ) : (
+        <div className="app-manager-shell">
+          <aside className="app-manager-nav">
+            <div className="app-manager-nav-list">
+              {filteredIntegrations.map((integration) => {
+                const appType = integration.app_type
+                const currentRoute = routeByApp.get(appType)
+                const summary = currentRoute
+                  ? `${getProviderDisplayName(currentRoute.provider)}${currentRoute.model ? ` · ${currentRoute.model}` : ''}`
+                  : '尚未配置路由'
 
-          const saving = busyKey === `route:${appType}`
-          const importing = busyKey === `route-import:${appType}`
-          const toggling = busyKey === `integration:${appType}`
-          const isManaged = MANAGED_CONFIG_APPS.has(appType)
-          const activeTab: AppConfigTab = appTabByType[appType] || 'model'
-          const snapshot = appSnapshots[appType]
-          const appDraft = appDrafts[appType]
-          const mcpEntries = appMcpEntries[appType] || []
-          const skillEntries = appSkillEntries[appType] || []
-          const otherRoot = asRecord(snapshot?.config)
-          const otherCount = Object.keys(
-            asRecord(
-              Object.fromEntries(
-                Object.entries(otherRoot).filter(([key]) => {
-                  if (key === '$schema' || key === 'provider' || key === 'model') return false
-                  if (key === 'mcp' || key === 'mcpServers' || key === 'mcps') return false
-                  if (key === 'skill' || key === 'skills') return false
-                  return true
-                })
+                return (
+                  <button
+                    key={appType}
+                    type="button"
+                    className={`app-manager-nav-item ${selectedIntegration?.app_type === appType ? 'active' : ''}`}
+                    onClick={() => setSelectedAppType(appType)}
+                  >
+                    <div className="app-manager-nav-title">{appLabel(appType)}</div>
+                    <div className="app-manager-nav-subtitle">{summary}</div>
+                    <div className="app-manager-nav-badges">
+                      <span className={`app-manager-badge ${integration.detected ? 'running' : 'stopped'}`}>
+                        {integration.detected ? '已检测' : '未检测'}
+                      </span>
+                      <span className={`app-manager-badge ${integration.enabled ? 'enabled' : 'disabled'}`}>
+                        {integration.enabled ? '已启用' : '未启用'}
+                      </span>
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+          </aside>
+
+          {selectedIntegration ? (() => {
+            const integration = selectedIntegration
+            const appType = integration.app_type
+            const draft = drafts[appType] || {
+              provider: routeByApp.get(appType)?.provider || fallbackProvider(appType),
+              model: routeByApp.get(appType)?.model || '',
+            }
+            const currentRoute = routeByApp.get(appType)
+            const selectedProvider = providers.find((provider) => provider.provider === draft.provider) || null
+            const modelOptions = selectedProvider?.models || []
+            const quickModelOptions = uniqueNonEmpty([
+              ...modelOptions.slice(0, 10),
+              ...(APP_MODEL_HINTS[appType] || []),
+              draft.model,
+              currentRoute?.model || '',
+            ]).slice(0, 10)
+            const quickProviderPresets = APP_QUICK_PROVIDER_PRESETS[appType] || []
+
+            const saving = busyKey === `route:${appType}`
+            const importing = busyKey === `route-import:${appType}`
+            const toggling = busyKey === `integration:${appType}`
+            const isManaged = MANAGED_CONFIG_APPS.has(appType)
+            const activeTab: AppConfigTab = appTabByType[appType] || 'model'
+            const snapshot = appSnapshots[appType]
+            const appDraft = appDrafts[appType]
+            const mcpEntries = appMcpEntries[appType] || []
+            const skillEntries = appSkillEntries[appType] || []
+            const otherRoot = asRecord(snapshot?.config)
+            const otherCount = Object.keys(
+              asRecord(
+                Object.fromEntries(
+                  Object.entries(otherRoot).filter(([key]) => {
+                    if (key === '$schema' || key === 'provider' || key === 'model') return false
+                    if (key === 'mcp' || key === 'mcpServers' || key === 'mcps') return false
+                    if (key === 'skill' || key === 'skills') return false
+                    return true
+                  })
+                )
               )
-            )
-          ).length
+            ).length
 
-          return (
-            <article key={appType} className="app-manager-item">
+            return (
+            <article key={appType} className="app-manager-item app-manager-detail-item">
               <div className="app-manager-head">
                 <div>
                   <div className="app-manager-title">{appLabel(appType)}</div>
@@ -1010,9 +1085,10 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
                 </div>
               ) : null}
             </article>
-          )
-        })}
-      </div>
+            )
+          })() : null}
+        </div>
+      )}
     </section>
   )
 }

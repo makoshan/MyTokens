@@ -18,6 +18,8 @@ interface ProjectManagerProps {
   projects?: Project[]
   projectLabelsByCredential: Record<string, string>
   masterPassword: string
+  focusProjectName?: string
+  focusProjectToken?: number
   onProjectsChanged?: (projects: Project[]) => void
   onError: (msg: string) => void
 }
@@ -40,6 +42,8 @@ export default function ProjectManager({
   projects: initialProjects = [],
   projectLabelsByCredential,
   masterPassword,
+  focusProjectName,
+  focusProjectToken,
   onProjectsChanged,
   onError,
 }: ProjectManagerProps) {
@@ -48,6 +52,7 @@ export default function ProjectManager({
   const [scanning, setScanning] = useState(false)
   const [scanStatus, setScanStatus] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
+  const [selectedProjectId, setSelectedProjectId] = useState('')
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [editingProject, setEditingProject] = useState<Project | null>(null)
   const [formName, setFormName] = useState('')
@@ -62,6 +67,13 @@ export default function ProjectManager({
   useEffect(() => {
     setProjects(initialProjects)
   }, [initialProjects])
+
+  useEffect(() => {
+    const focus = focusProjectName?.trim()
+    if (!focus) return
+    setSearchQuery(focus)
+    setScanStatus(`已定位到项目：${focus}`)
+  }, [focusProjectName, focusProjectToken])
 
   async function initializeProjects() {
     if (!masterPassword) return
@@ -259,6 +271,21 @@ export default function ProjectManager({
     })
   }, [projects, searchQuery, sourceDerivedProjects])
 
+  const selectedProject = useMemo(() => {
+    if (displayedProjects.length === 0) return null
+    return displayedProjects.find((project) => project.id === selectedProjectId) || displayedProjects[0]
+  }, [displayedProjects, selectedProjectId])
+
+  useEffect(() => {
+    if (displayedProjects.length === 0) {
+      setSelectedProjectId('')
+      return
+    }
+    if (!displayedProjects.some((project) => project.id === selectedProjectId)) {
+      setSelectedProjectId(displayedProjects[0].id)
+    }
+  }, [displayedProjects, selectedProjectId])
+
   const getCredentialLabel = (id: string | null) => {
     if (!id) return '未绑定默认密钥'
     const cred = credentials.find((item) => item.id === id)
@@ -270,7 +297,10 @@ export default function ProjectManager({
     <div className="projects-page">
       <div className="projects-toolbar">
         <div>
-          <h2>项目管理</h2>
+          <div className="projects-title-row">
+            <h2>项目管理</h2>
+            <span className="panel-count">{displayedProjects.length}/{projects.length + sourceDerivedProjects.length}</span>
+          </div>
           <p>管理项目目录，并绑定默认密钥。会自动扫描 Claude 配置里的项目。</p>
         </div>
         <div className="projects-toolbar-actions">
@@ -311,8 +341,37 @@ export default function ProjectManager({
           )}
         </div>
       ) : (
-        <div className="projects-grid">
-          {displayedProjects.map((project) => {
+        <div className="projects-shell">
+          <section className="panel projects-list-panel">
+            <div className="panel-header">
+              <h2>项目列表</h2>
+              <span className="panel-count">{displayedProjects.length}</span>
+            </div>
+            <div className="projects-list">
+              {displayedProjects.map((project) => {
+                const isSourceDerived = project.id.startsWith('source:')
+                return (
+                  <button
+                    key={project.id}
+                    type="button"
+                    className={`projects-list-item ${selectedProject?.id === project.id ? 'active' : ''}`}
+                    onClick={() => setSelectedProjectId(project.id)}
+                  >
+                    <div className="projects-list-title-row">
+                      <span className="projects-list-title">{project.name}</span>
+                      {isSourceDerived ? <span className="project-source-badge">来源</span> : null}
+                    </div>
+                    <span className="projects-list-path" title={project.path}>
+                      {project.path || '无路径'}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </section>
+
+          {selectedProject ? (() => {
+            const project = selectedProject
             const isSourceDerived = project.id.startsWith('source:')
             const alias = project.name.trim().toLowerCase()
             const linkedCredentials = isSourceDerived
@@ -321,96 +380,88 @@ export default function ProjectManager({
             const sourceCount = isSourceDerived ? sourceGroups[alias]?.sources.length || 0 : 0
 
             return (
-            <article
-              key={project.id}
-              className={`project-card ${isSourceDerived ? 'source-derived' : ''}`}
-            >
-              <div className="project-card-header">
-                <div>
-                  <div className="project-title-row">
-                    <h3>{project.name}</h3>
-                    {isSourceDerived && <span className="project-source-badge">来源路径</span>}
-                  </div>
-                  {isSourceDerived ? (
-                    <div className="project-path-text" title={project.path}>
-                      {project.path}
+              <article className={`panel project-card ${isSourceDerived ? 'source-derived' : ''}`}>
+                <div className="project-card-header">
+                  <div>
+                    <div className="project-title-row">
+                      <h3>{project.name}</h3>
+                      {isSourceDerived && <span className="project-source-badge">来源路径</span>}
                     </div>
-                  ) : (
-                    <button
-                      type="button"
-                      className="project-path-btn"
-                      title={project.path}
-                      onClick={() => handleOpenFolder(project.path)}
-                    >
-                      {project.path}
-                    </button>
-                  )}
-                </div>
-                {!isSourceDerived && (
-                  <div className="project-card-actions">
-                    <button
-                      type="button"
-                      className="btn btn-secondary project-action-btn"
-                      onClick={() => openEditModal(project)}
-                    >
-                      编辑
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary project-action-btn danger"
-                      onClick={() => handleDelete(project.id)}
-                    >
-                      删除
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              <div className="project-meta">
-                <span className="project-meta-label">默认密钥</span>
-                <span className="project-meta-value">
-                  {isSourceDerived
-                    ? `由来源路径推断${sourceCount > 1 ? `（${sourceCount} 条来源）` : ''}`
-                    : getCredentialLabel(project.credential_id)}
-                </span>
-              </div>
-
-              <div className="project-meta">
-                <span className="project-meta-label">
-                  关联密钥 ({linkedCredentials.length})
-                </span>
-                {linkedCredentials.length ? (
-                  <div className="project-linked-list">
-                    {linkedCredentials.slice(0, 4).map((cred) => (
-                      <span key={cred.id} className="project-linked-item" title={cred.name}>
-                        {cred.name}
-                      </span>
-                    ))}
-                    {linkedCredentials.length > 4 && (
-                      <span className="project-linked-item muted">
-                        +{linkedCredentials.length - 4}
-                      </span>
+                    {isSourceDerived ? (
+                      <div className="project-path-text" title={project.path}>
+                        {project.path}
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="project-path-btn"
+                        title={project.path}
+                        onClick={() => handleOpenFolder(project.path)}
+                      >
+                        {project.path}
+                      </button>
                     )}
                   </div>
-                ) : (
-                  <span className="project-meta-value muted">暂无关联密钥</span>
-                )}
-              </div>
-
-              {!isSourceDerived && (
-                <div className="project-footer">
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    onClick={() => handleOpenFolder(project.path)}
-                  >
-                    打开目录
-                  </button>
+                  {!isSourceDerived && (
+                    <div className="project-card-actions">
+                      <button
+                        type="button"
+                        className="btn btn-secondary project-action-btn"
+                        onClick={() => openEditModal(project)}
+                      >
+                        编辑
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary project-action-btn danger"
+                        onClick={() => handleDelete(project.id)}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  )}
                 </div>
-              )}
-            </article>
+
+                <div className="project-meta">
+                  <span className="project-meta-label">默认密钥</span>
+                  <span className="project-meta-value">
+                    {isSourceDerived
+                      ? `由来源路径推断${sourceCount > 1 ? `（${sourceCount} 条来源）` : ''}`
+                      : getCredentialLabel(project.credential_id)}
+                  </span>
+                </div>
+
+                <div className="project-meta">
+                  <span className="project-meta-label">
+                    关联密钥 ({linkedCredentials.length})
+                  </span>
+                  {linkedCredentials.length ? (
+                    <div className="project-linked-list">
+                      {linkedCredentials.map((cred) => (
+                        <span key={cred.id} className="project-linked-item" title={cred.name}>
+                          {cred.name}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="project-meta-value muted">暂无关联密钥</span>
+                  )}
+                </div>
+
+                {!isSourceDerived && (
+                  <div className="project-footer">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => handleOpenFolder(project.path)}
+                    >
+                      打开目录
+                    </button>
+                  </div>
+                )}
+              </article>
             )
-          })}
+          })() : null}
         </div>
       )}
 

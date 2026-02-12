@@ -55,15 +55,24 @@ pub async fn refresh_all_providers(
                     .ok()
                     .filter(|v| !v.trim().is_empty())
             });
-        let amp_cli_path = find_credential_value(&credentials, "AMP_CLI_PATH")
-            .or_else(|| std::env::var("AMP_CLI_PATH").ok().filter(|v| !v.trim().is_empty()));
-        let gemini_cli_path = find_credential_value(&credentials, "GEMINI_CLI_PATH")
-            .or_else(|| std::env::var("GEMINI_CLI_PATH").ok().filter(|v| !v.trim().is_empty()));
-        let kimi_cli_path = find_credential_value(&credentials, "KIMI_CLI_PATH")
-            .or_else(|| {
-                find_credential_value(&credentials, "KIMI_CODING_CLI_PATH")
-                    .or_else(|| std::env::var("KIMI_CLI_PATH").ok().filter(|v| !v.trim().is_empty()))
+        let amp_cli_path = find_credential_value(&credentials, "AMP_CLI_PATH").or_else(|| {
+            std::env::var("AMP_CLI_PATH")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        });
+        let gemini_cli_path =
+            find_credential_value(&credentials, "GEMINI_CLI_PATH").or_else(|| {
+                std::env::var("GEMINI_CLI_PATH")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
             });
+        let kimi_cli_path = find_credential_value(&credentials, "KIMI_CLI_PATH").or_else(|| {
+            find_credential_value(&credentials, "KIMI_CODING_CLI_PATH").or_else(|| {
+                std::env::var("KIMI_CLI_PATH")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+            })
+        });
         (
             vault.get_provider_config("openai"),
             vault.get_provider_config("anthropic"),
@@ -970,6 +979,30 @@ fn claude_quota_meta(raw_key: &str) -> (String, String) {
     }
 }
 
+fn claude_quota_key_from_payload(payload: &Value, fallback: &str) -> String {
+    value_by_keys(
+        payload,
+        &[
+            "key",
+            "id",
+            "name",
+            "type",
+            "window",
+            "window_type",
+            "windowType",
+            "quota_type",
+            "quotaType",
+            "model",
+            "label",
+        ],
+    )
+    .and_then(|v| v.as_str())
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(|value| value.to_string())
+    .unwrap_or_else(|| fallback.to_string())
+}
+
 fn push_claude_quota(
     quotas: &mut Vec<UsageQuota>,
     seen: &mut HashSet<String>,
@@ -1074,6 +1107,18 @@ async fn probe_claude_oauth() -> Result<UsageSnapshot, String> {
     ];
 
     for root in roots.iter().flatten() {
+        if let Some(arr) = root.as_array() {
+            for (idx, payload) in arr.iter().enumerate() {
+                if !payload.is_object() {
+                    continue;
+                }
+                let key = claude_quota_key_from_payload(payload, &format!("window_{}", idx + 1));
+                let (quota_type, label) = claude_quota_meta(&key);
+                push_claude_quota(&mut quotas, &mut seen, quota_type, label, payload);
+            }
+            continue;
+        }
+
         for key in known_keys {
             if let Some(payload) = root.get(key) {
                 let (quota_type, label) = claude_quota_meta(key);
@@ -1083,6 +1128,18 @@ async fn probe_claude_oauth() -> Result<UsageSnapshot, String> {
 
         if let Some(obj) = root.as_object() {
             for (key, payload) in obj {
+                if let Some(arr) = payload.as_array() {
+                    for (idx, item) in arr.iter().enumerate() {
+                        if !item.is_object() {
+                            continue;
+                        }
+                        let item_key =
+                            claude_quota_key_from_payload(item, &format!("{}_{}", key, idx + 1));
+                        let (quota_type, label) = claude_quota_meta(&item_key);
+                        push_claude_quota(&mut quotas, &mut seen, quota_type, label, item);
+                    }
+                    continue;
+                }
                 if !payload.is_object() {
                     continue;
                 }

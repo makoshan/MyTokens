@@ -12,12 +12,24 @@ import GlobalSettings from './components/GlobalSettings'
 import ApplicationManager from './components/ApplicationManager'
 import OpencodeMcpManager from './components/OpencodeMcpManager'
 import OpencodeSkillManager from './components/OpencodeSkillManager'
-import { ProviderConfig } from './types/provider'
+import ClippyAssistant from './components/ClippyAssistant'
+import {
+  DEFAULT_PROVIDER_DETAILS,
+  ProviderDetails,
+  ProviderAppBindingInput,
+  ProviderConfig,
+  ProviderEndpointInput,
+  ProviderEnvVarInput,
+} from './types/provider'
 import type { Project } from './types/project'
 import { normalizeProjectLabel } from './utils/project'
 import { getProviderDisplayName } from './utils/provider'
 import { getQuotaStatus, type QuotaStatus } from './utils/usage'
-import { buildProviderContextMap, resolveCredentialProjectName } from './utils/linkage'
+import {
+  UNMATCHED_PROJECT_NAME,
+  buildProviderContextMap,
+  resolveCredentialProjectName,
+} from './utils/linkage'
 
 interface Credential {
   id: string
@@ -195,6 +207,7 @@ function App() {
   const [selectedKey, setSelectedKey] = useState<Credential | null>(null)
   const [selectedProvider, setSelectedProvider] = useState<ProviderConfig | null>(null)
   const [selectedPrompt, setSelectedPrompt] = useState<PromptTemplateRecord | null>(null)
+  const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null)
   const [view, setView] = useState<View>('dashboard')
   const [showForm, setShowForm] = useState(false)
   const [showImport, setShowImport] = useState(false)
@@ -205,6 +218,7 @@ function App() {
   const [loadingPrompts, setLoadingPrompts] = useState(false)
   const [hasPassword, setHasPassword] = useState<boolean | null>(null)
   const [projectLabelsByCredential, setProjectLabelsByCredential] = useState<Record<string, string>>({})
+  const [projectFocus, setProjectFocus] = useState<{ name: string; token: number } | null>(null)
   const [dashboardOverview, setDashboardOverview] = useState<DashboardOverview>({
     keys: 0,
     projects: 0,
@@ -595,19 +609,33 @@ function App() {
 
   const handleSaveProvider = async (
     provider: string,
+    label: string,
     apiKey: string,
     baseUrl: string,
-    models: string[]
+    models: string[],
+    details?: ProviderDetails,
+    endpoints?: ProviderEndpointInput[],
+    envVars?: ProviderEnvVarInput[],
+    appBindings?: ProviderAppBindingInput[]
   ) => {
     try {
       const result = await invoke<ProviderConfig>('upsert_provider', {
         provider,
+        label,
         apiKey,
         baseUrl,
         models,
+        details: details || DEFAULT_PROVIDER_DETAILS,
+        endpoints,
+        envVars,
+        appBindings,
         masterPassword,
       })
-      setProviders((prev) => prev.map((item) => (item.provider === result.provider ? result : item)))
+      setProviders((prev) => {
+        const exists = prev.some((item) => item.provider === result.provider)
+        if (!exists) return [...prev, result]
+        return prev.map((item) => (item.provider === result.provider ? result : item))
+      })
       setSelectedProvider(result)
     } catch (error) {
       console.error('Failed to update provider:', error)
@@ -652,6 +680,56 @@ function App() {
       console.error('Failed to delete provider:', error)
       alert(`Failed to delete provider: ${String(error)}`)
     }
+  }
+
+  const copyTextToClipboard = async (value: string) => {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(value)
+      return
+    }
+    const textarea = document.createElement('textarea')
+    textarea.value = value
+    textarea.setAttribute('readonly', 'true')
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    const copied = document.execCommand('copy')
+    document.body.removeChild(textarea)
+    if (!copied) {
+      throw new Error('Clipboard API unavailable')
+    }
+  }
+
+  const handleCopyKey = async (credential: Credential) => {
+    try {
+      await copyTextToClipboard(credential.key)
+      setCopiedKeyId(credential.id)
+      window.setTimeout(() => {
+        setCopiedKeyId((current) => (current === credential.id ? null : current))
+      }, 1500)
+    } catch (error) {
+      console.error('Failed to copy key:', error)
+      alert('复制密钥失败，请检查系统剪贴板权限')
+    }
+  }
+
+  const navigateToProviderFromKey = (providerId: string) => {
+    const target = providers.find((item) => item.provider === providerId)
+    if (target) {
+      setSelectedProvider(target)
+    }
+    setView('providers')
+  }
+
+  const navigateToProjectFromKey = (projectName: string) => {
+    const normalized = projectName.trim()
+    if (!normalized || normalized === UNMATCHED_PROJECT_NAME) return
+    setProjectFocus({
+      name: normalized,
+      token: Date.now(),
+    })
+    setView('projects')
   }
 
   const handleSavePrompt = async (
@@ -778,16 +856,6 @@ function App() {
             全局设置
           </button>
         </nav>
-        {view === 'keys' && (
-          <div className="sidebar-actions">
-            <button className="btn btn-primary" onClick={() => setShowForm(true)}>
-              + 添加密钥
-            </button>
-            <button className="btn btn-secondary" onClick={() => setShowImport(true)}>
-              扫描导入
-            </button>
-          </div>
-        )}
       </aside>
 
       <section className="app-content">
@@ -856,11 +924,15 @@ function App() {
                     projectLabelsByCredential={projectLabelsByCredential}
                     selectedKey={selectedKey}
                     onSelectKey={setSelectedKey}
+                    onCopyKey={handleCopyKey}
+                    copiedKeyId={copiedKeyId}
                     onEditKey={(key) => {
                       setSelectedKey(key)
                       setShowForm(true)
                     }}
                     onDeleteKey={handleDeleteKey}
+                    onNavigateToProvider={navigateToProviderFromKey}
+                    onNavigateToProject={navigateToProjectFromKey}
                   />
                 )}
               </section>
@@ -871,35 +943,127 @@ function App() {
                 </div>
                 {selectedKey ? (
                   <div className="key-details">
-                    <div className="detail-item">
-                      <label>提供商</label>
-                      <p>{providerLabel(selectedKey.provider)}</p>
-                    </div>
-                    <div className="detail-item">
-                      <label>名称</label>
-                      <p>{selectedKey.name}</p>
-                    </div>
-                    <div className="detail-item">
-                      <label>项目</label>
-                      <p>{resolveProjectLabel(selectedKey, projectLabelsByCredential, projects)}</p>
-                    </div>
-                    <div className="detail-item">
-                      <label>密钥</label>
-                      <code className="key-display">{maskKey(selectedKey.key)}</code>
-                    </div>
-                    <div className="detail-item">
-                      <label>创建时间</label>
-                      <p>{new Date(selectedKey.created_at).toLocaleString()}</p>
-                    </div>
-                    {selectedKey.source && (
-                      <div className="detail-item">
-                        <label>来源路径</label>
-                        <p>{selectedKey.source}</p>
+                    <div className="key-detail-hero">
+                      <div>
+                        <div className="key-detail-title">{selectedKey.name}</div>
+                        <div className="key-detail-subtitle">{maskKey(selectedKey.key)}</div>
                       </div>
-                    )}
-                    <button className="btn btn-primary" onClick={() => setShowForm(true)}>
-                      编辑密钥
-                    </button>
+                      <div className="key-detail-chips">
+                        <button
+                          type="button"
+                          className="detail-chip"
+                          onClick={() => navigateToProviderFromKey(selectedKey.provider)}
+                        >
+                          {providerLabel(selectedKey.provider)}
+                        </button>
+                        <span className={`detail-chip ${selectedKey.is_active ? 'healthy' : 'warning'}`}>
+                          {selectedKey.is_active ? '启用中' : '已停用'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="detail-section">
+                      <div className="detail-section-title">基础信息</div>
+                      <div className="detail-item-grid">
+                        <div className="detail-item">
+                          <label>提供商</label>
+                          <button
+                            type="button"
+                            className="btn btn-link detail-link-btn"
+                            onClick={() => navigateToProviderFromKey(selectedKey.provider)}
+                          >
+                            {providerLabel(selectedKey.provider)}
+                          </button>
+                        </div>
+                        <div className="detail-item">
+                          <label>名称</label>
+                          <p>{selectedKey.name}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="detail-section">
+                      <div className="detail-section-title">关联与状态</div>
+                      <div className="detail-item-grid">
+                        <div className="detail-item">
+                          <label>项目</label>
+                          {(() => {
+                            const projectName = resolveProjectLabel(
+                              selectedKey,
+                              projectLabelsByCredential,
+                              projects
+                            )
+                            if (projectName === UNMATCHED_PROJECT_NAME) {
+                              return <p>{projectName}</p>
+                            }
+                            return (
+                              <button
+                                type="button"
+                                className="btn btn-link detail-link-btn"
+                                onClick={() => navigateToProjectFromKey(projectName)}
+                              >
+                                {projectName}
+                              </button>
+                            )
+                          })()}
+                        </div>
+                        <div className="detail-item">
+                          <label>创建时间</label>
+                          <p>{new Date(selectedKey.created_at).toLocaleString()}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="detail-section">
+                      <div className="detail-section-title">来源与操作</div>
+                      {selectedKey.source ? (
+                        <div className="detail-item">
+                          <label>来源路径</label>
+                          <p>{selectedKey.source}</p>
+                        </div>
+                      ) : (
+                        <div className="detail-item">
+                          <label>来源路径</label>
+                          <p>手动录入</p>
+                        </div>
+                      )}
+                      <div className="detail-actions-row">
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => handleCopyKey(selectedKey)}
+                        >
+                          {copiedKeyId === selectedKey.id ? '已复制' : '复制密钥'}
+                        </button>
+                        <button className="btn btn-primary" onClick={() => setShowForm(true)}>
+                          编辑密钥
+                        </button>
+                        {(() => {
+                          const projectName = resolveProjectLabel(
+                            selectedKey,
+                            projectLabelsByCredential,
+                            projects
+                          )
+                          if (projectName === UNMATCHED_PROJECT_NAME) return null
+                          return (
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              onClick={() => navigateToProjectFromKey(projectName)}
+                            >
+                              打开项目
+                            </button>
+                          )
+                        })()}
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => navigateToProviderFromKey(selectedKey.provider)}
+                        >
+                          打开提供商
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 ) : (
                   <div className="panel-empty">
@@ -914,6 +1078,8 @@ function App() {
               projects={projects}
               projectLabelsByCredential={projectLabelsByCredential}
               masterPassword={masterPassword}
+              focusProjectName={projectFocus?.name}
+              focusProjectToken={projectFocus?.token}
               onProjectsChanged={setProjects}
               onError={(msg) => alert(msg)}
             />
@@ -981,6 +1147,8 @@ function App() {
           onCancel={() => setShowImport(false)}
         />
       )}
+
+      <ClippyAssistant masterPassword={masterPassword} onNavigate={setView} />
     </div>
   )
 }

@@ -1,11 +1,14 @@
 use crate::{
-    provider_defaults, secret_store::Secret, secret_store::SecretManager,
+    provider_defaults, secret_store::config::SecretStoreProviderConfig, secret_store::Secret,
+    secret_store::SecretManager,
     secret_store::SecretMetadata, secret_store::SecretStoreConfig, usage::CostUsage,
     usage::UsageQuota, usage::UsageSnapshot, AppIntegration, AppRoute, Credential,
     ExternalLibraryMcp, ExternalLibrarySkill, GatewayAccessCredentials, GatewayPolicySettings,
-    GatewayRequestLog, GlobalSettingsPayload, IntegrationConfigSnapshot, OpencodeConfigSnapshot,
-    PromptTemplate, ProviderAppBinding, ProviderConfig, ProviderEndpoint, ProviderEnvVar,
-    ProviderModel, ServiceConfig,
+    GatewayRequestLog, GatewayErrorSummary, GatewayTrafficGroup, GatewayTrafficMetrics,
+    GatewayTrafficPoint, GlobalSettingsPayload, IntegrationConfigSnapshot, OpencodeConfigSnapshot,
+    PromptTemplate, ProviderAppBinding, ProviderAppBindingInput, ProviderConfig, ProviderDetails,
+    ProviderEndpoint, ProviderEndpointInput, ProviderEnvVar, ProviderEnvVarInput, ProviderModel,
+    ServiceConfig,
 };
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -42,6 +45,23 @@ pub struct GatewayResolvedRoute {
     pub model: Option<String>,
     pub upstream_api_key: String,
     pub upstream_base_url: Option<String>,
+    pub upstream_headers: Option<String>,
+    pub upstream_timeout_ms: Option<i64>,
+    pub upstream_proxy_url: Option<String>,
+    pub upstream_proxy_username: Option<String>,
+    pub upstream_proxy_password: Option<String>,
+    pub upstream_max_retries: i64,
+}
+
+#[derive(Debug, Clone)]
+struct RouteProviderAuth {
+    api_key: String,
+    base_url: Option<String>,
+    headers: Option<String>,
+    timeout_ms: Option<i64>,
+    proxy_url: Option<String>,
+    proxy_username: Option<String>,
+    proxy_password: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +112,7 @@ impl Vault {
         vault.ensure_app_routes_defaults();
         vault.refresh_app_integration_detection();
         vault.migrate_legacy_secrets();
+        vault.ensure_unified_relations_defaults();
         vault
     }
 
@@ -208,6 +229,7 @@ impl Vault {
                 ],
             )
             .map_err(|e| e.to_string())?;
+        self.upsert_secret_ref(&id)?;
 
         self.credentials.insert(id, credential.clone());
         Ok(credential)
@@ -267,6 +289,7 @@ impl Vault {
                 ],
             )
             .map_err(|e| e.to_string())?;
+        self.upsert_secret_ref(&credential.id)?;
 
         self.credentials.insert(id, credential.clone());
         Ok(credential)
@@ -332,6 +355,17 @@ impl Vault {
         }
         let _ = self.secret_manager.delete(id);
         let _ = self.secret_manager.delete(&project_label_secret_id(id));
+        let _ = self
+            .conn
+            .execute("DELETE FROM secret_refs WHERE credential_id = ?1", params![id]);
+        let _ = self.conn.execute(
+            "UPDATE project_bindings SET credential_id = NULL, updated_at = ?1 WHERE credential_id = ?2",
+            params![Local::now().to_rfc3339(), id],
+        );
+        let _ = self.conn.execute(
+            "UPDATE projects SET credential_id = NULL, updated_at = ?1 WHERE credential_id = ?2",
+            params![Local::now().to_rfc3339(), id],
+        );
         self.conn
             .execute("DELETE FROM credentials WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
@@ -406,58 +440,312 @@ impl Vault {
     pub fn upsert_provider(
         &mut self,
         provider: String,
+        label: String,
         api_key: String,
         base_url: String,
         models: Vec<String>,
+        details: Option<ProviderDetails>,
+        endpoints: Option<Vec<ProviderEndpointInput>>,
+        env_vars: Option<Vec<ProviderEnvVarInput>>,
+        app_bindings: Option<Vec<ProviderAppBindingInput>>,
     ) -> Result<ProviderConfig, String> {
         let now = Local::now().to_rfc3339();
-        let entry = self
+        {
+            let entry = self
+                .providers
+                .entry(provider.clone())
+                .or_insert_with(|| ProviderConfig {
+                    provider: provider.clone(),
+                    label: provider.clone(),
+                    api_key: String::new(),
+                    base_url: String::new(),
+                    updated_at: now.clone(),
+                    is_active: false,
+                    models: Vec::new(),
+                    details: ProviderDetails::default(),
+                    endpoints: Vec::new(),
+                    env_vars: Vec::new(),
+                    app_bindings: Vec::new(),
+                });
+
+            let next_label = if label.trim().is_empty() {
+                if entry.label.trim().is_empty() {
+                    provider.clone()
+                } else {
+                    entry.label.clone()
+                }
+            } else {
+                label.trim().to_string()
+            };
+
+            let mut next_details = details.unwrap_or_else(|| entry.details.clone());
+            if next_details.settings_json.trim().is_empty() {
+                next_details.settings_json = ProviderDetails::default().settings_json;
+            }
+
+            entry.label = next_label;
+            entry.api_key = api_key;
+            entry.base_url = base_url;
+            entry.models = models;
+            entry.details = next_details;
+            entry.updated_at = now.clone();
+            entry.is_active = !entry.api_key.trim().is_empty();
+
+            let models_json =
+                serde_json::to_string(&entry.models).unwrap_or_else(|_| "[]".to_string());
+            let details_json =
+                serde_json::to_string(&entry.details).unwrap_or_else(|_| "{}".to_string());
+            self.conn
+                .execute(
+                    "INSERT INTO providers (provider, label, api_key, base_url, updated_at, is_active, models, details_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(provider) DO UPDATE SET
+                       label = excluded.label,
+                       api_key = excluded.api_key,
+                       base_url = excluded.base_url,
+                       updated_at = excluded.updated_at,
+                       is_active = excluded.is_active,
+                       models = excluded.models,
+                       details_json = excluded.details_json",
+                    params![
+                        entry.provider,
+                        entry.label,
+                        entry.api_key,
+                        entry.base_url,
+                        entry.updated_at,
+                        bool_to_int(entry.is_active),
+                        models_json,
+                        details_json,
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+
+        if let Some(items) = endpoints {
+            self.replace_provider_endpoints(&provider, items)?;
+        }
+        if let Some(items) = env_vars {
+            self.replace_provider_env_vars(&provider, items)?;
+        }
+        if let Some(items) = app_bindings {
+            self.replace_provider_app_bindings(&provider, items)?;
+        }
+
+        let updated = self
             .providers
-            .entry(provider.clone())
-            .or_insert_with(|| ProviderConfig {
-                provider: provider.clone(),
-                label: provider.clone(),
-                api_key: String::new(),
-                base_url: String::new(),
+            .get(&provider)
+            .cloned()
+            .ok_or_else(|| format!("Provider not found: {}", provider))?;
+        Ok(self.decorate_provider(&updated))
+    }
+
+    fn replace_provider_endpoints(
+        &mut self,
+        provider: &str,
+        endpoints: Vec<ProviderEndpointInput>,
+    ) -> Result<(), String> {
+        let now = Local::now().to_rfc3339();
+        let mut normalized = Vec::new();
+
+        for endpoint in endpoints {
+            let base_url = endpoint.base_url.trim().to_string();
+            if base_url.is_empty() {
+                continue;
+            }
+            let id = endpoint
+                .id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            let headers = endpoint
+                .headers
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string());
+            let proxy_url = endpoint
+                .proxy_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string());
+            let timeout_ms = endpoint.timeout_ms.filter(|value| *value > 0);
+            normalized.push(ProviderEndpoint {
+                id,
+                provider: provider.to_string(),
+                base_url,
+                headers,
+                timeout_ms,
+                proxy_url,
+                is_primary: endpoint.is_primary,
+                created_at: now.clone(),
                 updated_at: now.clone(),
-                is_active: false,
-                models: Vec::new(),
-                endpoints: Vec::new(),
-                env_vars: Vec::new(),
-                app_bindings: Vec::new(),
             });
+        }
 
-        entry.api_key = api_key;
-        entry.base_url = base_url;
-        entry.models = models;
-        entry.updated_at = now.clone();
-        entry.is_active = !entry.api_key.trim().is_empty();
+        if !normalized.is_empty() && !normalized.iter().any(|item| item.is_primary) {
+            if let Some(first) = normalized.first_mut() {
+                first.is_primary = true;
+            }
+        }
 
-        let models_json = serde_json::to_string(&entry.models).unwrap_or_else(|_| "[]".to_string());
         self.conn
             .execute(
-                "INSERT INTO providers (provider, label, api_key, base_url, updated_at, is_active, models)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(provider) DO UPDATE SET
-                   api_key = excluded.api_key,
-                   base_url = excluded.base_url,
-                   updated_at = excluded.updated_at,
-                   is_active = excluded.is_active,
-                   models = excluded.models",
-                params![
-                    entry.provider,
-                    entry.label,
-                    entry.api_key,
-                    entry.base_url,
-                    entry.updated_at,
-                    bool_to_int(entry.is_active),
-                    models_json,
-                ],
+                "DELETE FROM provider_endpoints WHERE provider = ?1",
+                params![provider],
             )
             .map_err(|e| e.to_string())?;
 
-        let updated = entry.clone();
-        Ok(self.decorate_provider(&updated))
+        for endpoint in &normalized {
+            self.conn
+                .execute(
+                    "INSERT INTO provider_endpoints (id, provider, base_url, headers, timeout_ms, proxy_url, is_primary, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        endpoint.id,
+                        endpoint.provider,
+                        endpoint.base_url,
+                        endpoint.headers,
+                        endpoint.timeout_ms,
+                        endpoint.proxy_url,
+                        bool_to_int(endpoint.is_primary),
+                        endpoint.created_at,
+                        endpoint.updated_at,
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+
+        self.provider_endpoints
+            .insert(provider.to_string(), normalized);
+        Ok(())
+    }
+
+    fn replace_provider_env_vars(
+        &mut self,
+        provider: &str,
+        env_vars: Vec<ProviderEnvVarInput>,
+    ) -> Result<(), String> {
+        let now = Local::now().to_rfc3339();
+        let mut normalized = Vec::new();
+
+        for env_var in env_vars {
+            let key = env_var.key.trim().to_string();
+            if key.is_empty() {
+                continue;
+            }
+            let id = env_var
+                .id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            normalized.push(ProviderEnvVar {
+                id,
+                provider: provider.to_string(),
+                key,
+                value: env_var.value,
+                is_secret: env_var.is_secret,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            });
+        }
+
+        self.conn
+            .execute(
+                "DELETE FROM provider_env_vars WHERE provider = ?1",
+                params![provider],
+            )
+            .map_err(|e| e.to_string())?;
+
+        for env_var in &normalized {
+            self.conn
+                .execute(
+                    "INSERT INTO provider_env_vars (id, provider, key, value, is_secret, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        env_var.id,
+                        env_var.provider,
+                        env_var.key,
+                        env_var.value,
+                        bool_to_int(env_var.is_secret),
+                        env_var.created_at,
+                        env_var.updated_at,
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+
+        self.provider_env_vars
+            .insert(provider.to_string(), normalized);
+        Ok(())
+    }
+
+    fn replace_provider_app_bindings(
+        &mut self,
+        provider: &str,
+        app_bindings: Vec<ProviderAppBindingInput>,
+    ) -> Result<(), String> {
+        let now = Local::now().to_rfc3339();
+        let mut normalized = Vec::new();
+        let mut seen_types: HashSet<String> = HashSet::new();
+
+        for binding in app_bindings {
+            let app_type = binding.app_type.trim().to_string();
+            if app_type.is_empty() {
+                continue;
+            }
+            let app_type_key = app_type.to_ascii_lowercase();
+            if seen_types.contains(&app_type_key) {
+                continue;
+            }
+            seen_types.insert(app_type_key);
+            let id = binding
+                .id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            normalized.push(ProviderAppBinding {
+                id,
+                provider: provider.to_string(),
+                app_type,
+                config_path: binding.config_path.trim().to_string(),
+                enabled: binding.enabled,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            });
+        }
+
+        self.conn
+            .execute(
+                "DELETE FROM provider_apps WHERE provider = ?1",
+                params![provider],
+            )
+            .map_err(|e| e.to_string())?;
+
+        for binding in &normalized {
+            self.conn
+                .execute(
+                    "INSERT INTO provider_apps (id, provider, app_type, config_path, enabled, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        binding.id,
+                        binding.provider,
+                        binding.app_type,
+                        binding.config_path,
+                        bool_to_int(binding.enabled),
+                        binding.created_at,
+                        binding.updated_at,
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+
+        self.provider_app_bindings
+            .insert(provider.to_string(), normalized);
+        Ok(())
     }
 
     pub fn set_provider_active(
@@ -654,6 +942,112 @@ impl Vault {
         }
     }
 
+    fn ensure_unified_relations_defaults(&mut self) {
+        let _ = self.ensure_secret_refs_defaults();
+        let _ = self.ensure_project_binding_defaults();
+    }
+
+    fn ensure_secret_refs_defaults(&self) -> Result<(), String> {
+        for credential_id in self.credentials.keys() {
+            self.upsert_secret_ref(credential_id)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_project_binding_defaults(&self) -> Result<(), String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, credential_id FROM projects")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let credential_id: Option<String> = row.get(1)?;
+                Ok((id, credential_id))
+            })
+            .map_err(|e| e.to_string())?;
+
+        for row in rows {
+            let (project_id, credential_id) = row.map_err(|e| e.to_string())?;
+            self.sync_default_project_binding(&project_id, credential_id.as_deref())?;
+        }
+        Ok(())
+    }
+
+    fn upsert_secret_ref(&self, credential_id: &str) -> Result<(), String> {
+        let secret_provider = self
+            .secret_manager
+            .primary_name()
+            .unwrap_or("local")
+            .to_string();
+        let now = Local::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO secret_refs (credential_id, secret_provider, secret_key_id, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(credential_id) DO UPDATE SET
+                    secret_provider = excluded.secret_provider,
+                    secret_key_id = excluded.secret_key_id,
+                    updated_at = excluded.updated_at",
+                params![credential_id, secret_provider, credential_id, now],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn sync_default_project_binding(
+        &self,
+        project_id: &str,
+        credential_id: Option<&str>,
+    ) -> Result<(), String> {
+        let now = Local::now().to_rfc3339();
+
+        let Some(credential_id) = credential_id else {
+            self.conn
+                .execute(
+                    "DELETE FROM project_bindings
+                     WHERE project_id = ?1 AND env = 'dev' AND is_default = 1",
+                    params![project_id],
+                )
+                .map_err(|e| e.to_string())?;
+            return Ok(());
+        };
+
+        let Some(credential) = self.credentials.get(credential_id) else {
+            return Ok(());
+        };
+        let provider_id = credential.provider.clone();
+
+        self.conn
+            .execute(
+                "DELETE FROM project_bindings
+                 WHERE project_id = ?1 AND env = 'dev' AND is_default = 1",
+                params![project_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+        self.conn
+            .execute(
+                "INSERT INTO project_bindings
+                    (id, project_id, env, provider_id, credential_id, model, route_mode, is_default, updated_at)
+                 VALUES (?1, ?2, 'dev', ?3, ?4, NULL, 'gateway', 1, ?5)
+                 ON CONFLICT(project_id, env, provider_id) DO UPDATE SET
+                    credential_id = excluded.credential_id,
+                    route_mode = excluded.route_mode,
+                    is_default = excluded.is_default,
+                    updated_at = excluded.updated_at",
+                params![
+                    Uuid::new_v4().to_string(),
+                    project_id,
+                    provider_id,
+                    credential_id,
+                    now
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     fn init_secret_manager(db_path: &PathBuf) -> Result<SecretManager, String> {
         let config = Self::load_secret_store_config(db_path)?;
         SecretManager::from_config(&config).map_err(|e| e.to_string())
@@ -666,7 +1060,50 @@ impl Vault {
             let raw = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
             toml::from_str(&raw).map_err(|e| e.to_string())
         } else {
-            Ok(SecretStoreConfig::default_with_path(db_path))
+            let mut local_config = HashMap::new();
+            local_config.insert(
+                "path".to_string(),
+                toml::Value::String(db_path.to_string_lossy().to_string()),
+            );
+
+            #[cfg(target_os = "macos")]
+            {
+                let mut keychain_config = HashMap::new();
+                keychain_config.insert(
+                    "service".to_string(),
+                    toml::Value::String("com.mykey.desktop".to_string()),
+                );
+                return Ok(SecretStoreConfig {
+                    primary: "keychain".to_string(),
+                    providers: vec![
+                        SecretStoreProviderConfig {
+                            name: "keychain".to_string(),
+                            kind: "keyring".to_string(),
+                            config: keychain_config,
+                            priority: 0,
+                        },
+                        SecretStoreProviderConfig {
+                            name: "local".to_string(),
+                            kind: "sqlite".to_string(),
+                            config: local_config,
+                            priority: 10,
+                        },
+                    ],
+                });
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                Ok(SecretStoreConfig {
+                    primary: "local".to_string(),
+                    providers: vec![SecretStoreProviderConfig {
+                        name: "local".to_string(),
+                        kind: "sqlite".to_string(),
+                        config: local_config,
+                        priority: 0,
+                    }],
+                })
+            }
         }
     }
 
@@ -700,7 +1137,8 @@ impl Vault {
                 base_url TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 is_active INTEGER NOT NULL,
-                models TEXT NOT NULL
+                models TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}'
             );
             CREATE TABLE IF NOT EXISTS prompts (
                 id TEXT PRIMARY KEY,
@@ -821,6 +1259,59 @@ impl Vault {
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(credential_id) REFERENCES credentials(id) ON DELETE SET NULL
             );
+            CREATE TABLE IF NOT EXISTS secret_refs (
+                credential_id TEXT PRIMARY KEY,
+                secret_provider TEXT NOT NULL,
+                secret_key_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(credential_id) REFERENCES credentials(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS project_bindings (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                env TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                credential_id TEXT,
+                model TEXT,
+                route_mode TEXT NOT NULL DEFAULT 'gateway',
+                is_default INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                FOREIGN KEY(provider_id) REFERENCES providers(provider),
+                FOREIGN KEY(credential_id) REFERENCES credentials(id) ON DELETE SET NULL,
+                UNIQUE(project_id, env, provider_id)
+            );
+            CREATE TABLE IF NOT EXISTS tool_items (
+                id TEXT PRIMARY KEY,
+                tool_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_ref TEXT NOT NULL DEFAULT '',
+                content_json TEXT NOT NULL,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                description TEXT,
+                updated_at TEXT NOT NULL,
+                UNIQUE(tool_type, name, source_type, source_ref)
+            );
+            CREATE TABLE IF NOT EXISTS tool_bindings (
+                id TEXT PRIMARY KEY,
+                tool_id TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_id TEXT,
+                env TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                priority INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(tool_id) REFERENCES tool_items(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS backup_runs (
+                id TEXT PRIMARY KEY,
+                run_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                detail_json TEXT NOT NULL DEFAULT '{}'
+            );
             CREATE INDEX IF NOT EXISTS idx_provider_endpoints_provider ON provider_endpoints(provider);
             CREATE INDEX IF NOT EXISTS idx_provider_models_provider ON provider_models(provider);
             CREATE INDEX IF NOT EXISTS idx_provider_env_vars_provider ON provider_env_vars(provider);
@@ -828,10 +1319,46 @@ impl Vault {
             CREATE INDEX IF NOT EXISTS idx_usage_snapshots_provider ON usage_snapshots(provider_id);
             CREATE INDEX IF NOT EXISTS idx_app_integrations_app_type ON app_integrations(app_type);
             CREATE INDEX IF NOT EXISTS idx_projects_credential_id ON projects(credential_id);
+            CREATE INDEX IF NOT EXISTS idx_project_bindings_project_env ON project_bindings(project_id, env);
+            CREATE INDEX IF NOT EXISTS idx_project_bindings_provider ON project_bindings(provider_id);
+            CREATE INDEX IF NOT EXISTS idx_tool_bindings_scope ON tool_bindings(scope_type, scope_id);
+            CREATE INDEX IF NOT EXISTS idx_backup_runs_started_at ON backup_runs(started_at);
             CREATE INDEX IF NOT EXISTS idx_gateway_logs_created_at ON gateway_request_logs(created_at);
             CREATE INDEX IF NOT EXISTS idx_gateway_logs_app_type ON gateway_request_logs(app_type);",
         )
         .map_err(|e| e.to_string())?;
+
+        Self::ensure_column(
+            conn,
+            "providers",
+            "details_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )?;
+        conn.execute(
+            "UPDATE providers SET details_json = '{}' WHERE details_json IS NULL OR TRIM(details_json) = ''",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn ensure_column(
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<(), String> {
+        let pragma = format!("PRAGMA table_info({})", table);
+        let mut stmt = conn.prepare(&pragma).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let existing: String = row.get(1).map_err(|e| e.to_string())?;
+            if existing == column {
+                return Ok(());
+            }
+        }
+        let alter = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, definition);
+        conn.execute(&alter, []).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -1573,10 +2100,73 @@ impl Vault {
         }
     }
 
+    fn is_kimi_provider(provider: &str) -> bool {
+        matches!(provider, "kimi" | "kimi-for-coding")
+    }
+
+    fn non_empty_owned(value: &str) -> Option<String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    fn resolve_route_model_for_app(
+        &self,
+        app_type: &str,
+        provider: &ProviderConfig,
+        route_model: Option<&str>,
+    ) -> Option<String> {
+        if let Some(explicit) = route_model.and_then(Self::non_empty_owned) {
+            if matches!(app_type, "claude" | "claude-code")
+                && Self::is_kimi_provider(provider.provider.as_str())
+                && explicit.starts_with("kimi-k2-")
+            {
+                return Some("kimi-for-coding".to_string());
+            }
+            return Some(explicit);
+        }
+        let details = &provider.details;
+        let main_model = Self::non_empty_owned(&details.main_model);
+        let reasoning_model = Self::non_empty_owned(&details.reasoning_model);
+        let haiku_model = Self::non_empty_owned(&details.default_haiku_model);
+        let sonnet_model = Self::non_empty_owned(&details.default_sonnet_model);
+        let opus_model = Self::non_empty_owned(&details.default_opus_model);
+        let first_model = provider
+            .models
+            .iter()
+            .find_map(|value| Self::non_empty_owned(value));
+
+        match app_type {
+            "claude" | "claude-code" => {
+                if Self::is_kimi_provider(provider.provider.as_str()) {
+                    main_model
+                        .or(sonnet_model)
+                        .or(reasoning_model)
+                        .or(Some("kimi-for-coding".to_string()))
+                        .or(opus_model)
+                        .or(haiku_model)
+                        .or(first_model)
+                } else {
+                    main_model
+                        .or(sonnet_model)
+                        .or(reasoning_model)
+                        .or(opus_model)
+                        .or(haiku_model)
+                        .or(first_model)
+                }
+            }
+            "codex" => reasoning_model.or(main_model).or(first_model),
+            _ => main_model.or(reasoning_model).or(first_model),
+        }
+    }
+
     fn resolve_route_provider_auth(
         &self,
         provider: &str,
-    ) -> Result<(String, Option<String>), String> {
+    ) -> Result<RouteProviderAuth, String> {
         let config = self
             .get_provider_config(provider)
             .ok_or_else(|| format!("Provider not found: {}", provider))?;
@@ -1595,14 +2185,71 @@ impl Vault {
             config.api_key.trim().to_string()
         };
 
-        let base_url = config.base_url.trim();
-        let base_url = if base_url.is_empty() {
-            None
+        let primary_endpoint = config
+            .endpoints
+            .iter()
+            .filter(|item| !item.base_url.trim().is_empty())
+            .find(|item| item.is_primary)
+            .or_else(|| {
+                config
+                    .endpoints
+                    .iter()
+                    .find(|item| !item.base_url.trim().is_empty())
+            });
+
+        let base_url = primary_endpoint
+            .and_then(|item| Self::non_empty_owned(&item.base_url))
+            .or_else(|| Self::non_empty_owned(&config.base_url));
+
+        let headers = primary_endpoint.and_then(|item| {
+            item.headers
+                .as_deref()
+                .and_then(Self::non_empty_owned)
+        });
+
+        let timeout_ms = primary_endpoint
+            .and_then(|item| item.timeout_ms)
+            .filter(|value| *value > 0)
+            .or_else(|| {
+                if !config.details.test_config_enabled {
+                    return None;
+                }
+                config
+                    .details
+                    .test_timeout_secs
+                    .filter(|value| *value > 0)
+                    .map(|seconds| seconds.saturating_mul(1000))
+            });
+
+        let endpoint_proxy = primary_endpoint
+            .and_then(|item| item.proxy_url.as_deref())
+            .and_then(Self::non_empty_owned);
+        let provider_proxy = if config.details.proxy_config_enabled {
+            Self::non_empty_owned(&config.details.proxy_url)
         } else {
-            Some(base_url.to_string())
+            None
+        };
+        let proxy_url = endpoint_proxy.or(provider_proxy);
+        let (proxy_username, proxy_password) = if proxy_url.is_some()
+            && config.details.proxy_config_enabled
+        {
+            (
+                Self::non_empty_owned(&config.details.proxy_username),
+                Self::non_empty_owned(&config.details.proxy_password),
+            )
+        } else {
+            (None, None)
         };
 
-        Ok((api_key, base_url))
+        Ok(RouteProviderAuth {
+            api_key,
+            base_url,
+            headers,
+            timeout_ms,
+            proxy_url,
+            proxy_username,
+            proxy_password,
+        })
     }
 
     fn gateway_port(&self) -> u16 {
@@ -1750,6 +2397,272 @@ impl Vault {
                     blocked_reason: row.get(8)?,
                     error_code: row.get(9)?,
                     estimated_cost_usd: row.get(10)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(result)
+    }
+
+    pub fn get_gateway_traffic_metrics(
+        &self,
+        window_minutes: i64,
+    ) -> Result<GatewayTrafficMetrics, String> {
+        let window = window_minutes.clamp(5, 24 * 60);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT
+                    COUNT(*) AS total_requests,
+                    COALESCE(SUM(CASE WHEN status_code BETWEEN 200 AND 399 THEN 1 ELSE 0 END), 0) AS success_requests,
+                    COALESCE(SUM(CASE WHEN status_code BETWEEN 400 AND 499 THEN 1 ELSE 0 END), 0) AS client_error_requests,
+                    COALESCE(SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END), 0) AS server_error_requests,
+                    COALESCE(SUM(CASE WHEN blocked_reason IS NOT NULL AND TRIM(blocked_reason) != '' THEN 1 ELSE 0 END), 0) AS blocked_requests,
+                    AVG(latency_ms) AS avg_latency_ms,
+                    COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS estimated_cost_usd
+                 FROM gateway_request_logs
+                 WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let (
+            total_requests,
+            success_requests,
+            client_error_requests,
+            server_error_requests,
+            blocked_requests,
+            avg_latency_ms,
+            estimated_cost_usd,
+        ) = stmt
+            .query_row(params![window], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<f64>>(5)?,
+                    row.get::<_, f64>(6)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+
+        let p95_latency_ms = self.gateway_p95_latency(window, None)?;
+        let by_app = self.gateway_group_metrics(window, "app_type")?;
+        let by_provider = self.gateway_group_metrics(window, "provider")?;
+        let top_errors = self.gateway_top_errors(window)?;
+        let timeline = self.gateway_timeline(window)?;
+
+        Ok(GatewayTrafficMetrics {
+            window_minutes: window,
+            total_requests,
+            success_requests,
+            client_error_requests,
+            server_error_requests,
+            blocked_requests,
+            requests_per_minute: total_requests as f64 / window as f64,
+            avg_latency_ms,
+            p95_latency_ms,
+            estimated_cost_usd,
+            by_app,
+            by_provider,
+            top_errors,
+            timeline,
+        })
+    }
+
+    fn gateway_group_metrics(
+        &self,
+        window_minutes: i64,
+        group_by: &str,
+    ) -> Result<Vec<GatewayTrafficGroup>, String> {
+        let group_column = match group_by {
+            "app_type" | "provider" => group_by,
+            _ => return Err(format!("Unsupported gateway group column: {}", group_by)),
+        };
+        let sql = format!(
+            "SELECT
+                {group_column} AS group_key,
+                COUNT(*) AS requests,
+                COALESCE(SUM(CASE WHEN status_code BETWEEN 200 AND 399 THEN 1 ELSE 0 END), 0) AS success_requests,
+                COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_requests,
+                COALESCE(SUM(CASE WHEN blocked_reason IS NOT NULL AND TRIM(blocked_reason) != '' THEN 1 ELSE 0 END), 0) AS blocked_requests,
+                AVG(latency_ms) AS avg_latency_ms
+             FROM gateway_request_logs
+             WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
+             GROUP BY group_key
+             ORDER BY requests DESC
+             LIMIT 16"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![window_minutes], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<f64>>(5)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            let (key, requests, success_requests, error_requests, blocked_requests, avg_latency_ms) =
+                row.map_err(|e| e.to_string())?;
+            let p95_latency_ms =
+                self.gateway_p95_latency(window_minutes, Some((group_column, &key)))?;
+            result.push(GatewayTrafficGroup {
+                key,
+                requests,
+                success_requests,
+                error_requests,
+                blocked_requests,
+                avg_latency_ms,
+                p95_latency_ms,
+            });
+        }
+        Ok(result)
+    }
+
+    fn gateway_p95_latency(
+        &self,
+        window_minutes: i64,
+        scoped_group: Option<(&str, &str)>,
+    ) -> Result<Option<i64>, String> {
+        let mut latencies: Vec<i64> = match scoped_group {
+            Some(("app_type", value)) => {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT latency_ms
+                         FROM gateway_request_logs
+                         WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
+                           AND app_type = ?2
+                         ORDER BY latency_ms ASC",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map(params![window_minutes, value], |row| row.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())?;
+                let mut values = Vec::new();
+                for row in rows {
+                    values.push(row.map_err(|e| e.to_string())?);
+                }
+                values
+            }
+            Some(("provider", value)) => {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT latency_ms
+                         FROM gateway_request_logs
+                         WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
+                           AND provider = ?2
+                         ORDER BY latency_ms ASC",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map(params![window_minutes, value], |row| row.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())?;
+                let mut values = Vec::new();
+                for row in rows {
+                    values.push(row.map_err(|e| e.to_string())?);
+                }
+                values
+            }
+            Some((field, _)) => return Err(format!("Unsupported p95 scope field: {}", field)),
+            None => {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT latency_ms
+                         FROM gateway_request_logs
+                         WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
+                         ORDER BY latency_ms ASC",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map(params![window_minutes], |row| row.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())?;
+                let mut values = Vec::new();
+                for row in rows {
+                    values.push(row.map_err(|e| e.to_string())?);
+                }
+                values
+            }
+        };
+
+        if latencies.is_empty() {
+            return Ok(None);
+        }
+        latencies.sort_unstable();
+        let p95_rank = ((latencies.len() as f64) * 0.95).ceil() as usize;
+        let index = p95_rank.saturating_sub(1).min(latencies.len() - 1);
+        Ok(Some(latencies[index]))
+    }
+
+    fn gateway_top_errors(&self, window_minutes: i64) -> Result<Vec<GatewayErrorSummary>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT
+                    COALESCE(NULLIF(TRIM(error_code), ''), NULLIF(TRIM(blocked_reason), ''), 'unknown') AS error_key,
+                    COUNT(*) AS requests
+                 FROM gateway_request_logs
+                 WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
+                   AND (
+                     (error_code IS NOT NULL AND TRIM(error_code) != '')
+                     OR (blocked_reason IS NOT NULL AND TRIM(blocked_reason) != '')
+                   )
+                 GROUP BY error_key
+                 ORDER BY requests DESC
+                 LIMIT 8",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![window_minutes], |row| {
+                Ok(GatewayErrorSummary {
+                    code: row.get(0)?,
+                    requests: row.get(1)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(result)
+    }
+
+    fn gateway_timeline(&self, window_minutes: i64) -> Result<Vec<GatewayTrafficPoint>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT
+                    substr(created_at, 1, 16) AS minute_bucket,
+                    COUNT(*) AS requests,
+                    COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_requests,
+                    AVG(latency_ms) AS avg_latency_ms
+                 FROM gateway_request_logs
+                 WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
+                 GROUP BY minute_bucket
+                 ORDER BY minute_bucket ASC
+                 LIMIT 360",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![window_minutes], |row| {
+                Ok(GatewayTrafficPoint {
+                    minute: row.get(0)?,
+                    requests: row.get(1)?,
+                    error_requests: row.get(2)?,
+                    avg_latency_ms: row.get(3)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -2111,13 +3024,18 @@ impl Vault {
         let route = self
             .get_app_route_by_type(app_type)?
             .ok_or_else(|| format!("{} 尚未配置路由", app_type))?;
+        let provider = self
+            .get_provider_config(&route.provider)
+            .ok_or_else(|| format!("Provider not found: {}", route.provider))?;
+        let effective_model =
+            self.resolve_route_model_for_app(app_type, &provider, route.model.as_deref());
         let token = self.get_or_create_gateway_token(app_type)?;
         Ok(GatewayAccessCredentials {
             app_type: route.app_type,
             base_url: self.gateway_base_url(),
             api_key: token,
             provider: route.provider,
-            model: route.model,
+            model: effective_model,
         })
     }
 
@@ -2139,21 +3057,76 @@ impl Vault {
             let Some(route) = self.get_app_route_by_type(app_type)? else {
                 return Ok(None);
             };
-            let (upstream_api_key, upstream_base_url) =
-                self.resolve_route_provider_auth(&route.provider)?;
+            let provider = self
+                .get_provider_config(&route.provider)
+                .ok_or_else(|| format!("Provider not found: {}", route.provider))?;
+            let mut auth = if app_type == "codex" {
+                RouteProviderAuth {
+                    api_key: String::new(),
+                    base_url: None,
+                    headers: None,
+                    timeout_ms: None,
+                    proxy_url: None,
+                    proxy_username: None,
+                    proxy_password: None,
+                }
+            } else {
+                self.resolve_route_provider_auth(&route.provider)?
+            };
+            if app_type == "claude-code" && Self::is_kimi_provider(route.provider.as_str()) {
+                let use_kimi_coding_endpoint = auth
+                    .base_url
+                    .as_deref()
+                    .map(|value| {
+                        let lower = value.trim().to_ascii_lowercase();
+                        lower.is_empty()
+                            || lower.contains("moonshot.ai")
+                            || lower.contains("moonshot.cn")
+                    })
+                    .unwrap_or(true);
+                if use_kimi_coding_endpoint {
+                    // Kimi 官方 Claude Code 接入端点。
+                    auth.base_url = Some("https://api.kimi.com/coding".to_string());
+                }
+            }
+            let effective_model =
+                self.resolve_route_model_for_app(app_type, &provider, route.model.as_deref());
+            let max_retries = if provider.details.test_config_enabled {
+                provider.details.test_max_retries.unwrap_or(0)
+            } else {
+                0
+            };
             return Ok(Some(GatewayResolvedRoute {
                 app_type: route.app_type,
                 provider: route.provider,
-                model: route.model,
-                upstream_api_key,
-                upstream_base_url,
+                model: effective_model,
+                upstream_api_key: auth.api_key,
+                upstream_base_url: auth.base_url,
+                upstream_headers: auth.headers,
+                upstream_timeout_ms: auth.timeout_ms,
+                upstream_proxy_url: auth.proxy_url,
+                upstream_proxy_username: auth.proxy_username,
+                upstream_proxy_password: auth.proxy_password,
+                upstream_max_retries: max_retries.max(0).min(5),
             }));
         }
 
         Ok(None)
     }
 
-    fn apply_claude_code_route(&self, _provider: &str, model: Option<&str>) -> Result<(), String> {
+    fn apply_claude_code_route(&self, provider: &str, model: Option<&str>) -> Result<(), String> {
+        let provider_config = self
+            .get_provider_config(provider)
+            .ok_or_else(|| format!("Provider not found: {}", provider))?;
+        let details = &provider_config.details;
+        let selected_model = self.resolve_route_model_for_app("claude-code", &provider_config, model);
+        let default_haiku =
+            Self::non_empty_owned(&details.default_haiku_model).or_else(|| selected_model.clone());
+        let default_sonnet =
+            Self::non_empty_owned(&details.default_sonnet_model).or_else(|| selected_model.clone());
+        let default_opus =
+            Self::non_empty_owned(&details.default_opus_model).or_else(|| selected_model.clone());
+
         let settings_path = self.resolve_claude_settings_path()?;
         let gateway_token = self.get_or_create_gateway_token("claude-code")?;
         let gateway_base_url = self.gateway_base_url();
@@ -2182,63 +3155,90 @@ impl Vault {
             )
         })?;
 
-        let env_value = root
-            .entry("env".to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-        if !env_value.is_object() {
-            return Err(format!(
-                "Claude settings 的 env 字段必须是对象: {}",
-                settings_path.display()
-            ));
+        {
+            let env_value = root
+                .entry("env".to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            if !env_value.is_object() {
+                return Err(format!(
+                    "Claude settings 的 env 字段必须是对象: {}",
+                    settings_path.display()
+                ));
+            }
+            let env = env_value.as_object_mut().expect("env object checked above");
+
+            env.insert(
+                "ANTHROPIC_API_KEY".to_string(),
+                Value::String(gateway_token.clone()),
+            );
+            // Keep only one auth variable to avoid Claude Code auth conflict warnings.
+            env.remove("ANTHROPIC_AUTH_TOKEN");
+            env.insert(
+                "MYKEY_GATEWAY_KEY".to_string(),
+                Value::String(gateway_token),
+            );
+            env.insert(
+                "MYKEY_GATEWAY_BASE_URL".to_string(),
+                Value::String(gateway_base_url.clone()),
+            );
+
+            env.insert(
+                "ANTHROPIC_BASE_URL".to_string(),
+                Value::String(gateway_base_url),
+            );
+
+            if let Some(model) = selected_model.as_ref() {
+                env.insert("ANTHROPIC_MODEL".to_string(), Value::String(model.clone()));
+            } else {
+                env.remove("ANTHROPIC_MODEL");
+            }
+
+            if let Some(model) = default_haiku {
+                env.insert(
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+                    Value::String(model),
+                );
+            } else {
+                env.remove("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+            }
+
+            if let Some(model) = default_sonnet {
+                env.insert(
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                    Value::String(model),
+                );
+            } else {
+                env.remove("ANTHROPIC_DEFAULT_SONNET_MODEL");
+            }
+
+            if let Some(model) = default_opus {
+                env.insert(
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+                    Value::String(model),
+                );
+            } else {
+                env.remove("ANTHROPIC_DEFAULT_OPUS_MODEL");
+            }
+
+            if let Some(reasoning_model) = Self::non_empty_owned(&details.reasoning_model) {
+                env.insert(
+                    "MYKEY_REASONING_MODEL".to_string(),
+                    Value::String(reasoning_model),
+                );
+            } else {
+                env.remove("MYKEY_REASONING_MODEL");
+            }
+
+            if let Some(main_model) = Self::non_empty_owned(&details.main_model) {
+                env.insert("MYKEY_MAIN_MODEL".to_string(), Value::String(main_model));
+            } else {
+                env.remove("MYKEY_MAIN_MODEL");
+            }
         }
-        let env = env_value.as_object_mut().expect("env object checked above");
 
-        env.insert(
-            "ANTHROPIC_AUTH_TOKEN".to_string(),
-            Value::String(gateway_token.clone()),
-        );
-        env.insert(
-            "ANTHROPIC_API_KEY".to_string(),
-            Value::String(gateway_token.clone()),
-        );
-        env.insert(
-            "MYKEY_GATEWAY_KEY".to_string(),
-            Value::String(gateway_token),
-        );
-        env.insert(
-            "MYKEY_GATEWAY_BASE_URL".to_string(),
-            Value::String(gateway_base_url.clone()),
-        );
-
-        env.insert(
-            "ANTHROPIC_BASE_URL".to_string(),
-            Value::String(gateway_base_url),
-        );
-
-        let model = model
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty());
-        if let Some(model) = model {
-            let model = model.to_string();
-            env.insert("ANTHROPIC_MODEL".to_string(), Value::String(model.clone()));
-            env.insert(
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-                Value::String(model.clone()),
-            );
-            env.insert(
-                "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
-                Value::String(model.clone()),
-            );
-            env.insert(
-                "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
-                Value::String(model.clone()),
-            );
+        if let Some(model) = selected_model {
             root.insert("model".to_string(), Value::String(model));
         } else {
-            env.remove("ANTHROPIC_MODEL");
-            env.remove("ANTHROPIC_DEFAULT_HAIKU_MODEL");
-            env.remove("ANTHROPIC_DEFAULT_SONNET_MODEL");
-            env.remove("ANTHROPIC_DEFAULT_OPUS_MODEL");
             root.remove("model");
         }
 
@@ -2250,7 +3250,10 @@ impl Vault {
         Ok(())
     }
 
-    fn apply_codex_route(&self, model: Option<&str>) -> Result<(), String> {
+    fn apply_codex_route(&self, provider: &str, model: Option<&str>) -> Result<(), String> {
+        let provider_config = self
+            .get_provider_config(provider)
+            .ok_or_else(|| format!("Provider not found: {}", provider))?;
         let config_path = self.resolve_integration_config_path("codex", "config.toml")?;
         let gateway_token = self.get_or_create_gateway_token("codex")?;
         let gateway_base_url = self.gateway_base_url();
@@ -2260,14 +3263,13 @@ impl Vault {
             .as_object_mut()
             .ok_or_else(|| format!("Codex 配置根节点必须是对象: {}", config_path.display()))?;
 
-        let selected_model = model
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-            .unwrap_or("gpt-5");
+        let selected_model = self
+            .resolve_route_model_for_app("codex", &provider_config, model)
+            .unwrap_or_else(|| "gpt-5".to_string());
 
         root.insert(
             "model".to_string(),
-            Value::String(selected_model.to_string()),
+            Value::String(selected_model),
         );
         root.insert(
             "model_provider".to_string(),
@@ -2299,8 +3301,11 @@ impl Vault {
     }
 
     fn apply_opencode_route(&self, provider: &str, model: Option<&str>) -> Result<(), String> {
+        let provider_config = self
+            .get_provider_config(provider)
+            .ok_or_else(|| format!("Provider not found: {}", provider))?;
         let config_path = self.resolve_integration_config_path("opencode", "opencode.json")?;
-        let (api_key, base_url) = self.resolve_route_provider_auth(provider)?;
+        let auth = self.resolve_route_provider_auth(provider)?;
         let mut settings = Self::read_json_like_or_default(&config_path)?;
 
         let root = settings
@@ -2314,14 +3319,11 @@ impl Vault {
         }
 
         let provider_key = format!("mykey-{}", Self::normalized_provider_key(provider));
-        let selected_model = model
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_string());
+        let selected_model = self.resolve_route_model_for_app("opencode", &provider_config, model);
 
         let mut options = Map::new();
-        options.insert("apiKey".to_string(), Value::String(api_key));
-        if let Some(url) = base_url {
+        options.insert("apiKey".to_string(), Value::String(auth.api_key));
+        if let Some(url) = auth.base_url {
             options.insert("baseURL".to_string(), Value::String(url));
         }
 
@@ -2370,8 +3372,11 @@ impl Vault {
     }
 
     fn apply_openclaw_route(&self, provider: &str, model: Option<&str>) -> Result<(), String> {
+        let provider_config = self
+            .get_provider_config(provider)
+            .ok_or_else(|| format!("Provider not found: {}", provider))?;
         let config_path = self.resolve_integration_config_path("openclaw", "openclaw.json")?;
-        let (api_key, base_url) = self.resolve_route_provider_auth(provider)?;
+        let auth = self.resolve_route_provider_auth(provider)?;
         let mut settings = Self::read_json_like_or_default(&config_path)?;
 
         let root = settings
@@ -2392,21 +3397,17 @@ impl Vault {
                 "api".to_string(),
                 Value::String(Self::openclaw_api_for_provider(provider).to_string()),
             );
-            provider_obj.insert("apiKey".to_string(), Value::String(api_key));
-            if let Some(url) = base_url {
+            provider_obj.insert("apiKey".to_string(), Value::String(auth.api_key));
+            if let Some(url) = auth.base_url {
                 provider_obj.insert("baseUrl".to_string(), Value::String(url));
             }
 
-            if let Some(selected_model) = model
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
+            if let Some(selected_model) =
+                self.resolve_route_model_for_app("openclaw", &provider_config, model)
             {
                 let mut model_item = Map::new();
-                model_item.insert("id".to_string(), Value::String(selected_model.to_string()));
-                model_item.insert(
-                    "name".to_string(),
-                    Value::String(selected_model.to_string()),
-                );
+                model_item.insert("id".to_string(), Value::String(selected_model.clone()));
+                model_item.insert("name".to_string(), Value::String(selected_model));
                 provider_obj.insert(
                     "models".to_string(),
                     Value::Array(vec![Value::Object(model_item)]),
@@ -2416,9 +3417,8 @@ impl Vault {
             providers.insert(provider_key.clone(), Value::Object(provider_obj));
         }
 
-        if let Some(selected_model) = model
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
+        if let Some(selected_model) =
+            self.resolve_route_model_for_app("openclaw", &provider_config, model)
         {
             let model_ref = format!("{}/{}", provider_key, selected_model);
             let agents = Self::ensure_object_field(root, "agents", &config_path)?;
@@ -2467,7 +3467,7 @@ impl Vault {
             self.apply_openclaw_route(provider, model.as_deref())?;
         }
         if app_type == "codex" {
-            self.apply_codex_route(model.as_deref())?;
+            self.apply_codex_route(provider, model.as_deref())?;
         }
 
         self.conn
@@ -2525,6 +3525,7 @@ impl Vault {
         }
         let config_path = self.resolve_integration_config_path("opencode", "opencode.json")?;
         Self::write_json_config(&config_path, &config)?;
+        self.sync_tool_inventory_for_app("opencode", &config)?;
         Ok(true)
     }
 
@@ -2543,6 +3544,7 @@ impl Vault {
         let fallback_name = Self::integration_fallback_config_file_name(app_type);
         let config_path = self.resolve_integration_config_path(app_type, fallback_name)?;
         Self::write_json_config(&config_path, &config)?;
+        self.sync_tool_inventory_for_app(app_type, &config)?;
         Ok(true)
     }
 
@@ -2700,25 +3702,363 @@ impl Vault {
                     .unwrap_or(Path::new("."))
                     .join("backups")
             });
-        std::fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
+        let run_id = self.record_backup_run_start(
+            "local_backup",
+            serde_json::json!({ "target_dir": backup_dir.to_string_lossy().to_string() }),
+        );
 
-        let backup_path =
-            backup_dir.join(format!("vault-backup-{}.db", now.format("%Y%m%d-%H%M%S")));
-        let backup_path_string = backup_path.to_string_lossy().to_string();
-        let escaped = backup_path_string.replace('\'', "''");
+        let result = (|| -> Result<String, String> {
+            std::fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
 
-        let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
-        let vacuum_sql = format!("VACUUM INTO '{}';", escaped);
+            let backup_path =
+                backup_dir.join(format!("vault-backup-{}.db", now.format("%Y%m%d-%H%M%S")));
+            let backup_path_string = backup_path.to_string_lossy().to_string();
+            let escaped = backup_path_string.replace('\'', "''");
 
-        if let Err(vacuum_err) = self.conn.execute_batch(&vacuum_sql) {
-            std::fs::copy(&self.db_path, &backup_path).map_err(|copy_err| {
-                format!("Backup failed: {vacuum_err}; fallback copy failed: {copy_err}")
-            })?;
+            let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+            let vacuum_sql = format!("VACUUM INTO '{}';", escaped);
+
+            if let Err(vacuum_err) = self.conn.execute_batch(&vacuum_sql) {
+                std::fs::copy(&self.db_path, &backup_path).map_err(|copy_err| {
+                    format!("Backup failed: {vacuum_err}; fallback copy failed: {copy_err}")
+                })?;
+            }
+
+            self.meta_set("last_backup_at", &now.to_rfc3339())?;
+            self.meta_set("backup_dir", &backup_dir.to_string_lossy())?;
+            Ok(backup_path_string)
+        })();
+
+        if let Ok(run_id) = run_id {
+            match &result {
+                Ok(path) => {
+                    let _ = self.record_backup_run_finish(
+                        &run_id,
+                        "success",
+                        serde_json::json!({ "backup_path": path }),
+                    );
+                }
+                Err(error) => {
+                    let _ = self.record_backup_run_finish(
+                        &run_id,
+                        "failed",
+                        serde_json::json!({ "error": error }),
+                    );
+                }
+            }
         }
 
-        self.meta_set("last_backup_at", &now.to_rfc3339())?;
-        self.meta_set("backup_dir", &backup_dir.to_string_lossy())?;
-        Ok(backup_path_string)
+        result
+    }
+
+    pub fn restore_from_backup(&mut self, backup_path: String) -> Result<(), String> {
+        let trimmed = backup_path.trim();
+        if trimmed.is_empty() {
+            return Err("Backup path cannot be empty".to_string());
+        }
+
+        let input_path = PathBuf::from(trimmed);
+        if !input_path.exists() {
+            return Err(format!("Backup file not found: {}", input_path.display()));
+        }
+        if !input_path.is_file() {
+            return Err(format!(
+                "Backup path is not a file: {}",
+                input_path.display()
+            ));
+        }
+
+        let canonical_path = input_path.canonicalize().unwrap_or(input_path.clone());
+        let attached_path = canonical_path.to_string_lossy().to_string();
+        let run_id = self.record_backup_run_start(
+            "local_restore",
+            serde_json::json!({ "backup_path": attached_path.clone() }),
+        );
+
+        let result = (|| -> Result<(), String> {
+            self.conn
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .map_err(|e| e.to_string())?;
+            self.conn
+                .execute("ATTACH DATABASE ?1 AS backup", params![attached_path])
+                .map_err(|e| e.to_string())?;
+
+            let restore_result = (|| -> Result<(), String> {
+                let main_tables = Self::list_user_tables(&self.conn, "main")?;
+                let backup_tables = Self::list_user_tables(&self.conn, "backup")?;
+
+                self.conn
+                    .execute_batch("BEGIN IMMEDIATE TRANSACTION; PRAGMA foreign_keys=OFF;")
+                    .map_err(|e| e.to_string())?;
+
+                let mut copied_tables: Vec<String> = main_tables
+                    .intersection(&backup_tables)
+                    .filter(|name| name.as_str() != "meta")
+                    .cloned()
+                    .collect();
+                copied_tables.sort();
+
+                for table in copied_tables {
+                    let quoted = quote_identifier(&table);
+                    let delete_sql = format!("DELETE FROM main.{quoted}");
+                    let insert_sql = format!("INSERT INTO main.{quoted} SELECT * FROM backup.{quoted}");
+                    self.conn
+                        .execute_batch(&delete_sql)
+                        .map_err(|e| e.to_string())?;
+                    self.conn
+                        .execute_batch(&insert_sql)
+                        .map_err(|e| e.to_string())?;
+                }
+
+                if main_tables.contains("meta") && backup_tables.contains("meta") {
+                    self.conn
+                        .execute(
+                            "DELETE FROM main.meta WHERE key != 'master_password_hash'",
+                            [],
+                        )
+                        .map_err(|e| e.to_string())?;
+                    self.conn
+                        .execute(
+                            "INSERT INTO main.meta SELECT key, value FROM backup.meta WHERE key != 'master_password_hash'",
+                            [],
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+
+                self.conn
+                    .execute_batch("PRAGMA foreign_keys=ON; COMMIT;")
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })();
+
+            if restore_result.is_err() {
+                let _ = self.conn.execute_batch("ROLLBACK; PRAGMA foreign_keys=ON;");
+            }
+
+            let detach_result = self
+                .conn
+                .execute_batch("DETACH DATABASE backup")
+                .map_err(|e| e.to_string());
+
+            restore_result?;
+            detach_result?;
+
+            self.reload_runtime_cache()?;
+            Ok(())
+        })();
+
+        if let Ok(run_id) = run_id {
+            match &result {
+                Ok(_) => {
+                    let _ = self.record_backup_run_finish(
+                        &run_id,
+                        "success",
+                        serde_json::json!({ "backup_path": attached_path }),
+                    );
+                }
+                Err(error) => {
+                    let _ = self.record_backup_run_finish(
+                        &run_id,
+                        "failed",
+                        serde_json::json!({ "backup_path": attached_path, "error": error }),
+                    );
+                }
+            }
+        }
+
+        result
+    }
+
+    fn record_backup_run_start(&self, run_type: &str, detail: Value) -> Result<String, String> {
+        let run_id = Uuid::new_v4().to_string();
+        let started_at = Local::now().to_rfc3339();
+        let detail_json = serde_json::to_string(&detail).map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "INSERT INTO backup_runs (id, run_type, status, started_at, detail_json)
+                 VALUES (?1, ?2, 'running', ?3, ?4)",
+                params![run_id, run_type, started_at, detail_json],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(run_id)
+    }
+
+    fn record_backup_run_finish(
+        &self,
+        run_id: &str,
+        status: &str,
+        detail: Value,
+    ) -> Result<(), String> {
+        let finished_at = Local::now().to_rfc3339();
+        let detail_json = serde_json::to_string(&detail).map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "UPDATE backup_runs
+                 SET status = ?1, finished_at = ?2, detail_json = ?3
+                 WHERE id = ?4",
+                params![status, finished_at, detail_json, run_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn sync_tool_inventory_for_app(&self, app_type: &str, config: &Value) -> Result<(), String> {
+        let app_type = app_type.trim();
+        if app_type.is_empty() {
+            return Ok(());
+        }
+
+        let mut rows: Vec<(String, String, String, String, Option<String>)> = Vec::new();
+        if let Some(root) = config.as_object() {
+            if let Some(mcp_entries) = Self::extract_mcp_entries(root) {
+                for (name, payload) in mcp_entries {
+                    let content_json = serde_json::to_string(payload).map_err(|e| e.to_string())?;
+                    rows.push((
+                        "mcp".to_string(),
+                        name.to_string(),
+                        content_json,
+                        "[]".to_string(),
+                        None,
+                    ));
+                }
+            }
+
+            if let Some(skill_entries) = Self::extract_skill_entries(root) {
+                for (name, payload) in skill_entries {
+                    let content_json = serde_json::to_string(payload).map_err(|e| e.to_string())?;
+                    let tags = payload
+                        .get("tags")
+                        .and_then(|value| value.as_array())
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str())
+                                .map(str::to_string)
+                                .collect::<Vec<String>>()
+                        })
+                        .unwrap_or_default();
+                    let description = payload
+                        .get("description")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
+                    let tags_json = serde_json::to_string(&tags).map_err(|e| e.to_string())?;
+                    rows.push((
+                        "skill".to_string(),
+                        name.to_string(),
+                        content_json,
+                        tags_json,
+                        description,
+                    ));
+                }
+            }
+        }
+
+        self.conn
+            .execute(
+                "DELETE FROM tool_bindings
+                 WHERE scope_type = 'app'
+                   AND scope_id = ?1
+                   AND tool_id IN (
+                     SELECT id FROM tool_items WHERE source_type = 'integration' AND source_ref = ?1
+                   )",
+                params![app_type],
+            )
+            .map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "DELETE FROM tool_items WHERE source_type = 'integration' AND source_ref = ?1",
+                params![app_type],
+            )
+            .map_err(|e| e.to_string())?;
+
+        let now = Local::now().to_rfc3339();
+        for (tool_type, name, content_json, tags_json, description) in rows {
+            let tool_id = Uuid::new_v4().to_string();
+            self.conn
+                .execute(
+                    "INSERT INTO tool_items
+                        (id, tool_type, name, source_type, source_ref, content_json, tags_json, description, updated_at)
+                     VALUES (?1, ?2, ?3, 'integration', ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        tool_id,
+                        tool_type,
+                        name,
+                        app_type,
+                        content_json,
+                        tags_json,
+                        description,
+                        now
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+            self.conn
+                .execute(
+                    "INSERT INTO tool_bindings
+                        (id, tool_id, scope_type, scope_id, env, enabled, priority, updated_at)
+                     VALUES (?1, ?2, 'app', ?3, NULL, 1, 0, ?4)",
+                    params![Uuid::new_v4().to_string(), tool_id, app_type, now],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
+
+    fn extract_mcp_entries<'a>(root: &'a Map<String, Value>) -> Option<&'a Map<String, Value>> {
+        ["mcp", "mcpServers", "mcps"]
+            .iter()
+            .find_map(|key| root.get(*key).and_then(|value| value.as_object()))
+    }
+
+    fn extract_skill_entries<'a>(root: &'a Map<String, Value>) -> Option<&'a Map<String, Value>> {
+        let base = if let Some(skill) = root.get("skill").and_then(|value| value.as_object()) {
+            Some(skill)
+        } else {
+            root.get("skills").and_then(|value| value.as_object())
+        }?;
+
+        if let Some(entries) = base.get("entries").and_then(|value| value.as_object()) {
+            if !entries.is_empty() {
+                return Some(entries);
+            }
+        }
+        Some(base)
+    }
+
+    fn list_user_tables(conn: &Connection, schema: &str) -> Result<HashSet<String>, String> {
+        let sql = format!(
+            "SELECT name FROM {schema}.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut tables = HashSet::new();
+        for row in rows {
+            let name = row.map_err(|e| e.to_string())?;
+            tables.insert(name);
+        }
+        Ok(tables)
+    }
+
+    fn reload_runtime_cache(&mut self) -> Result<(), String> {
+        self.master_password_hash = Self::load_master_password(&self.conn).unwrap_or(None);
+        self.credentials = Self::load_credentials(&self.conn)?;
+        self.providers = Self::load_providers(&self.conn)?;
+        self.prompts = Self::load_prompts(&self.conn)?;
+        self.provider_endpoints = Self::load_provider_endpoints(&self.conn)?;
+        self.provider_models = Self::load_provider_models(&self.conn)?;
+        self.provider_env_vars = Self::load_provider_env_vars(&self.conn)?;
+        self.provider_app_bindings = Self::load_provider_app_bindings(&self.conn)?;
+        self.secret_manager = Self::init_secret_manager(&self.db_path)?;
+        self.ensure_default_providers();
+        self.ensure_usage_provider_settings();
+        self.ensure_global_settings_defaults();
+        self.ensure_app_routes_defaults();
+        self.refresh_app_integration_detection();
+        self.migrate_legacy_secrets();
+        self.ensure_unified_relations_defaults();
+        Ok(())
     }
 
     fn get_debug_mode(&self) -> Result<bool, String> {
@@ -3032,13 +4372,16 @@ impl Vault {
     fn load_providers(conn: &Connection) -> Result<HashMap<String, ProviderConfig>, String> {
         let mut stmt = conn
             .prepare(
-                "SELECT provider, label, api_key, base_url, updated_at, is_active, models FROM providers",
+                "SELECT provider, label, api_key, base_url, updated_at, is_active, models, details_json FROM providers",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
                 let models_raw: String = row.get(6)?;
                 let models: Vec<String> = serde_json::from_str(&models_raw).unwrap_or_default();
+                let details_raw: String = row.get(7)?;
+                let details: ProviderDetails =
+                    serde_json::from_str(&details_raw).unwrap_or_default();
                 Ok(ProviderConfig {
                     provider: row.get(0)?,
                     label: row.get(1)?,
@@ -3047,6 +4390,7 @@ impl Vault {
                     updated_at: row.get(4)?,
                     is_active: int_to_bool(row.get(5)?),
                     models,
+                    details,
                     endpoints: Vec::new(),
                     env_vars: Vec::new(),
                     app_bindings: Vec::new(),
@@ -3233,7 +4577,7 @@ impl Vault {
                 if self
                     .conn
                     .execute(
-                        "INSERT INTO providers (provider, label, api_key, base_url, updated_at, is_active, models) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        "INSERT INTO providers (provider, label, api_key, base_url, updated_at, is_active, models, details_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         params![
                             provider_config.provider,
                             provider_config.label,
@@ -3242,6 +4586,8 @@ impl Vault {
                             provider_config.updated_at,
                             bool_to_int(provider_config.is_active),
                             models_json,
+                            serde_json::to_string(&provider_config.details)
+                                .unwrap_or_else(|_| "{}".to_string()),
                         ],
                     )
                     .is_ok()
@@ -3422,6 +4768,7 @@ impl Vault {
                 params![id, name, path, credential_id, now, now],
             )
             .map_err(|e| e.to_string())?;
+        self.sync_default_project_binding(&id, credential_id.as_deref())?;
 
         Ok(crate::Project {
             id,
@@ -3482,6 +4829,7 @@ impl Vault {
         if count == 0 {
             return Err("Project not found".to_string());
         }
+        self.sync_default_project_binding(&id, credential_id.as_deref())?;
 
         // Fetch creation time to return full object
         let created_at: String = self
@@ -3504,6 +4852,9 @@ impl Vault {
     }
 
     pub fn delete_project(&mut self, id: &str) -> Result<(), String> {
+        let _ = self
+            .conn
+            .execute("DELETE FROM project_bindings WHERE project_id = ?1", params![id]);
         let count = self
             .conn
             .execute("DELETE FROM projects WHERE id = ?1", params![id])
@@ -3530,6 +4881,10 @@ fn int_to_bool(value: i64) -> bool {
 
 fn project_label_secret_id(credential_id: &str) -> String {
     format!("project-label:{credential_id}")
+}
+
+fn quote_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 fn mask_key(value: &str) -> String {
