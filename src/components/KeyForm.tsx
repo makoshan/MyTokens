@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import './KeyForm.css'
 import type { ProviderConfig } from '../types/provider'
-import { buildProviderSelectOptions } from '../utils/provider'
+import { buildProviderSelectGroups } from '../utils/provider'
 
 interface Credential {
   id: string
@@ -66,13 +66,10 @@ export default function KeyForm({
     }
   }
 
-  const providerOptions = buildProviderSelectOptions(providers)
-  const safeProviderOptions = (() => {
-    const base = providerOptions.length > 0 ? providerOptions : [{ value: 'openai', label: 'OpenAI' }]
-    if (!provider.trim()) return base
-    if (base.some((item) => item.value === provider)) return base
-    return [{ value: provider, label: provider }, ...base]
-  })()
+  const providerGroups = buildProviderSelectGroups(providers)
+  const hasKnownProvider = providerGroups.some((group) =>
+    group.options.some((item) => item.value === provider)
+  )
 
   return (
     <div className="modal-overlay" onClick={onCancel}>
@@ -93,10 +90,20 @@ export default function KeyForm({
               onChange={(e) => setProvider(e.target.value)}
               className={errors.provider ? 'error' : ''}
             >
-              {safeProviderOptions.map((p) => (
-                <option key={p.value} value={p.value}>
-                  {p.label}
-                </option>
+              {!provider.trim() ? null : !hasKnownProvider ? (
+                <option value={provider}>{provider}</option>
+              ) : null}
+              {providerGroups.length === 0 ? (
+                <option value="openai">OpenAI</option>
+              ) : null}
+              {providerGroups.map((group) => (
+                <optgroup key={group.category} label={group.label}>
+                  {group.options.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
             {errors.provider && <span className="error-message">{errors.provider}</span>}

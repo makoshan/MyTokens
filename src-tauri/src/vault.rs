@@ -2,7 +2,8 @@ use crate::{
     provider_defaults, secret_store::Secret, secret_store::SecretManager,
     secret_store::SecretMetadata, secret_store::SecretStoreConfig, usage::CostUsage,
     usage::UsageQuota, usage::UsageSnapshot, AppIntegration, AppRoute, Credential,
-    GlobalSettingsPayload, PromptTemplate, ProviderAppBinding, ProviderConfig, ProviderEndpoint,
+    ExternalLibraryMcp, ExternalLibrarySkill, GlobalSettingsPayload, IntegrationConfigSnapshot,
+    OpencodeConfigSnapshot, PromptTemplate, ProviderAppBinding, ProviderConfig, ProviderEndpoint,
     ProviderEnvVar, ProviderModel, ServiceConfig,
 };
 use chrono::Local;
@@ -395,6 +396,91 @@ impl Vault {
 
         let updated = entry.clone();
         Ok(self.decorate_provider(&updated))
+    }
+
+    pub fn set_provider_active(
+        &mut self,
+        provider: &str,
+        is_active: bool,
+    ) -> Result<ProviderConfig, String> {
+        let now = Local::now().to_rfc3339();
+        let entry = self
+            .providers
+            .get_mut(provider)
+            .ok_or_else(|| format!("Provider not found: {}", provider))?;
+        entry.is_active = is_active;
+        entry.updated_at = now.clone();
+
+        self.conn
+            .execute(
+                "UPDATE providers SET is_active = ?1, updated_at = ?2 WHERE provider = ?3",
+                params![bool_to_int(is_active), now, provider],
+            )
+            .map_err(|e| e.to_string())?;
+
+        let updated = entry.clone();
+        Ok(self.decorate_provider(&updated))
+    }
+
+    pub fn delete_provider(&mut self, provider: &str) -> Result<(), String> {
+        let provider = provider.trim();
+        if provider.is_empty() {
+            return Err("Provider cannot be empty".to_string());
+        }
+        if Self::is_builtin_provider(provider) {
+            return Err("内置服务不支持删除，可改为停用。".to_string());
+        }
+        if self
+            .credentials
+            .values()
+            .any(|credential| credential.provider == provider)
+        {
+            return Err("该服务仍被密钥库引用，请先迁移或删除相关密钥。".to_string());
+        }
+
+        self.conn
+            .execute(
+                "DELETE FROM providers WHERE provider = ?1",
+                params![provider],
+            )
+            .map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "DELETE FROM provider_endpoints WHERE provider = ?1",
+                params![provider],
+            )
+            .map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "DELETE FROM provider_models WHERE provider = ?1",
+                params![provider],
+            )
+            .map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "DELETE FROM provider_env_vars WHERE provider = ?1",
+                params![provider],
+            )
+            .map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "DELETE FROM provider_apps WHERE provider = ?1",
+                params![provider],
+            )
+            .map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "DELETE FROM usage_provider_settings WHERE provider = ?1",
+                params![provider],
+            )
+            .map_err(|e| e.to_string())?;
+
+        self.providers.remove(provider);
+        self.provider_endpoints.remove(provider);
+        self.provider_models.remove(provider);
+        self.provider_env_vars.remove(provider);
+        self.provider_app_bindings.remove(provider);
+        Ok(())
     }
 
     pub fn get_prompts(&self) -> Vec<PromptTemplate> {
@@ -1238,6 +1324,152 @@ impl Vault {
         }
     }
 
+    fn resolve_integration_config_path(
+        &self,
+        app_type: &str,
+        fallback_file_name: &str,
+    ) -> Result<PathBuf, String> {
+        let raw_path = self
+            .get_integration_path(app_type)?
+            .or_else(|| Self::default_integration_path(app_type))
+            .ok_or_else(|| format!("Cannot resolve {} config path", app_type))?;
+        let mut normalized = Self::normalize_config_path(&raw_path, fallback_file_name);
+        if app_type == "claude-code"
+            && normalized
+                .to_string_lossy()
+                .ends_with("/.claude/settings.json")
+        {
+            if let Some(home) = dirs::home_dir() {
+                let claude_json = home.join(".claude.json");
+                if claude_json.exists() {
+                    normalized = claude_json;
+                }
+            }
+        }
+        Ok(normalized)
+    }
+
+    fn normalize_config_path(raw_path: &str, fallback_file_name: &str) -> PathBuf {
+        let trimmed = raw_path.trim();
+        let expanded = shellexpand::tilde(trimmed).to_string();
+        let path = PathBuf::from(expanded);
+        let looks_like_dir = trimmed.ends_with('/')
+            || trimmed.ends_with('\\')
+            || path.is_dir()
+            || path.extension().is_none();
+        if looks_like_dir {
+            path.join(fallback_file_name)
+        } else {
+            path
+        }
+    }
+
+    fn read_json_like_or_default(path: &Path) -> Result<Value, String> {
+        if !path.exists() {
+            return Ok(serde_json::json!({}));
+        }
+        let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        if raw.trim().is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("toml"))
+            .unwrap_or(false)
+        {
+            let toml_value = raw
+                .parse::<toml::Value>()
+                .map_err(|e| format!("配置文件不是有效 TOML: {} ({})", path.display(), e))?;
+            let json_value = serde_json::to_value(toml_value)
+                .map_err(|e| format!("TOML 转 JSON 失败: {} ({})", path.display(), e))?;
+            return Ok(json_value);
+        }
+        json5::from_str::<Value>(&raw)
+            .map_err(|e| format!("配置文件不是有效 JSON/JSON5: {} ({})", path.display(), e))
+    }
+
+    fn write_json_config(path: &Path, value: &Value) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("toml"))
+            .unwrap_or(false)
+        {
+            let toml_value: toml::Value =
+                serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            let payload = toml::to_string_pretty(&toml_value).map_err(|e| e.to_string())?;
+            return std::fs::write(path, payload).map_err(|e| e.to_string());
+        }
+        let payload = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+        std::fs::write(path, payload).map_err(|e| e.to_string())
+    }
+
+    fn ensure_object_field<'a>(
+        parent: &'a mut Map<String, Value>,
+        key: &str,
+        path_hint: &Path,
+    ) -> Result<&'a mut Map<String, Value>, String> {
+        let value = parent
+            .entry(key.to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        value
+            .as_object_mut()
+            .ok_or_else(|| format!("配置字段 '{}' 必须为对象: {}", key, path_hint.display()))
+    }
+
+    fn normalized_provider_key(provider: &str) -> String {
+        let mut out = String::new();
+        let mut prev_dash = false;
+        for ch in provider.chars() {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch.to_ascii_lowercase());
+                prev_dash = false;
+            } else if !prev_dash {
+                out.push('-');
+                prev_dash = true;
+            }
+        }
+        let out = out.trim_matches('-').to_string();
+        if out.is_empty() {
+            "provider".to_string()
+        } else {
+            out
+        }
+    }
+
+    fn provider_label_or_id(&self, provider: &str) -> String {
+        self.providers
+            .get(provider)
+            .map(|item| {
+                if item.label.trim().is_empty() {
+                    item.provider.clone()
+                } else {
+                    item.label.clone()
+                }
+            })
+            .unwrap_or_else(|| provider.to_string())
+    }
+
+    fn opencode_npm_for_provider(provider: &str) -> &'static str {
+        match provider {
+            "anthropic" | "claude" | "claude-code" => "@ai-sdk/anthropic",
+            "gemini" | "google-ai" => "@ai-sdk/google",
+            "openai" => "@ai-sdk/openai",
+            _ => "@ai-sdk/openai-compatible",
+        }
+    }
+
+    fn openclaw_api_for_provider(provider: &str) -> &'static str {
+        match provider {
+            "anthropic" | "claude" | "claude-code" => "anthropic-messages",
+            _ => "openai-completions",
+        }
+    }
+
     fn resolve_route_provider_auth(
         &self,
         provider: &str,
@@ -1356,6 +1588,143 @@ impl Vault {
         Ok(())
     }
 
+    fn apply_opencode_route(&self, provider: &str, model: Option<&str>) -> Result<(), String> {
+        let config_path = self.resolve_integration_config_path("opencode", "opencode.json")?;
+        let (api_key, base_url) = self.resolve_route_provider_auth(provider)?;
+        let mut settings = Self::read_json_like_or_default(&config_path)?;
+
+        let root = settings
+            .as_object_mut()
+            .ok_or_else(|| format!("OpenCode 配置根节点必须是对象: {}", config_path.display()))?;
+        if root.get("$schema").is_none() {
+            root.insert(
+                "$schema".to_string(),
+                Value::String("https://opencode.ai/config.json".to_string()),
+            );
+        }
+
+        let provider_key = format!("mykey-{}", Self::normalized_provider_key(provider));
+        let selected_model = model
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+
+        let mut options = Map::new();
+        options.insert("apiKey".to_string(), Value::String(api_key));
+        if let Some(url) = base_url {
+            options.insert("baseURL".to_string(), Value::String(url));
+        }
+
+        let mut provider_obj = Map::new();
+        provider_obj.insert(
+            "npm".to_string(),
+            Value::String(Self::opencode_npm_for_provider(provider).to_string()),
+        );
+        provider_obj.insert(
+            "name".to_string(),
+            Value::String(self.provider_label_or_id(provider)),
+        );
+        provider_obj.insert("options".to_string(), Value::Object(options));
+
+        let mut models = Map::new();
+        if let Some(selected_model) = selected_model.as_ref() {
+            let mut model_meta = Map::new();
+            model_meta.insert("name".to_string(), Value::String(selected_model.clone()));
+            models.insert(selected_model.clone(), Value::Object(model_meta));
+        }
+        provider_obj.insert("models".to_string(), Value::Object(models));
+
+        {
+            let providers = Self::ensure_object_field(root, "provider", &config_path)?;
+            providers.insert(provider_key.clone(), Value::Object(provider_obj));
+        }
+        if let Some(selected_model) = selected_model {
+            root.insert(
+                "model".to_string(),
+                Value::String(format!("{}/{}", provider_key, selected_model)),
+            );
+        }
+        Self::write_json_config(&config_path, &settings)
+    }
+
+    fn integration_fallback_config_file_name(app_type: &str) -> &'static str {
+        match app_type {
+            "opencode" => "opencode.json",
+            "openclaw" => "openclaw.json",
+            "claude" | "claude-code" => "settings.json",
+            "gemini" => "settings.json",
+            "cursor" => "settings.json",
+            "codex" => "config.json",
+            _ => "config.json",
+        }
+    }
+
+    fn apply_openclaw_route(&self, provider: &str, model: Option<&str>) -> Result<(), String> {
+        let config_path = self.resolve_integration_config_path("openclaw", "openclaw.json")?;
+        let (api_key, base_url) = self.resolve_route_provider_auth(provider)?;
+        let mut settings = Self::read_json_like_or_default(&config_path)?;
+
+        let root = settings
+            .as_object_mut()
+            .ok_or_else(|| format!("OpenClaw 配置根节点必须是对象: {}", config_path.display()))?;
+
+        let provider_key = format!("mykey-{}", Self::normalized_provider_key(provider));
+        {
+            let models_root = Self::ensure_object_field(root, "models", &config_path)?;
+            let providers = Self::ensure_object_field(models_root, "providers", &config_path)?;
+
+            let mut provider_obj = Map::new();
+            provider_obj.insert(
+                "name".to_string(),
+                Value::String(self.provider_label_or_id(provider)),
+            );
+            provider_obj.insert(
+                "api".to_string(),
+                Value::String(Self::openclaw_api_for_provider(provider).to_string()),
+            );
+            provider_obj.insert("apiKey".to_string(), Value::String(api_key));
+            if let Some(url) = base_url {
+                provider_obj.insert("baseUrl".to_string(), Value::String(url));
+            }
+
+            if let Some(selected_model) = model
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            {
+                let mut model_item = Map::new();
+                model_item.insert("id".to_string(), Value::String(selected_model.to_string()));
+                model_item.insert(
+                    "name".to_string(),
+                    Value::String(selected_model.to_string()),
+                );
+                provider_obj.insert(
+                    "models".to_string(),
+                    Value::Array(vec![Value::Object(model_item)]),
+                );
+            }
+
+            providers.insert(provider_key.clone(), Value::Object(provider_obj));
+        }
+
+        if let Some(selected_model) = model
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            let model_ref = format!("{}/{}", provider_key, selected_model);
+            let agents = Self::ensure_object_field(root, "agents", &config_path)?;
+            let defaults = Self::ensure_object_field(agents, "defaults", &config_path)?;
+            let defaults_model = Self::ensure_object_field(defaults, "model", &config_path)?;
+            defaults_model.insert("primary".to_string(), Value::String(model_ref.clone()));
+
+            let allowlist = Self::ensure_object_field(defaults, "models", &config_path)?;
+            allowlist
+                .entry(model_ref)
+                .or_insert_with(|| Value::Object(Map::new()));
+        }
+
+        Self::write_json_config(&config_path, &settings)
+    }
+
     pub fn set_app_route(
         &mut self,
         app_type: &str,
@@ -1381,6 +1750,12 @@ impl Vault {
         if matches!(app_type, "claude-code" | "claude") {
             self.apply_claude_code_route(provider, model.as_deref())?;
         }
+        if app_type == "opencode" {
+            self.apply_opencode_route(provider, model.as_deref())?;
+        }
+        if app_type == "openclaw" {
+            self.apply_openclaw_route(provider, model.as_deref())?;
+        }
 
         self.conn
             .execute(
@@ -1402,6 +1777,135 @@ impl Vault {
             model,
             updated_at: now,
         })
+    }
+
+    pub fn get_opencode_config_snapshot(&self) -> Result<OpencodeConfigSnapshot, String> {
+        let config_path = self.resolve_integration_config_path("opencode", "opencode.json")?;
+        let config = Self::read_json_like_or_default(&config_path)?;
+        Ok(OpencodeConfigSnapshot {
+            config_path: config_path.display().to_string(),
+            config,
+        })
+    }
+
+    pub fn get_integration_config_snapshot(
+        &self,
+        app_type: &str,
+    ) -> Result<IntegrationConfigSnapshot, String> {
+        let app_type = app_type.trim();
+        if app_type.is_empty() {
+            return Err("App type cannot be empty".to_string());
+        }
+        let fallback_name = Self::integration_fallback_config_file_name(app_type);
+        let config_path = self.resolve_integration_config_path(app_type, fallback_name)?;
+        let config = Self::read_json_like_or_default(&config_path)?;
+        Ok(IntegrationConfigSnapshot {
+            app_type: app_type.to_string(),
+            config_path: config_path.display().to_string(),
+            config,
+        })
+    }
+
+    pub fn save_opencode_config_snapshot(&self, config: Value) -> Result<bool, String> {
+        if !config.is_object() {
+            return Err("OpenCode 配置必须是 JSON 对象".to_string());
+        }
+        let config_path = self.resolve_integration_config_path("opencode", "opencode.json")?;
+        Self::write_json_config(&config_path, &config)?;
+        Ok(true)
+    }
+
+    pub fn save_integration_config_snapshot(
+        &self,
+        app_type: &str,
+        config: Value,
+    ) -> Result<bool, String> {
+        let app_type = app_type.trim();
+        if app_type.is_empty() {
+            return Err("App type cannot be empty".to_string());
+        }
+        if !config.is_object() {
+            return Err("配置必须是 JSON 对象".to_string());
+        }
+        let fallback_name = Self::integration_fallback_config_file_name(app_type);
+        let config_path = self.resolve_integration_config_path(app_type, fallback_name)?;
+        Self::write_json_config(&config_path, &config)?;
+        Ok(true)
+    }
+
+    fn claude_tool_manager_db_path() -> Option<PathBuf> {
+        let home = dirs::home_dir()?;
+        Some(
+            home.join("Library")
+                .join("Application Support")
+                .join("com.claude-code-tool-manager.app")
+                .join("mcp_library.db"),
+        )
+    }
+
+    pub fn get_claude_tool_manager_mcps(&self) -> Result<Vec<ExternalLibraryMcp>, String> {
+        let Some(path) = Self::claude_tool_manager_db_path() else {
+            return Ok(Vec::new());
+        };
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let conn = Connection::open(&path).map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT name, type, description, command, url, tags FROM mcps ORDER BY name")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                let tags_raw: Option<String> = row.get(5)?;
+                let tags = tags_raw
+                    .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+                    .unwrap_or_default();
+                Ok(ExternalLibraryMcp {
+                    name: row.get(0)?,
+                    mcp_type: row.get(1)?,
+                    description: row.get(2)?,
+                    command: row.get(3)?,
+                    url: row.get(4)?,
+                    tags,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_claude_tool_manager_skills(&self) -> Result<Vec<ExternalLibrarySkill>, String> {
+        let Some(path) = Self::claude_tool_manager_db_path() else {
+            return Ok(Vec::new());
+        };
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let conn = Connection::open(&path).map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT name, description, tags FROM skills ORDER BY name")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                let tags_raw: Option<String> = row.get(2)?;
+                let tags = tags_raw
+                    .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+                    .unwrap_or_default();
+                Ok(ExternalLibrarySkill {
+                    name: row.get(0)?,
+                    description: row.get(1)?,
+                    tags,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
     }
 
     pub fn set_global_service_enabled(
@@ -1446,6 +1950,30 @@ impl Vault {
             )
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn get_service_runtime(
+        &self,
+        service_name: &str,
+    ) -> Result<Option<(bool, Option<i64>)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT enabled, port
+                 FROM service_runtime
+                 WHERE service_name = ?1
+                 LIMIT 1",
+            )
+            .map_err(|e| e.to_string())?;
+        let row = stmt
+            .query_row(params![service_name], |row| {
+                let enabled = int_to_bool(row.get::<_, i64>(0)?);
+                let port = row.get::<_, Option<i64>>(1)?;
+                Ok((enabled, port))
+            })
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(row)
     }
 
     pub fn create_backup(&mut self, target_dir: Option<String>) -> Result<String, String> {
@@ -1659,9 +2187,12 @@ impl Vault {
             "cursor" => vec![home.join(".cursor")],
             "opencode" => vec![
                 home.join(".config").join("opencode").join("opencode.json"),
+                home.join(".opencode").join("opencode.json"),
                 home.join(".opencode").join("config.json"),
             ],
             "openclaw" => vec![
+                home.join(".openclaw").join("openclaw.json"),
+                home.join(".config").join("openclaw").join("openclaw.json"),
                 home.join(".openclaw").join("config.json"),
                 home.join(".config").join("openclaw").join("config.json"),
             ],
@@ -1672,12 +2203,13 @@ impl Vault {
     fn default_integration_path(app_type: &str) -> Option<String> {
         let home = dirs::home_dir()?;
         let path = match app_type {
-            "claude" | "claude-code" => home.join(".claude").join("settings.json"),
+            "claude" => home.join(".claude").join("settings.json"),
+            "claude-code" => home.join(".claude.json"),
             "codex" => home.join(".codex").join("config.toml"),
             "gemini" => home.join(".gemini").join("settings.json"),
             "cursor" => home.join(".cursor"),
             "opencode" => home.join(".config").join("opencode").join("opencode.json"),
-            "openclaw" => home.join(".openclaw").join("config.json"),
+            "openclaw" => home.join(".openclaw").join("openclaw.json"),
             _ => return None,
         };
         Some(path.to_string_lossy().to_string())
@@ -1984,6 +2516,12 @@ impl Vault {
 
             self.ensure_provider_defaults(&key, &template);
         }
+    }
+
+    fn is_builtin_provider(provider: &str) -> bool {
+        provider_defaults::default_templates()
+            .iter()
+            .any(|template| template.provider == provider)
     }
 
     fn ensure_provider_defaults(

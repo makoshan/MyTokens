@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Mutex;
 
 mod commands;
+mod gateway;
 mod provider_defaults;
 mod secret_store;
 mod usage;
@@ -12,6 +14,7 @@ use vault::Vault;
 pub struct AppState {
     vault: Mutex<Vault>,
     usage: Mutex<usage::UsageState>,
+    gateway: Mutex<gateway::GatewayRuntime>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -117,6 +120,36 @@ pub struct AppRoute {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OpencodeConfigSnapshot {
+    pub config_path: String,
+    pub config: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IntegrationConfigSnapshot {
+    pub app_type: String,
+    pub config_path: String,
+    pub config: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ExternalLibraryMcp {
+    pub name: String,
+    pub mcp_type: String,
+    pub description: Option<String>,
+    pub command: Option<String>,
+    pub url: Option<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ExternalLibrarySkill {
+    pub name: String,
+    pub description: Option<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ServiceConfig {
     pub service_name: String,
     pub enabled: bool,
@@ -154,9 +187,11 @@ pub fn run() {
     let app_state = AppState {
         vault: Mutex::new(vault),
         usage: Mutex::new(usage::UsageState::default()),
+        gateway: Mutex::new(gateway::GatewayRuntime::default()),
     };
 
     tauri::Builder::default()
+        .manage(app_state)
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -168,7 +203,6 @@ pub fn run() {
             app.handle().plugin(tauri_plugin_dialog::init())?;
             Ok(())
         })
-        .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::set_master_password,
             commands::authenticate,
@@ -183,6 +217,8 @@ pub fn run() {
             commands::scan_env_dir,
             commands::get_providers,
             commands::upsert_provider,
+            commands::set_provider_active,
+            commands::delete_provider,
             commands::get_prompts,
             commands::upsert_prompt,
             commands::delete_prompt,
@@ -199,6 +235,12 @@ pub fn run() {
             commands::set_global_service_port,
             commands::get_app_routes,
             commands::set_app_route,
+            commands::get_opencode_config_snapshot,
+            commands::save_opencode_config_snapshot,
+            commands::get_integration_config_snapshot,
+            commands::save_integration_config_snapshot,
+            commands::get_claude_tool_manager_mcps,
+            commands::get_claude_tool_manager_skills,
             commands::backup_now,
             commands::open_path,
             commands::add_project,

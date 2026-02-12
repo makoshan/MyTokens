@@ -1,9 +1,11 @@
 use crate::{
-    usage, AppRoute, AppState, Credential, GlobalSettingsPayload, Project, PromptTemplate,
-    ProviderConfig,
+    usage, AppRoute, AppState, Credential, ExternalLibraryMcp, ExternalLibrarySkill,
+    GlobalSettingsPayload, IntegrationConfigSnapshot, OpencodeConfigSnapshot, Project,
+    PromptTemplate, ProviderConfig,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
@@ -257,6 +259,38 @@ pub fn upsert_provider(
 }
 
 #[tauri::command]
+pub fn set_provider_active(
+    provider: String,
+    is_active: bool,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<ProviderConfig, String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+
+    vault.set_provider_active(&provider, is_active)
+}
+
+#[tauri::command]
+pub fn delete_provider(
+    provider: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+
+    vault.delete_provider(&provider)?;
+    Ok(true)
+}
+
+#[tauri::command]
 pub fn get_prompts(
     master_password: String,
     state: State<'_, AppState>,
@@ -374,7 +408,10 @@ pub fn get_global_settings(
     if !vault.authenticate(&master_password) {
         return Err("Invalid master password".to_string());
     }
-    vault.get_global_settings()
+    let payload = vault.get_global_settings()?;
+    drop(vault);
+    let _ = crate::gateway::sync_gateway_runtime(state.inner());
+    Ok(payload)
 }
 
 #[tauri::command]
@@ -418,6 +455,10 @@ pub fn set_global_service_enabled(
         return Err("Invalid master password".to_string());
     }
     vault.set_global_service_enabled(&service_name, enabled)?;
+    drop(vault);
+    if service_name == "gateway" {
+        crate::gateway::sync_gateway_runtime(state.inner())?;
+    }
     Ok(true)
 }
 
@@ -448,6 +489,10 @@ pub fn set_global_service_port(
         return Err("Invalid master password".to_string());
     }
     vault.set_global_service_port(&service_name, port)?;
+    drop(vault);
+    if service_name == "gateway" {
+        crate::gateway::sync_gateway_runtime(state.inner())?;
+    }
     Ok(true)
 }
 
@@ -476,6 +521,82 @@ pub fn set_app_route(
         return Err("Invalid master password".to_string());
     }
     vault.set_app_route(&app_type, &provider, model)
+}
+
+#[tauri::command]
+pub fn get_opencode_config_snapshot(
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<OpencodeConfigSnapshot, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.get_opencode_config_snapshot()
+}
+
+#[tauri::command]
+pub fn save_opencode_config_snapshot(
+    config: Value,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.save_opencode_config_snapshot(config)
+}
+
+#[tauri::command]
+pub fn get_integration_config_snapshot(
+    app_type: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<IntegrationConfigSnapshot, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.get_integration_config_snapshot(&app_type)
+}
+
+#[tauri::command]
+pub fn save_integration_config_snapshot(
+    app_type: String,
+    config: Value,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.save_integration_config_snapshot(&app_type, config)
+}
+
+#[tauri::command]
+pub fn get_claude_tool_manager_mcps(
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ExternalLibraryMcp>, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.get_claude_tool_manager_mcps()
+}
+
+#[tauri::command]
+pub fn get_claude_tool_manager_skills(
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ExternalLibrarySkill>, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.get_claude_tool_manager_skills()
 }
 
 #[tauri::command]

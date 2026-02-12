@@ -10,6 +10,8 @@ import PromptManager, { PromptTemplate } from './components/PromptManager'
 import UsageDashboard from './components/UsageDashboard'
 import GlobalSettings from './components/GlobalSettings'
 import ApplicationManager from './components/ApplicationManager'
+import OpencodeMcpManager from './components/OpencodeMcpManager'
+import OpencodeSkillManager from './components/OpencodeSkillManager'
 import { ProviderConfig } from './types/provider'
 import type { Project } from './types/project'
 import { normalizeProjectLabel } from './utils/project'
@@ -37,7 +39,55 @@ interface ParsedKey {
   variable?: string
 }
 
-type View = 'dashboard' | 'keys' | 'projects' | 'providers' | 'apps' | 'prompts' | 'settings'
+type View =
+  | 'dashboard'
+  | 'keys'
+  | 'projects'
+  | 'providers'
+  | 'apps'
+  | 'mcp'
+  | 'skills'
+  | 'prompts'
+  | 'settings'
+
+const VIEW_META: Record<View, { title: string; description: string }> = {
+  dashboard: {
+    title: '监控总览',
+    description: '实时查看用量、成本与预算风险。',
+  },
+  keys: {
+    title: '密钥库',
+    description: '集中管理所有 API Key 与配置。',
+  },
+  projects: {
+    title: '项目',
+    description: '按项目管理目录与默认密钥。',
+  },
+  providers: {
+    title: '提供商设置',
+    description: '统一维护模型与 API 的接入配置。',
+  },
+  apps: {
+    title: '应用配置',
+    description: '按应用绑定提供商与模型，快速切换 AI Key 路由。',
+  },
+  mcp: {
+    title: 'MCP 管理',
+    description: '按 OpenCode 配置管理 MCP 条目，支持增删改与保存。',
+  },
+  skills: {
+    title: 'Skills 管理',
+    description: '按 OpenCode 配置管理 Skills 条目，支持增删改与保存。',
+  },
+  prompts: {
+    title: '提示词库',
+    description: '集中管理系统提示词与模板。',
+  },
+  settings: {
+    title: '全局设置',
+    description: '统一管理服务、集成、诊断与备份。',
+  },
+}
 
 type UsageQuota = {
   percent_remaining: number
@@ -46,6 +96,12 @@ type UsageQuota = {
 type UsageSnapshot = {
   provider_id: string
   quotas: UsageQuota[]
+}
+
+type DashboardOverview = {
+  apps: number
+  mcps: number
+  skills: number
 }
 
 type ProviderUsageStatus = {
@@ -147,6 +203,11 @@ function App() {
   const [loadingPrompts, setLoadingPrompts] = useState(false)
   const [hasPassword, setHasPassword] = useState<boolean | null>(null)
   const [projectLabelsByCredential, setProjectLabelsByCredential] = useState<Record<string, string>>({})
+  const [dashboardOverview, setDashboardOverview] = useState<DashboardOverview>({
+    apps: 0,
+    mcps: 0,
+    skills: 0,
+  })
   const hasMigratedLegacyProjectLabels = useRef(false)
 
   const loadProjectLabels = async (credentialIds?: string[]) => {
@@ -265,6 +326,28 @@ function App() {
     }
   }
 
+  const loadDashboardOverview = async () => {
+    if (!masterPassword) return
+    try {
+      const [settings, mcps, skills] = await Promise.all([
+        invoke<{ integrations: Array<{ app_type: string }> }>('get_global_settings', { masterPassword }),
+        invoke<Array<{ name: string }>>('get_claude_tool_manager_mcps', { masterPassword }),
+        invoke<Array<{ name: string }>>('get_claude_tool_manager_skills', { masterPassword }),
+      ])
+      const appCount = settings.integrations.filter(
+        (item) => item.app_type !== 'openai-compatible' && item.app_type !== 'claude'
+      ).length
+      setDashboardOverview({
+        apps: appCount,
+        mcps: mcps.length,
+        skills: skills.length,
+      })
+    } catch (error) {
+      console.error('Failed to load dashboard overview:', error)
+      setDashboardOverview({ apps: 0, mcps: 0, skills: 0 })
+    }
+  }
+
   useEffect(() => {
     invoke<boolean>('is_password_set')
       .then((isSet) => {
@@ -279,6 +362,7 @@ function App() {
       loadProviders()
       loadProjects()
       loadPrompts()
+      loadDashboardOverview()
     }
   }, [isAuthenticated, masterPassword])
 
@@ -517,6 +601,45 @@ function App() {
     }
   }
 
+  const handleToggleProviderActive = async (provider: string, isActive: boolean) => {
+    try {
+      const result = await invoke<ProviderConfig>('set_provider_active', {
+        provider,
+        isActive,
+        masterPassword,
+      })
+      setProviders((prev) =>
+        prev.map((item) => (item.provider === result.provider ? result : item))
+      )
+      setSelectedProvider((prev) =>
+        prev?.provider === result.provider ? result : prev
+      )
+    } catch (error) {
+      console.error('Failed to update provider active state:', error)
+      alert(`Failed to update provider status: ${String(error)}`)
+    }
+  }
+
+  const handleDeleteProvider = async (provider: string) => {
+    try {
+      await invoke<boolean>('delete_provider', {
+        provider,
+        masterPassword,
+      })
+      setProviders((prev) => {
+        const next = prev.filter((item) => item.provider !== provider)
+        setSelectedProvider((current) => {
+          if (!current || current.provider !== provider) return current
+          return next[0] || null
+        })
+        return next
+      })
+    } catch (error) {
+      console.error('Failed to delete provider:', error)
+      alert(`Failed to delete provider: ${String(error)}`)
+    }
+  }
+
   const handleSavePrompt = async (
     id: string | null,
     title: string,
@@ -617,6 +740,18 @@ function App() {
             应用
           </button>
           <button
+            className={`nav-item ${view === 'mcp' ? 'active' : ''}`}
+            onClick={() => setView('mcp')}
+          >
+            MCP
+          </button>
+          <button
+            className={`nav-item ${view === 'skills' ? 'active' : ''}`}
+            onClick={() => setView('skills')}
+          >
+            Skills
+          </button>
+          <button
             className={`nav-item ${view === 'prompts' ? 'active' : ''}`}
             onClick={() => setView('prompts')}
           >
@@ -644,36 +779,8 @@ function App() {
       <section className="app-content">
         <header className="content-header">
           <div>
-            <h1>
-              {view === 'dashboard'
-                ? '监控总览'
-                : view === 'keys'
-                  ? '密钥库'
-                  : view === 'projects'
-                    ? '项目'
-                  : view === 'providers'
-                    ? '提供商设置'
-                    : view === 'apps'
-                      ? '应用配置'
-                    : view === 'prompts'
-                      ? '提示词库'
-                      : '全局设置'}
-            </h1>
-            <p>
-              {view === 'dashboard'
-                ? '实时查看用量、成本与预算风险。'
-                : view === 'keys'
-                  ? '集中管理所有 API Key 与配置。'
-                  : view === 'projects'
-                    ? '按项目管理目录与默认密钥。'
-                  : view === 'providers'
-                    ? '统一维护模型与 API 的接入配置。'
-                    : view === 'apps'
-                      ? '按应用绑定提供商与模型，快速切换 AI Key 路由。'
-                    : view === 'prompts'
-                      ? '集中管理系统提示词与模板。'
-                      : '统一管理服务、集成、诊断与备份。'}
-            </p>
+            <h1>{VIEW_META[view].title}</h1>
+            <p>{VIEW_META[view].description}</p>
           </div>
           {view === 'keys' && (
             <div className="header-actions">
@@ -701,7 +808,37 @@ function App() {
 
         <main className="content-main">
           {view === 'dashboard' ? (
-            <UsageDashboard providerContextById={providerContextById} />
+            <div className="dashboard-view">
+              <section className="dashboard-overview">
+                <div className="dashboard-overview-header">
+                  <h2>Overview</h2>
+                </div>
+                <div className="dashboard-overview-grid">
+                  <button className="dashboard-overview-card" onClick={() => setView('keys')}>
+                    <span>密钥</span>
+                    <strong>{credentials.length}</strong>
+                  </button>
+                  <button className="dashboard-overview-card" onClick={() => setView('projects')}>
+                    <span>项目</span>
+                    <strong>{projects.length}</strong>
+                  </button>
+                  <button className="dashboard-overview-card" onClick={() => setView('mcp')}>
+                    <span>MCP</span>
+                    <strong>{dashboardOverview.mcps}</strong>
+                  </button>
+                  <button className="dashboard-overview-card" onClick={() => setView('skills')}>
+                    <span>Skills</span>
+                    <strong>{dashboardOverview.skills}</strong>
+                  </button>
+                  <button className="dashboard-overview-card" onClick={() => setView('apps')}>
+                    <span>应用</span>
+                    <strong>{dashboardOverview.apps}</strong>
+                  </button>
+                </div>
+              </section>
+
+              <UsageDashboard providerContextById={providerContextById} />
+            </div>
           ) : view === 'keys' ? (
             <div className="keys-view">
               <section className="panel">
@@ -792,6 +929,8 @@ function App() {
               selectedProvider={selectedProvider}
               onSelectProvider={setSelectedProvider}
               onSaveProvider={handleSaveProvider}
+              onToggleProviderActive={handleToggleProviderActive}
+              onDeleteProvider={handleDeleteProvider}
               credentials={credentials}
               projects={projects}
               projectLabelsByCredential={projectLabelsByCredential}
@@ -802,6 +941,10 @@ function App() {
               masterPassword={masterPassword}
               providers={providers}
             />
+          ) : view === 'mcp' ? (
+            <OpencodeMcpManager masterPassword={masterPassword} />
+          ) : view === 'skills' ? (
+            <OpencodeSkillManager masterPassword={masterPassword} />
           ) : view === 'settings' ? (
             <GlobalSettings masterPassword={masterPassword} />
           ) : (

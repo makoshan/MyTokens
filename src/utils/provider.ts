@@ -1,5 +1,49 @@
 import type { ProviderConfig } from '../types/provider'
 
+export type ProviderCategory = 'model' | 'translation' | 'search' | 'ocr' | 'other'
+
+const PROVIDER_CATEGORY_LABELS: Record<ProviderCategory, string> = {
+  model: '模型供应商',
+  translation: '翻译供应商',
+  search: '搜索供应商',
+  ocr: 'OCR 供应商',
+  other: 'Other',
+}
+
+const PROVIDER_CATEGORIES: Record<string, ProviderCategory> = {
+  openai: 'model',
+  anthropic: 'model',
+  'claude-code': 'model',
+  'anthropic-cli': 'model',
+  antigravity: 'model',
+  'google-ai': 'model',
+  gemini: 'model',
+  'azure-openai': 'model',
+  deepseek: 'model',
+  openrouter: 'model',
+  groq: 'model',
+  mistral: 'model',
+  ollama: 'model',
+  together: 'model',
+  xai: 'model',
+  volcengine: 'model',
+  glm: 'model',
+  qwen: 'model',
+  minimax: 'model',
+  kimi: 'model',
+  cursor: 'model',
+  opencode: 'model',
+  openclaw: 'model',
+  deepl: 'translation',
+  'google-translate': 'translation',
+  tavily: 'search',
+  serpapi: 'search',
+  perplexity: 'search',
+  'ocr-space': 'ocr',
+  coingecko: 'other',
+  other: 'other',
+}
+
 const PROVIDER_LABELS: Record<string, string> = {
   openai: 'OpenAI',
   anthropic: 'Claude',
@@ -22,6 +66,12 @@ const PROVIDER_LABELS: Record<string, string> = {
   qwen: 'Qwen',
   minimax: 'MiniMax',
   kimi: 'Kimi',
+  deepl: 'DeepL',
+  'google-translate': 'Google Translate',
+  tavily: 'Tavily',
+  serpapi: 'SerpAPI',
+  'ocr-space': 'OCR.Space',
+  coingecko: 'CoinGecko',
   cursor: 'Cursor',
   opencode: 'OpenCode',
   openclaw: 'OpenClaw',
@@ -50,6 +100,12 @@ const PROVIDER_COLORS: Record<string, string> = {
   qwen: '#2563eb',
   minimax: '#db2777',
   kimi: '#f97316',
+  deepl: '#0f52ba',
+  'google-translate': '#2563eb',
+  tavily: '#0891b2',
+  serpapi: '#0284c7',
+  'ocr-space': '#7c3aed',
+  coingecko: '#16a34a',
   cursor: '#2563eb',
   opencode: '#0f766e',
   openclaw: '#b45309',
@@ -64,6 +120,14 @@ export function getProviderColor(providerId: string): string {
   return PROVIDER_COLORS[providerId] || '#999'
 }
 
+export function getProviderCategory(providerId: string): ProviderCategory {
+  return PROVIDER_CATEGORIES[providerId] || 'other'
+}
+
+export function getProviderCategoryLabel(category: ProviderCategory): string {
+  return PROVIDER_CATEGORY_LABELS[category]
+}
+
 export function buildProviderSelectOptions(
   providers: ProviderConfig[]
 ): Array<{ value: string; label: string }> {
@@ -73,4 +137,34 @@ export function buildProviderSelectOptions(
   }))
   options.sort((a, b) => a.label.localeCompare(b.label))
   return options
+}
+
+export function buildProviderSelectGroups(providers: ProviderConfig[]): Array<{
+  category: ProviderCategory
+  label: string
+  options: Array<{ value: string; label: string }>
+}> {
+  const order: ProviderCategory[] = ['model', 'translation', 'search', 'ocr', 'other']
+  const grouped = new Map<ProviderCategory, Array<{ value: string; label: string }>>()
+
+  providers.forEach((provider) => {
+    const category = getProviderCategory(provider.provider)
+    const list = grouped.get(category) || []
+    list.push({
+      value: provider.provider,
+      label: provider.label || getProviderDisplayName(provider.provider),
+    })
+    grouped.set(category, list)
+  })
+
+  return order
+    .map((category) => {
+      const options = (grouped.get(category) || []).sort((a, b) => a.label.localeCompare(b.label))
+      return {
+        category,
+        label: getProviderCategoryLabel(category),
+        options,
+      }
+    })
+    .filter((item) => item.options.length > 0)
 }

@@ -38,6 +38,8 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
 
   const services = settings?.services ?? []
   const integrations = settings?.integrations ?? []
+  const gatewayService = services.find((item) => item.service_name === 'gateway')
+  const gatewayBaseUrl = `http://127.0.0.1:${gatewayService?.port || 8888}`
 
   const refresh = async (showLoading = true) => {
     if (!masterPassword) return
@@ -309,6 +311,21 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
                   </button>
                 </div>
               </div>
+              {service.service_name === 'gateway' ? (
+                <div className="gateway-helper">
+                  <div className="gateway-helper-title">OpenAI 兼容入口</div>
+                  <div className="gateway-helper-lines">
+                    <code>Base URL: {gatewayBaseUrl}</code>
+                    <code>Responses: {gatewayBaseUrl}/v1/responses</code>
+                    <code>Health: {gatewayBaseUrl}/health</code>
+                  </div>
+                  <div className="gateway-helper-note">
+                    网关读取 <code>~/.codex/auth.json</code> 的 <code>tokens.access_token</code> 与
+                    <code>tokens.account_id</code>。如需覆盖，可设置环境变量
+                    <code>MYKEY_CODEX_ACCESS_TOKEN</code> 和 <code>MYKEY_CODEX_ACCOUNT_ID</code>。
+                  </div>
+                </div>
+              ) : null}
             </div>
           ))}
         </div>

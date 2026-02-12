@@ -142,6 +142,49 @@
   background: #fff;
 }
 
+.gateway-helper {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(248, 250, 252, 0.8);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gateway-helper-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.gateway-helper-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gateway-helper-lines code {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: auto;
+}
+
+.gateway-helper-note {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.gateway-helper-note code {
+  margin: 0 2px;
+}
+
 .path-list {
   display: flex;
   flex-direction: column;

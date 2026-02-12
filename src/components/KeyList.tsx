@@ -5,7 +5,7 @@ import {
   getProviderDisplayName,
 } from '../utils/provider'
 import type { Project } from '../types/project'
-import { resolveCredentialProjectName } from '../utils/linkage'
+import { resolveCredentialProjectName, UNMATCHED_PROJECT_NAME } from '../utils/linkage'
 import { normalizeProjectLabel } from '../utils/project'
 
 interface Credential {
@@ -75,9 +75,6 @@ export default function KeyList({
   }
 
   const groupedKeys = useMemo(() => {
-    const projectNameByLower = new Map(
-      projects.map((project) => [project.name.trim().toLowerCase(), project.name])
-    )
     const bucket = credentials.reduce(
       (acc, cred) => {
         if (groupMode === 'provider') {
@@ -90,16 +87,10 @@ export default function KeyList({
         }
 
         const resolved = resolveCredentialProjectName(cred, projectLabelsByCredential, projects)
-        const canonical =
-          projectNameByLower.get(resolved.trim().toLowerCase()) ||
-          (resolved === '未归类' || resolved === '当前目录' ? resolved : '未匹配项目')
-        const labels = [canonical]
-        labels.forEach((label) => {
-          if (!acc[label]) {
-            acc[label] = []
-          }
-          acc[label].push(cred)
-        })
+        if (!acc[resolved]) {
+          acc[resolved] = []
+        }
+        acc[resolved].push(cred)
         return acc
       },
       {} as Record<string, Credential[]>
@@ -111,12 +102,8 @@ export default function KeyList({
     }
 
     return entries.sort(([a], [b]) => {
-      if (a === '未匹配项目') return 1
-      if (b === '未匹配项目') return -1
-      if (a === '未归类') return 1
-      if (b === '未归类') return -1
-      if (a === '当前目录') return 1
-      if (b === '当前目录') return -1
+      if (a === UNMATCHED_PROJECT_NAME) return 1
+      if (b === UNMATCHED_PROJECT_NAME) return -1
       return a.localeCompare(b)
     })
   }, [credentials, groupMode, projectLabelsByCredential, projects])

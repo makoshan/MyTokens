@@ -1,6 +1,8 @@
 import type { Project } from '../types/project'
 import { deriveProjectLabelFromSource, normalizeProjectLabel } from './project'
 
+export const UNMATCHED_PROJECT_NAME = '未匹配项目'
+
 export interface LinkableCredential {
   id: string
   provider: string
@@ -14,6 +16,8 @@ export interface ProviderLinkageContext {
   projectNames: string[]
   paths: string[]
 }
+
+const ENV_FILE_PATTERN = /^\.env(\..+)?$|^\.dev\.vars(\..+)?$/i
 
 function normalizePath(input?: string | null): string {
   if (!input) return ''
@@ -29,6 +33,12 @@ function projectAliases(project: Project): Set<string> {
   const parts = normalizedPath.split('/').filter(Boolean)
   const basename = parts[parts.length - 1]?.trim().toLowerCase()
   if (basename) aliases.add(basename)
+
+  const pathAlias = normalizePath(project.path)
+  if (pathAlias) {
+    aliases.add(pathAlias)
+    aliases.add(pathAlias.replace(/^\//, '').replace(/\//g, '-'))
+  }
 
   return aliases
 }
@@ -54,6 +64,44 @@ function findProjectBySourcePath(source?: string | null, projects: Project[] = [
   })
 }
 
+function sourceLabelCandidates(input?: string | null): string[] {
+  const normalized = normalizePath(input)
+  if (!normalized) return []
+
+  const parts = normalized.split('/').filter(Boolean)
+  if (!parts.length) return []
+
+  const trimmed =
+    parts.length > 1 && ENV_FILE_PATTERN.test(parts[parts.length - 1])
+      ? parts.slice(0, -1)
+      : parts
+
+  const candidates: string[] = []
+  for (let index = trimmed.length - 1; index >= 0; index -= 1) {
+    const segment = trimmed[index]?.trim().toLowerCase()
+    if (!segment) continue
+    candidates.push(segment)
+    if (segment.startsWith('-')) {
+      candidates.push(segment.replace(/^-+/, ''))
+    }
+  }
+  return candidates
+}
+
+function findProjectBySourceSegments(source?: string | null, projects: Project[] = []): Project | undefined {
+  const candidates = sourceLabelCandidates(source)
+  if (!candidates.length) return undefined
+
+  const seen = new Set<string>()
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) continue
+    seen.add(candidate)
+    const matched = findProjectByAlias(candidate, projects)
+    if (matched) return matched
+  }
+  return undefined
+}
+
 export function resolveCredentialProjectName(
   credential: LinkableCredential,
   projectLabelsByCredential: Record<string, string>,
@@ -61,8 +109,13 @@ export function resolveCredentialProjectName(
 ): string {
   const manualLabel = normalizeProjectLabel(projectLabelsByCredential[credential.id])
   if (manualLabel) {
-    const matchedProject = findProjectByAlias(manualLabel, projects)
-    return matchedProject?.name || manualLabel
+    const matchedProject =
+      findProjectByAlias(manualLabel, projects) ||
+      findProjectBySourcePath(manualLabel, projects) ||
+      findProjectBySourceSegments(manualLabel, projects)
+    if (matchedProject) {
+      return matchedProject.name
+    }
   }
 
   const sourceMatched = findProjectBySourcePath(credential.source, projects)
@@ -70,9 +123,18 @@ export function resolveCredentialProjectName(
     return sourceMatched.name
   }
 
+  const sourceSegmentMatched = findProjectBySourceSegments(credential.source, projects)
+  if (sourceSegmentMatched) {
+    return sourceSegmentMatched.name
+  }
+
   const derived = deriveProjectLabelFromSource(credential.source)
   const aliasMatched = findProjectByAlias(derived, projects)
-  return aliasMatched?.name || derived
+  if (aliasMatched) {
+    return aliasMatched.name
+  }
+
+  return UNMATCHED_PROJECT_NAME
 }
 
 export function getCredentialsLinkedToProject<T extends LinkableCredential>(
@@ -108,7 +170,7 @@ export function buildProviderContext(
       pathSet.add(credential.source.trim())
     }
     const projectName = resolveCredentialProjectName(credential, projectLabelsByCredential, projects)
-    if (projectName && projectName !== '未归类' && projectName !== '当前目录') {
+    if (projectName && projectName !== UNMATCHED_PROJECT_NAME) {
       projectNameSet.add(projectName)
       const matchedProject = projectByName.get(projectName.trim().toLowerCase())
       if (matchedProject?.path?.trim()) {

@@ -9,7 +9,9 @@ interface UsageDashboardProps {
   providerContextById?: Record<string, ProviderLinkageContext>
 }
 
-export default function UsageDashboard({ providerContextById = {} }: UsageDashboardProps) {
+export default function UsageDashboard({
+  providerContextById = {},
+}: UsageDashboardProps) {
   const [statuses, setStatuses] = useState<ProviderUsageStatus[]>([]);
   const [loading, setLoading] = useState(false);
 

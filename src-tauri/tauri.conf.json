@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MyKey",
   "version": "1.0.0",
-  "identifier": "com.mykey.app",
+  "identifier": "com.mykey.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:3000",
@@ -42,7 +42,7 @@
     "macOS": {
       "frameworks": [],
       "minimumSystemVersion": "10.13",
-      "exceptionDomain": "com.mykey.app",
+      "exceptionDomain": "com.mykey.desktop",
       "signingIdentity": null,
       "entitlements": null
     }
