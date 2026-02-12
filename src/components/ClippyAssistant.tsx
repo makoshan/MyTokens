@@ -128,7 +128,8 @@ function buildSuggestions(
   settings: GlobalSettingsPayload | null,
   policy: GatewayPolicySettings | null,
   traffic: GatewayTrafficMetrics | null,
-  usageStatuses: ProviderUsageStatus[]
+  usageStatuses: ProviderUsageStatus[],
+  runtimeGatewayOnline: boolean
 ): AssistantSuggestion[] {
   const suggestions: AssistantSuggestion[] = []
   const gatewayService = settings?.services.find((item) => item.service_name === 'gateway')
@@ -141,7 +142,7 @@ function buildSuggestions(
       detail: '没有本地代理入口，后续流量分析和智能路由会失真。',
       actions: [{ id: 'goto-settings', label: '前往设置启用', kind: 'navigate', view: 'settings' }],
     })
-  } else if (!gatewayService.running) {
+  } else if (!gatewayService.running && !runtimeGatewayOnline) {
     suggestions.push({
       id: 'gateway-stopped',
       severity: 'critical',
@@ -290,6 +291,25 @@ function pickRandomIdleAnimation(previous?: ClippyAnimationKey) {
   return nextPool[Math.floor(Math.random() * nextPool.length)]
 }
 
+function normalizeCodexAnswerForModelQuestion(
+  question: string,
+  answer: string,
+  codexOnline: boolean
+) {
+  const q = question.trim().toLowerCase()
+  const asksModel =
+    q.includes('模型') ||
+    q.includes('model') ||
+    q.includes('用哪个') ||
+    q.includes('最合适') ||
+    q.includes('怎么选')
+
+  if (!asksModel || !codexOnline) return answer
+  if (answer.toLowerCase().includes('codex')) return answer
+
+  return `当前你的网关链路已连通，首选模型应为 gpt-5-codex；只有在你明确要求极限省成本时，才考虑降级。\n${answer}`
+}
+
 export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAssistantProps) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -319,10 +339,11 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   const idleAnimationRef = useRef<ClippyAnimationKey>()
   const clipTimeoutRef = useRef<number>()
   const idleTimeoutRef = useRef<number>()
+  const runtimeGatewayOnline = agentMode === 'codex'
 
   const suggestions = useMemo(
-    () => buildSuggestions(settings, policy, traffic, usageStatuses),
-    [policy, settings, traffic, usageStatuses]
+    () => buildSuggestions(settings, policy, traffic, usageStatuses, runtimeGatewayOnline),
+    [policy, runtimeGatewayOnline, settings, traffic, usageStatuses]
   )
 
   const topSeverity = suggestions[0]?.severity || 'info'
@@ -350,7 +371,13 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       setUsageStatuses(nextUsage)
       setLastAnalyzedAt(new Date())
 
-      const nextSuggestions = buildSuggestions(nextSettings, nextPolicy, nextTraffic, nextUsage)
+      const nextSuggestions = buildSuggestions(
+        nextSettings,
+        nextPolicy,
+        nextTraffic,
+        nextUsage,
+        runtimeGatewayOnline
+      )
       const signature = nextSuggestions.map((item) => `${item.id}:${item.severity}`).join('|')
 
       if (signature !== signatureRef.current) {
@@ -389,6 +416,11 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     const systemPrompt = [
       '你是 MyKey 内置的 Clippy 助手。输出请简短、直接、可执行。',
       '你的主要目标是帮助用户降低 API 成本、提高稳定性、改善路由配置。',
+      `当前网关状态: ${runtimeGatewayOnline ? '在线' : '离线'}`,
+      '模型策略（强约束）：当前主链路是 Codex，本轮优先模型必须是 gpt-5-codex。',
+      '如果用户问“现在用哪个模型最合适”，默认先给出 gpt-5-codex，再说明何时降级。',
+      '除非用户明确要求极限省成本或低延迟，否则不要主动推荐 gpt-4o-mini / gpt-3.5。',
+      '当网关在线时，不要建议“先检查端口并重启网关”。',
       `当前系统概览: ${summarizeCurrentSituation(policy, traffic)}`,
       '当前风险与建议:',
       riskTop || '暂无高优先级风险。',
@@ -415,7 +447,8 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
 
     try {
       if (agentMode === 'codex' && gatewayCreds) {
-        const answer = await askByCodex(q)
+        const rawAnswer = await askByCodex(q)
+        const answer = normalizeCodexAnswerForModelQuestion(q, rawAnswer, runtimeGatewayOnline)
         addAssistantMessage(answer)
         setAgentError('')
       } else {
