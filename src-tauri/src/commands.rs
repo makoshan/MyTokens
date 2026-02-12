@@ -2,21 +2,26 @@ use crate::{
     usage, AppRoute, AppState, Credential, ExternalLibraryMcp, ExternalLibrarySkill,
     GatewayAccessCredentials, GatewayPolicySettings, GatewayRequestLog, GatewayTrafficMetrics,
     GlobalSettingsPayload, IntegrationConfigSnapshot, OpencodeConfigSnapshot, Project,
-    PromptTemplate,
-    ProviderAppBindingInput, ProviderConfig, ProviderDetails, ProviderEndpointInput,
-    ProviderEnvVarInput,
+    PromptTemplate, ProviderAppBindingInput, ProviderConfig, ProviderDetails,
+    ProviderEndpointInput, ProviderEnvVarInput, QuickActionHistoryRecord, QuickActionResult,
+    QuickActionSettings,
 };
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use regex::Regex;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::str::FromStr;
+use std::thread;
 use std::time::Duration;
-use tauri::State;
+use tauri::{Emitter, Manager, State};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use walkdir::WalkDir;
+use base64::Engine as _;
 
 #[tauri::command]
 pub fn set_master_password(password: String, state: State<'_, AppState>) -> Result<bool, String> {
@@ -214,6 +219,159 @@ struct WranglerScanResult {
     bindings: Vec<String>,
 }
 
+const QUICK_RESULT_EVENT: &str = "quick_result_updated";
+const QUICK_RESULT_WINDOW_LABEL: &str = "quick-result";
+const TRANSLATION_PROVIDERS: &[&str] = &[
+    "google-translate",
+    "google-translate-free",
+    "deepl",
+    "apple-translate",
+    "microsoft-translate",
+];
+const OCR_PROVIDERS: &[&str] = &["apple-ocr", "ocr-space", "paddleocr"];
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QuickHotkeyDiagnostics {
+    pub translate_hotkey: String,
+    pub ocr_hotkey: String,
+    pub translate_registered: bool,
+    pub ocr_registered: bool,
+    pub translate_parse_error: Option<String>,
+    pub ocr_parse_error: Option<String>,
+    pub last_trigger_shortcut: Option<String>,
+    pub last_trigger_at: Option<String>,
+    pub last_register_at: Option<String>,
+    pub last_register_error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MacosPermissionStatus {
+    pub is_macos: bool,
+    pub accessibility_granted: bool,
+    pub automation_granted: bool,
+    pub selection_capture_ready: bool,
+    pub automation_error: Option<String>,
+    pub guidance: String,
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+}
+
+fn normalize_hotkey(value: &str, fallback: &str) -> String {
+    let compact = value.replace(' ', "");
+    let trimmed = compact.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn decode_html_entities(input: &str) -> String {
+    input
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+fn normalize_google_lang(lang: &str, fallback: &str) -> String {
+    let trimmed = lang.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+        return fallback.to_string();
+    }
+    match trimmed {
+        "zh-Hans" | "zh_CN" => "zh-CN".to_string(),
+        "zh-Hant" | "zh_TW" => "zh-TW".to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn normalize_deepl_lang(lang: &str, fallback: &str) -> String {
+    let trimmed = lang.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+        return fallback.to_string();
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "zh-hans" | "zh-cn" => "ZH".to_string(),
+        "zh-hant" | "zh-tw" => "ZH".to_string(),
+        "pt-br" => "PT-BR".to_string(),
+        "pt-pt" => "PT-PT".to_string(),
+        _ => trimmed
+            .split(['-', '_'])
+            .next()
+            .unwrap_or(trimmed)
+            .to_ascii_uppercase(),
+    }
+}
+
+fn quick_now() -> String {
+    chrono::Local::now().to_rfc3339()
+}
+
+fn default_quick_settings() -> QuickActionSettings {
+    let mut settings = QuickActionSettings::default();
+    settings.updated_at = quick_now();
+    settings
+}
+
+fn build_quick_error_result(
+    action_type: &str,
+    provider: &str,
+    source_text: Option<String>,
+    ocr_text: Option<String>,
+    error_code: &str,
+    error_message: String,
+    latency_ms: i64,
+) -> QuickActionResult {
+    QuickActionResult {
+        action_type: action_type.to_string(),
+        source_text,
+        ocr_text,
+        result_text: None,
+        provider: provider.to_string(),
+        latency_ms,
+        status: "error".to_string(),
+        error_code: Some(error_code.to_string()),
+        error_message: Some(error_message),
+        created_at: quick_now(),
+    }
+}
+
+fn resolve_quick_endpoint(provider: &ProviderConfig) -> String {
+    if let Some(primary) = provider
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.is_primary && !endpoint.base_url.trim().is_empty())
+    {
+        return primary.base_url.trim().to_string();
+    }
+    if let Some(first) = provider
+        .endpoints
+        .iter()
+        .find(|endpoint| !endpoint.base_url.trim().is_empty())
+    {
+        return first.base_url.trim().to_string();
+    }
+    provider.base_url.trim().to_string()
+}
+
+fn resolve_provider_auth(vault: &crate::vault::Vault, provider: &ProviderConfig) -> String {
+    if !provider.api_key.trim().is_empty() {
+        return provider.api_key.trim().to_string();
+    }
+    vault
+        .get_latest_credential_for_provider(&provider.provider)
+        .map(|cred| cred.key.trim().to_string())
+        .filter(|key| !key.is_empty())
+        .unwrap_or_default()
+}
+
 fn as_object_args(args: Option<Value>) -> Result<serde_json::Map<String, Value>, String> {
     match args {
         None => Ok(serde_json::Map::new()),
@@ -222,10 +380,7 @@ fn as_object_args(args: Option<Value>) -> Result<serde_json::Map<String, Value>,
     }
 }
 
-fn required_string_arg(
-    args: &serde_json::Map<String, Value>,
-    key: &str,
-) -> Result<String, String> {
+fn required_string_arg(args: &serde_json::Map<String, Value>, key: &str) -> Result<String, String> {
     let value = args
         .get(key)
         .and_then(|v| v.as_str())
@@ -244,11 +399,1644 @@ fn optional_string_arg(args: &serde_json::Map<String, Value>, key: &str) -> Opti
 }
 
 #[tauri::command]
+pub fn get_quick_action_settings(
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<QuickActionSettings, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault
+        .get_quick_action_settings()
+        .map(|settings| {
+            let mut normalized = settings;
+            normalized.translate_hotkey = normalize_hotkey(&normalized.translate_hotkey, "Option+D");
+            normalized.ocr_hotkey = normalize_hotkey(&normalized.ocr_hotkey, "Option+S");
+            normalized
+        })
+        .or_else(|_| Ok(default_quick_settings()))
+}
+
+#[tauri::command]
+pub fn set_quick_action_settings(
+    settings: QuickActionSettings,
+    master_password: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<QuickActionSettings, String> {
+    let next = {
+        let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+        vault.set_quick_action_settings(settings)?
+    };
+
+    register_quick_hotkeys_internal(&app, state.inner(), &next)?;
+    update_quick_runtime_hotkeys(state.inner(), &next)?;
+    Ok(next)
+}
+
+#[tauri::command]
+pub fn register_quick_hotkeys(
+    master_password: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let settings = {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+        vault
+            .get_quick_action_settings()
+            .unwrap_or_else(|_| default_quick_settings())
+    };
+
+    register_quick_hotkeys_internal(&app, state.inner(), &settings)?;
+    update_quick_runtime_hotkeys(state.inner(), &settings)?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn trigger_quick_translate(
+    text: Option<String>,
+    master_password: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<QuickActionResult, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let result = run_quick_translate_pipeline(app, text).await;
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn trigger_quick_ocr(
+    master_password: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<QuickActionResult, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let result = run_quick_ocr_pipeline(app).await;
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn retry_last_quick_action(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<QuickActionResult, String> {
+    let snapshot = {
+        let runtime = state.quick_runtime.lock().map_err(|e| e.to_string())?;
+        (
+            runtime.last_action_type.clone(),
+            runtime.last_source_text.clone(),
+            runtime.last_ocr_text.clone(),
+        )
+    };
+
+    let (action_type, last_source_text, last_ocr_text) = snapshot;
+    let result = match action_type.as_deref() {
+        Some("ocr_translate") => {
+            if let Some(ocr_text) = last_ocr_text.clone().filter(|text| !text.trim().is_empty()) {
+                run_quick_translate_core(app.clone(), "ocr_translate", ocr_text, last_ocr_text).await
+            } else {
+                run_quick_ocr_pipeline(app.clone()).await
+            }
+        }
+        Some("translate") => {
+            if let Some(source_text) = last_source_text.clone().filter(|text| !text.trim().is_empty()) {
+                run_quick_translate_core(app.clone(), "translate", source_text, None).await
+            } else {
+                run_quick_translate_pipeline(app.clone(), None).await
+            }
+        }
+        _ => run_quick_translate_pipeline(app.clone(), None).await,
+    };
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn hide_quick_result_panel(app: tauri::AppHandle) -> Result<bool, String> {
+    if let Some(window) = app.get_webview_window(QUICK_RESULT_WINDOW_LABEL) {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn get_last_quick_action_result(state: State<'_, AppState>) -> Result<Option<QuickActionResult>, String> {
+    let runtime = state.quick_runtime.lock().map_err(|e| e.to_string())?;
+    Ok(runtime.last_result.clone())
+}
+
+#[tauri::command]
+pub fn get_quick_action_history(
+    limit: Option<i64>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<QuickActionHistoryRecord>, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.get_quick_action_history(limit.unwrap_or(30))
+}
+
+#[tauri::command]
+pub fn get_quick_hotkey_diagnostics(
+    master_password: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<QuickHotkeyDiagnostics, String> {
+    let settings = {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+        vault
+            .get_quick_action_settings()
+            .unwrap_or_else(|_| default_quick_settings())
+    };
+
+    let (last_trigger_shortcut, last_trigger_at, last_register_at, last_register_error) = {
+        let runtime = state.quick_runtime.lock().map_err(|e| e.to_string())?;
+        (
+            runtime.last_trigger_shortcut.clone(),
+            runtime.last_trigger_at.clone(),
+            runtime.last_register_at.clone(),
+            runtime.last_register_error.clone(),
+        )
+    };
+
+    let translate_raw = normalize_hotkey(&settings.translate_hotkey, "Option+D");
+    let ocr_raw = normalize_hotkey(&settings.ocr_hotkey, "Option+S");
+
+    let (translate_registered, translate_parse_error) = match Shortcut::from_str(&translate_raw) {
+        Ok(shortcut) => (app.global_shortcut().is_registered(shortcut), None),
+        Err(error) => (false, Some(error.to_string())),
+    };
+    let (ocr_registered, ocr_parse_error) = match Shortcut::from_str(&ocr_raw) {
+        Ok(shortcut) => (app.global_shortcut().is_registered(shortcut), None),
+        Err(error) => (false, Some(error.to_string())),
+    };
+
+    Ok(QuickHotkeyDiagnostics {
+        translate_hotkey: translate_raw,
+        ocr_hotkey: ocr_raw,
+        translate_registered,
+        ocr_registered,
+        translate_parse_error,
+        ocr_parse_error,
+        last_trigger_shortcut,
+        last_trigger_at,
+        last_register_at,
+        last_register_error,
+    })
+}
+
+#[tauri::command]
+pub fn get_macos_permission_status() -> Result<MacosPermissionStatus, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let accessibility_granted = unsafe { AXIsProcessTrusted() };
+        let automation_probe = Command::new("osascript")
+            .arg("-e")
+            .arg(r#"tell application "System Events" to get name of first process"#)
+            .output()
+            .map_err(|e| format!("Failed to probe automation permission: {}", e))?;
+        let automation_error = if automation_probe.status.success() {
+            None
+        } else {
+            let detail = String::from_utf8_lossy(&automation_probe.stderr)
+                .trim()
+                .to_string();
+            Some(if detail.is_empty() {
+                "System Events automation is not authorized".to_string()
+            } else {
+                detail
+            })
+        };
+        let automation_granted = automation_error.is_none();
+
+        return Ok(MacosPermissionStatus {
+            is_macos: true,
+            accessibility_granted,
+            automation_granted,
+            selection_capture_ready: accessibility_granted && automation_granted,
+            automation_error,
+            guidance: "系统设置 -> 隐私与安全性 -> 辅助功能（MyKey）与 自动化（MyKey -> System Events）".to_string(),
+        });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(MacosPermissionStatus {
+            is_macos: false,
+            accessibility_granted: false,
+            automation_granted: false,
+            selection_capture_ready: false,
+            automation_error: None,
+            guidance: "当前系统不是 macOS，无需检查该权限".to_string(),
+        })
+    }
+}
+
+#[tauri::command]
+pub fn open_macos_accessibility_settings() -> Result<bool, String> {
+    open_macos_settings_url("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+}
+
+#[tauri::command]
+pub fn open_macos_automation_settings() -> Result<bool, String> {
+    open_macos_settings_url("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
+}
+
+#[tauri::command]
+pub fn open_macos_screen_capture_settings() -> Result<bool, String> {
+    open_macos_settings_url("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+}
+
+pub fn dispatch_quick_shortcut(app: &tauri::AppHandle, shortcut: &Shortcut) {
+    let state = app.state::<AppState>();
+    let (translate_hotkey, ocr_hotkey) = {
+        let mut runtime = match state.quick_runtime.lock() {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        runtime.last_trigger_shortcut = Some(shortcut.to_string());
+        runtime.last_trigger_at = Some(quick_now());
+        (runtime.translate_hotkey.clone(), runtime.ocr_hotkey.clone())
+    };
+
+    let translate = match Shortcut::from_str(&translate_hotkey) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    let ocr = match Shortcut::from_str(&ocr_hotkey) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    let app_handle = app.clone();
+
+    if shortcut.id() == translate.id() {
+        tauri::async_runtime::spawn(async move {
+            let _ = run_quick_translate_pipeline(app_handle, None).await;
+        });
+    } else if shortcut.id() == ocr.id() {
+        tauri::async_runtime::spawn(async move {
+            let _ = run_quick_ocr_pipeline(app_handle).await;
+        });
+    }
+}
+
+pub fn register_quick_hotkeys_on_startup(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let settings = resolve_quick_settings(state.inner());
+    register_quick_hotkeys_internal(app, state.inner(), &settings)?;
+    update_quick_runtime_hotkeys(state.inner(), &settings)?;
+    Ok(())
+}
+
+fn update_quick_runtime_hotkeys(state: &AppState, settings: &QuickActionSettings) -> Result<(), String> {
+    let mut runtime = state.quick_runtime.lock().map_err(|e| e.to_string())?;
+    runtime.translate_hotkey = normalize_hotkey(&settings.translate_hotkey, "Option+D");
+    runtime.ocr_hotkey = normalize_hotkey(&settings.ocr_hotkey, "Option+S");
+    Ok(())
+}
+
+fn set_quick_register_status(state: &AppState, error: Option<String>) {
+    if let Ok(mut runtime) = state.quick_runtime.lock() {
+        runtime.last_register_at = Some(quick_now());
+        runtime.last_register_error = error;
+    }
+}
+
+fn register_quick_hotkeys_internal(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    settings: &QuickActionSettings,
+) -> Result<(), String> {
+    let mut shortcuts = vec![
+        normalize_hotkey(&settings.translate_hotkey, "Option+D"),
+        normalize_hotkey(&settings.ocr_hotkey, "Option+S"),
+    ];
+    shortcuts.dedup();
+
+    if let Err(error) = app.global_shortcut().unregister_all() {
+        let message = error.to_string();
+        set_quick_register_status(state, Some(message.clone()));
+        return Err(message);
+    }
+    for accelerator in shortcuts {
+        let shortcut = Shortcut::from_str(&accelerator)
+            .map_err(|e| {
+                let msg = format!("Invalid hotkey '{}': {}", accelerator, e);
+                set_quick_register_status(state, Some(msg.clone()));
+                msg
+            })?;
+        if let Err(error) = app.global_shortcut().register(shortcut) {
+            let msg = format!("Failed to register '{}': {}", accelerator, error);
+            set_quick_register_status(state, Some(msg.clone()));
+            return Err(msg);
+        }
+    }
+    update_quick_runtime_hotkeys(state, settings)?;
+    set_quick_register_status(state, None);
+    Ok(())
+}
+
+fn resolve_quick_settings(state: &AppState) -> QuickActionSettings {
+    match state.vault.lock() {
+        Ok(vault) => vault
+            .get_quick_action_settings()
+            .unwrap_or_else(|_| default_quick_settings()),
+        Err(_) => default_quick_settings(),
+    }
+}
+
+async fn run_quick_translate_pipeline(
+    app: tauri::AppHandle,
+    text: Option<String>,
+) -> QuickActionResult {
+    let started = std::time::Instant::now();
+    let source_text = match text
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => value,
+        None => match capture_selected_text_with_fallback() {
+            Ok(value) => value,
+            Err(error) => {
+                let result = build_quick_error_result(
+                    "translate",
+                    "selection",
+                    None,
+                    None,
+                    "capture_failed",
+                    error,
+                    started.elapsed().as_millis() as i64,
+                );
+                persist_and_emit_quick_result(&app, &result);
+                return result;
+            }
+        },
+    };
+
+    let result =
+        run_quick_translate_core(app.clone(), "translate", source_text, None).await;
+    result
+}
+
+async fn run_quick_translate_core(
+    app: tauri::AppHandle,
+    action_type: &str,
+    source_text: String,
+    ocr_text: Option<String>,
+) -> QuickActionResult {
+    let started = std::time::Instant::now();
+    let state = app.state::<AppState>();
+    let settings = resolve_quick_settings(state.inner());
+
+    let (translate_provider, translate_api_key) = {
+        let vault = match state.vault.lock() {
+            Ok(value) => value,
+            Err(error) => {
+                let result = build_quick_error_result(
+                    action_type,
+                    "translation",
+                    Some(source_text),
+                    ocr_text,
+                    "vault_lock_failed",
+                    error.to_string(),
+                    started.elapsed().as_millis() as i64,
+                );
+                persist_and_emit_quick_result(&app, &result);
+                return result;
+            }
+        };
+        let provider = match resolve_quick_provider(
+            &vault,
+            &settings.default_translate_provider,
+            TRANSLATION_PROVIDERS,
+            "google-translate",
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                let result = build_quick_error_result(
+                    action_type,
+                    "translation",
+                    Some(source_text),
+                    ocr_text,
+                    "provider_not_found",
+                    error,
+                    started.elapsed().as_millis() as i64,
+                );
+                persist_and_emit_quick_result(&app, &result);
+                return result;
+            }
+        };
+        let auth = resolve_provider_auth(&vault, &provider);
+        (provider, auth)
+    };
+
+    let provider_id = translate_provider.provider.clone();
+    let translated = translate_text_with_provider(
+        &translate_provider,
+        &translate_api_key,
+        &settings,
+        &source_text,
+    )
+    .await;
+
+    let result = match translated {
+        Ok(result_text) => QuickActionResult {
+            action_type: action_type.to_string(),
+            source_text: Some(source_text),
+            ocr_text,
+            result_text: Some(result_text),
+            provider: provider_id,
+            latency_ms: started.elapsed().as_millis() as i64,
+            status: "success".to_string(),
+            error_code: None,
+            error_message: None,
+            created_at: quick_now(),
+        },
+        Err(error) => build_quick_error_result(
+            action_type,
+            &provider_id,
+            Some(source_text),
+            ocr_text,
+            "translate_failed",
+            error,
+            started.elapsed().as_millis() as i64,
+        ),
+    };
+    persist_and_emit_quick_result(&app, &result);
+    result
+}
+
+async fn run_quick_ocr_pipeline(app: tauri::AppHandle) -> QuickActionResult {
+    let started = std::time::Instant::now();
+    let capture_path = match capture_interactive_screenshot() {
+        Ok(path) => path,
+        Err(error) => {
+            let result = build_quick_error_result(
+                "ocr_translate",
+                "screenshot",
+                None,
+                None,
+                "capture_failed",
+                error,
+                started.elapsed().as_millis() as i64,
+            );
+            persist_and_emit_quick_result(&app, &result);
+            return result;
+        }
+    };
+
+    let state = app.state::<AppState>();
+    let settings = resolve_quick_settings(state.inner());
+    let (ocr_provider, ocr_api_key) = {
+        let vault = match state.vault.lock() {
+            Ok(value) => value,
+            Err(error) => {
+                let result = build_quick_error_result(
+                    "ocr_translate",
+                    "ocr",
+                    None,
+                    None,
+                    "vault_lock_failed",
+                    error.to_string(),
+                    started.elapsed().as_millis() as i64,
+                );
+                persist_and_emit_quick_result(&app, &result);
+                return result;
+            }
+        };
+        let provider = match resolve_quick_provider(
+            &vault,
+            &settings.default_ocr_provider,
+            OCR_PROVIDERS,
+            "apple-ocr",
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                let result = build_quick_error_result(
+                    "ocr_translate",
+                    "ocr",
+                    None,
+                    None,
+                    "provider_not_found",
+                    error,
+                    started.elapsed().as_millis() as i64,
+                );
+                persist_and_emit_quick_result(&app, &result);
+                return result;
+            }
+        };
+        let auth = resolve_provider_auth(&vault, &provider);
+        (provider, auth)
+    };
+
+    let mut ocr_provider_id = ocr_provider.provider.clone();
+    let ocr_text = match run_ocr_with_provider(&ocr_provider, &ocr_api_key, &capture_path).await {
+        Ok(text) => text.trim().to_string(),
+        Err(error) => {
+            if ocr_provider.provider == "apple-ocr"
+                && error.to_lowercase().contains("empty")
+            {
+                let fallback_candidates = {
+                    match state.vault.lock() {
+                        Ok(vault) => ["paddleocr", "ocr-space"]
+                            .iter()
+                            .filter_map(|provider_id| {
+                                vault.get_provider_config(provider_id).map(|provider| {
+                                    let key = resolve_provider_auth(&vault, &provider);
+                                    (provider, key)
+                                })
+                            })
+                            .collect::<Vec<(ProviderConfig, String)>>(),
+                        Err(_) => Vec::new(),
+                    }
+                };
+                if fallback_candidates.is_empty() {
+                    let result = build_quick_error_result(
+                        "ocr_translate",
+                        &ocr_provider_id,
+                        None,
+                        None,
+                        "ocr_failed",
+                        format!("{}（可尝试启用 paddleocr / ocr-space 作为兜底）", error),
+                        started.elapsed().as_millis() as i64,
+                    );
+                    persist_and_emit_quick_result(&app, &result);
+                    let _ = fs::remove_file(&capture_path);
+                    return result;
+                }
+
+                let mut fallback_errors: Vec<String> = Vec::new();
+                let mut fallback_text: Option<String> = None;
+                for (fallback_provider, fallback_key) in fallback_candidates {
+                    match run_ocr_with_provider(&fallback_provider, &fallback_key, &capture_path)
+                        .await
+                    {
+                        Ok(text) if !text.trim().is_empty() => {
+                            ocr_provider_id = fallback_provider.provider.clone();
+                            fallback_text = Some(text.trim().to_string());
+                            break;
+                        }
+                        Ok(_) => {
+                            fallback_errors.push(format!(
+                                "{} fallback empty result",
+                                fallback_provider.provider
+                            ));
+                        }
+                        Err(fallback_error) => {
+                            fallback_errors.push(format!(
+                                "{} fallback failed: {}",
+                                fallback_provider.provider, fallback_error
+                            ));
+                        }
+                    }
+                }
+
+                if let Some(text) = fallback_text {
+                    text
+                } else {
+                    let result = build_quick_error_result(
+                        "ocr_translate",
+                        &ocr_provider_id,
+                        None,
+                        None,
+                        "ocr_failed",
+                        format!("Apple OCR failed: {} ; {}", error, fallback_errors.join(" ; ")),
+                        started.elapsed().as_millis() as i64,
+                    );
+                    persist_and_emit_quick_result(&app, &result);
+                    let _ = fs::remove_file(&capture_path);
+                    return result;
+                }
+            } else {
+                let result = build_quick_error_result(
+                    "ocr_translate",
+                    &ocr_provider_id,
+                    None,
+                    None,
+                    "ocr_failed",
+                    error,
+                    started.elapsed().as_millis() as i64,
+                );
+                persist_and_emit_quick_result(&app, &result);
+                let _ = fs::remove_file(&capture_path);
+                return result;
+            }
+        }
+    };
+    let _ = fs::remove_file(&capture_path);
+
+    if ocr_text.trim().is_empty() {
+        let result = build_quick_error_result(
+            "ocr_translate",
+            &ocr_provider_id,
+            None,
+            None,
+            "ocr_empty",
+            "OCR did not detect any text".to_string(),
+            started.elapsed().as_millis() as i64,
+        );
+        persist_and_emit_quick_result(&app, &result);
+        return result;
+    }
+
+    run_quick_translate_core(
+        app,
+        "ocr_translate",
+        ocr_text.clone(),
+        Some(ocr_text),
+    )
+    .await
+}
+
+fn persist_and_emit_quick_result(app: &tauri::AppHandle, result: &QuickActionResult) {
+    let state = app.state::<AppState>();
+    if let Ok(vault) = state.vault.lock() {
+        let _ = vault.append_quick_action_history(result);
+    }
+    if let Ok(mut runtime) = state.quick_runtime.lock() {
+        runtime.last_action_type = Some(result.action_type.clone());
+        runtime.last_source_text = result.source_text.clone();
+        runtime.last_ocr_text = result.ocr_text.clone();
+        runtime.last_result = Some(result.clone());
+    }
+    let _ = ensure_quick_result_window(app);
+    if let Some(window) = app.get_webview_window(QUICK_RESULT_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.emit(QUICK_RESULT_EVENT, result);
+    }
+}
+
+fn ensure_quick_result_window(app: &tauri::AppHandle) -> Result<(), String> {
+    if app.get_webview_window(QUICK_RESULT_WINDOW_LABEL).is_some() {
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        app,
+        QUICK_RESULT_WINDOW_LABEL,
+        tauri::WebviewUrl::App("index.html#/quick-result".into()),
+    )
+    .title("MyKey Quick Result")
+    .inner_size(560.0, 420.0)
+    .min_inner_size(440.0, 320.0)
+    .visible(false)
+    .always_on_top(true)
+    .decorations(true)
+    .skip_taskbar(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn run_command_with_timeout(
+    command: &str,
+    args: &[String],
+    timeout: Duration,
+) -> Result<Output, String> {
+    let mut cmd = Command::new(command);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start {}: {}", command, e))?;
+    let started = std::time::Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|e| format!("Failed to read {} output: {}", command, e));
+            }
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "{} timed out after {}s",
+                        command,
+                        timeout.as_secs()
+                    ));
+                }
+                thread::sleep(Duration::from_millis(80));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Failed while waiting {}: {}", command, error));
+            }
+        }
+    }
+}
+
+fn resolve_quick_provider(
+    vault: &crate::vault::Vault,
+    preferred: &str,
+    category_defaults: &[&str],
+    fallback: &str,
+) -> Result<ProviderConfig, String> {
+    if let Some(config) = vault.get_provider_config(preferred) {
+        return Ok(config);
+    }
+    for provider in category_defaults {
+        if let Some(config) = vault.get_provider_config(provider) {
+            return Ok(config);
+        }
+    }
+    if let Some(config) = vault.get_provider_config(fallback) {
+        return Ok(config);
+    }
+    vault
+        .get_providers()
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No provider configured".to_string())
+}
+
+fn capture_selected_text_with_fallback() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let original_clipboard = read_clipboard_text().ok();
+        let copy_error = trigger_copy_shortcut().err();
+        let mut selected = String::new();
+        if copy_error.is_none() {
+            for _ in 0..6 {
+                thread::sleep(Duration::from_millis(50));
+                if let Ok(candidate) = read_clipboard_text() {
+                    let candidate_trimmed = candidate.trim().to_string();
+                    if candidate_trimmed.is_empty() {
+                        continue;
+                    }
+                    if original_clipboard
+                        .as_ref()
+                        .map(|item| item.trim() != candidate_trimmed)
+                        .unwrap_or(true)
+                    {
+                        selected = candidate_trimmed;
+                        break;
+                    }
+                }
+            }
+        }
+        if selected.is_empty() {
+            selected = original_clipboard
+                .as_ref()
+                .map(|value| value.trim().to_string())
+                .unwrap_or_default();
+        }
+        if let Some(original) = original_clipboard.as_ref() {
+            let _ = write_clipboard_text(original);
+        }
+        if selected.is_empty() && copy_error.is_some() {
+            return Err(format!(
+                "{}；已尝试回退剪贴板但为空。{}",
+                copy_error.unwrap_or_default(),
+                selection_permission_hint()
+            ));
+        }
+        if selected.is_empty() {
+            return Err("No selected text detected. Please select text and try again.".to_string());
+        }
+        Ok(selected)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Quick selection capture currently supports macOS only".to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn trigger_copy_shortcut() -> Result<(), String> {
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(r#"tell application "System Events" to keystroke "c" using command down"#)
+        .output()
+        .map_err(|e| format!("Failed to execute copy shortcut: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!(
+                "Failed to capture selected text. {}",
+                selection_permission_hint()
+            )
+        } else {
+            format!(
+                "Failed to capture selected text: {}. {}",
+                stderr,
+                selection_permission_hint()
+            )
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn selection_permission_hint() -> &'static str {
+    "请在“系统设置 -> 隐私与安全性 -> 辅助功能”中给 MyKey 授权，并在“自动化”中允许 MyKey 控制“System Events”"
+}
+
+#[cfg(target_os = "macos")]
+fn read_clipboard_text() -> Result<String, String> {
+    let output = Command::new("pbpaste")
+        .output()
+        .map_err(|e| format!("Failed to read clipboard: {}", e))?;
+    if !output.status.success() {
+        return Err("Failed to read clipboard".to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn write_clipboard_text(content: &str) -> Result<(), String> {
+    let mut process = Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to write clipboard: {}", e))?;
+    if let Some(stdin) = process.stdin.as_mut() {
+        stdin
+            .write_all(content.as_bytes())
+            .map_err(|e| format!("Failed to write clipboard stdin: {}", e))?;
+    }
+    let status = process.wait().map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("Failed to write clipboard".to_string());
+    }
+    Ok(())
+}
+
+fn capture_interactive_screenshot() -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let path = std::env::temp_dir().join(format!(
+            "mykey-quick-{}.png",
+            uuid::Uuid::new_v4()
+        ));
+        let status = Command::new("screencapture")
+            .arg("-i")
+            .arg("-x")
+            .arg(&path)
+            .status()
+            .map_err(|e| format!("Failed to execute screencapture: {}", e))?;
+        if !status.success() {
+            return Err("Screenshot capture canceled or failed".to_string());
+        }
+        if !path.exists() {
+            return Err("Screenshot capture was canceled".to_string());
+        }
+        Ok(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Quick screenshot OCR currently supports macOS only".to_string())
+    }
+}
+
+async fn translate_text_with_provider(
+    provider: &ProviderConfig,
+    api_key: &str,
+    settings: &QuickActionSettings,
+    text: &str,
+) -> Result<String, String> {
+    match provider.provider.as_str() {
+        "apple-translate" => translate_with_apple_shortcut(text, settings),
+        "deepl" => translate_with_deepl(provider, api_key, settings, text).await,
+        "google-translate" | "google-translate-free" => {
+            translate_with_google(provider, api_key, settings, text).await
+        }
+        _ => translate_with_openai_compatible(provider, api_key, settings, text).await,
+    }
+}
+
+fn translate_with_apple_shortcut(
+    text: &str,
+    _settings: &QuickActionSettings,
+) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let input_path = std::env::temp_dir().join(format!(
+            "mykey-translate-input-{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        let output_path = std::env::temp_dir().join(format!(
+            "mykey-translate-output-{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&input_path, text).map_err(|e| e.to_string())?;
+
+        let shortcut_candidates = ["Bob.Translate.v2", "Bob.Translate.v1"];
+        let mut last_error = "Unable to run Apple Translate shortcut".to_string();
+        for shortcut in shortcut_candidates {
+            let args = vec![
+                "run".to_string(),
+                shortcut.to_string(),
+                "--input-path".to_string(),
+                input_path.to_string_lossy().to_string(),
+                "--output-path".to_string(),
+                output_path.to_string_lossy().to_string(),
+                "--output-type".to_string(),
+                "public.plain-text".to_string(),
+            ];
+            let output = run_command_with_timeout("shortcuts", &args, Duration::from_secs(25));
+
+            match output {
+                Ok(result) if result.status.success() => {
+                    let stdout_text = String::from_utf8_lossy(&result.stdout).trim().to_string();
+                    let from_file = fs::read_to_string(&output_path)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    let translated = if !from_file.is_empty() {
+                        from_file
+                    } else {
+                        stdout_text
+                    };
+                    let _ = fs::remove_file(&input_path);
+                    let _ = fs::remove_file(&output_path);
+                    if translated.is_empty() {
+                        last_error = format!(
+                            "Apple Translate returned empty text. Verify shortcut {} output.",
+                            shortcut
+                        );
+                        continue;
+                    }
+                    return Ok(translated);
+                }
+                Ok(result) => {
+                    let stderr_text = String::from_utf8_lossy(&result.stderr).trim().to_string();
+                    last_error = if stderr_text.is_empty() {
+                        format!("Shortcut {} failed", shortcut)
+                    } else {
+                        format!("Shortcut {} failed: {}", shortcut, stderr_text)
+                    };
+                }
+                Err(err) => {
+                    last_error = format!("Failed to run shortcuts CLI: {}", err);
+                }
+            }
+        }
+
+        let _ = fs::remove_file(&input_path);
+        let _ = fs::remove_file(&output_path);
+        Err(format!(
+            "{}. 请确认已安装 Bob.Translate.v2 快捷指令，并在 macOS“隐私与安全性”中授权自动化。",
+            last_error
+        ))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = _settings;
+        let _ = text;
+        Err("Apple Translate provider only supports macOS".to_string())
+    }
+}
+
+async fn translate_with_deepl(
+    provider: &ProviderConfig,
+    api_key: &str,
+    settings: &QuickActionSettings,
+    text: &str,
+) -> Result<String, String> {
+    if api_key.trim().is_empty() {
+        return Err("DeepL API key is required".to_string());
+    }
+    let mut endpoint = resolve_quick_endpoint(provider);
+    if endpoint.is_empty() {
+        endpoint = "https://api-free.deepl.com/v2".to_string();
+    }
+    let url = if endpoint.contains("/translate") {
+        endpoint
+    } else {
+        format!("{}/translate", endpoint.trim_end_matches('/'))
+    };
+
+    let mut payload: Vec<(&str, String)> = vec![
+        ("text", text.to_string()),
+        (
+            "target_lang",
+            normalize_deepl_lang(&settings.target_lang, "ZH"),
+        ),
+    ];
+    let source_lang = normalize_deepl_lang(&settings.source_lang, "");
+    if !source_lang.is_empty() {
+        payload.push(("source_lang", source_lang));
+    }
+
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|e| e.to_string())?
+        .post(&url)
+        .header("Authorization", format!("DeepL-Auth-Key {}", api_key.trim()))
+        .form(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("DeepL request failed: {}", e))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+    if !status.is_success() {
+        let detail = extract_error_message(&parsed).unwrap_or_else(|| truncate_text(&body, 160));
+        return Err(format!("DeepL HTTP {}: {}", status.as_u16(), detail));
+    }
+
+    let translated = parsed
+        .get("translations")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("text"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    if translated.is_empty() {
+        return Err("DeepL returned empty translation".to_string());
+    }
+    Ok(translated)
+}
+
+async fn translate_with_google(
+    provider: &ProviderConfig,
+    api_key: &str,
+    settings: &QuickActionSettings,
+    text: &str,
+) -> Result<String, String> {
+    if provider.provider == "google-translate-free" || api_key.trim().is_empty() {
+        let source = normalize_google_lang(&settings.source_lang, "auto");
+        let target = normalize_google_lang(&settings.target_lang, "zh-CN");
+        let response = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| e.to_string())?
+            .get("https://translate.googleapis.com/translate_a/single")
+            .query(&[
+                ("client", "gtx"),
+                ("sl", source.as_str()),
+                ("tl", target.as_str()),
+                ("dt", "t"),
+                ("q", text),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("Google Translate free request failed: {}", e))?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!("Google Translate free HTTP {}", status.as_u16()));
+        }
+        let parsed = serde_json::from_str::<Value>(&body).map_err(|e| e.to_string())?;
+        let translated = parsed
+            .as_array()
+            .and_then(|root| root.first())
+            .and_then(|first| first.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        row.as_array()
+                            .and_then(|parts| parts.first())
+                            .and_then(|value| value.as_str())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default();
+        let normalized = decode_html_entities(translated.trim());
+        if normalized.is_empty() {
+            return Err("Google Translate free returned empty translation".to_string());
+        }
+        return Ok(normalized);
+    }
+
+    let mut endpoint = resolve_quick_endpoint(provider);
+    if endpoint.is_empty() {
+        endpoint = "https://translation.googleapis.com/language/translate/v2".to_string();
+    }
+    let url = if endpoint.contains("/language/translate/v2") {
+        endpoint
+    } else {
+        format!(
+            "{}/language/translate/v2",
+            endpoint.trim_end_matches('/')
+        )
+    };
+    let source = normalize_google_lang(&settings.source_lang, "auto");
+    let target = normalize_google_lang(&settings.target_lang, "zh-CN");
+    let mut payload: Vec<(&str, String)> = vec![
+        ("q", text.to_string()),
+        ("target", target),
+        ("format", "text".to_string()),
+    ];
+    if source != "auto" {
+        payload.push(("source", source));
+    }
+
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?
+        .post(&url)
+        .query(&[("key", api_key.trim())])
+        .form(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Google Translate request failed: {}", e))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+    if !status.is_success() {
+        let detail = extract_error_message(&parsed).unwrap_or_else(|| truncate_text(&body, 160));
+        return Err(format!("Google Translate HTTP {}: {}", status.as_u16(), detail));
+    }
+    let translated = parsed
+        .get("data")
+        .and_then(|value| value.get("translations"))
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("translatedText"))
+        .and_then(|value| value.as_str())
+        .map(decode_html_entities)
+        .unwrap_or_default();
+    if translated.trim().is_empty() {
+        return Err("Google Translate returned empty text".to_string());
+    }
+    Ok(translated.trim().to_string())
+}
+
+async fn translate_with_openai_compatible(
+    provider: &ProviderConfig,
+    api_key: &str,
+    settings: &QuickActionSettings,
+    text: &str,
+) -> Result<String, String> {
+    let endpoint = resolve_quick_endpoint(provider);
+    if endpoint.trim().is_empty() {
+        return Err(format!("Provider {} has no endpoint configured", provider.provider));
+    }
+    let url = if endpoint.ends_with("/chat/completions") {
+        endpoint
+    } else if endpoint.ends_with("/v1") {
+        format!("{}/chat/completions", endpoint.trim_end_matches('/'))
+    } else {
+        format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'))
+    };
+    let model = if !provider.details.main_model.trim().is_empty() {
+        provider.details.main_model.trim().to_string()
+    } else if let Some(first_model) = provider.models.first() {
+        first_model.to_string()
+    } else {
+        "gpt-4o-mini".to_string()
+    };
+
+    let primary_headers = provider
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.is_primary)
+        .and_then(|endpoint| endpoint.headers.as_deref());
+    let mut headers = parse_headers(primary_headers);
+    if !api_key.trim().is_empty() {
+        if !headers.contains_key(AUTHORIZATION) {
+            let bearer = format!("Bearer {}", api_key.trim());
+            if let Ok(value) = HeaderValue::from_str(&bearer) {
+                headers.insert(AUTHORIZATION, value);
+            }
+        }
+        if !headers.contains_key("x-api-key") {
+            if let Ok(value) = HeaderValue::from_str(api_key.trim()) {
+                headers.insert("x-api-key", value);
+            }
+        }
+    }
+    if !headers.contains_key("content-type") {
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+    }
+    let system_prompt = format!(
+        "You are a precise translator. Source language hint: {}. Target language: {}. Output translation only.",
+        settings.source_lang, settings.target_lang
+    );
+    let payload = json!({
+        "model": model,
+        "temperature": 0.2,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": text
+            }
+        ]
+    });
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|e| e.to_string())?
+        .post(&url)
+        .headers(headers)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Provider request failed: {}", e))?;
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+    if !status.is_success() {
+        let detail = extract_error_message(&parsed).unwrap_or_else(|| truncate_text(&body, 160));
+        return Err(format!("Provider HTTP {}: {}", status.as_u16(), detail));
+    }
+
+    if let Some(content) = parsed
+        .get("choices")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("message"))
+        .and_then(|item| item.get("content"))
+        .and_then(|value| value.as_str())
+    {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    if let Some(text) = extract_codex_text(&parsed) {
+        if !text.trim().is_empty() {
+            return Ok(text.trim().to_string());
+        }
+    }
+    Err("Provider returned empty translation".to_string())
+}
+
+async fn run_ocr_with_provider(
+    provider: &ProviderConfig,
+    api_key: &str,
+    image_path: &Path,
+) -> Result<String, String> {
+    match provider.provider.as_str() {
+        "apple-ocr" => ocr_with_apple_vision(image_path),
+        "ocr-space" => ocr_with_ocr_space(provider, api_key, image_path).await,
+        "paddleocr" => ocr_with_paddleocr(provider, api_key, image_path).await,
+        _ => ocr_with_apple_vision(image_path),
+    }
+}
+
+fn ocr_with_apple_vision(image_path: &Path) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let swift_script = r#"import Foundation
+import Vision
+import AppKit
+
+let arguments = CommandLine.arguments
+guard arguments.count > 1 else {
+  FileHandle.standardError.write(Data("Missing image path\n".utf8))
+  exit(2)
+}
+let imagePath = arguments[1]
+let imageURL = URL(fileURLWithPath: imagePath)
+
+guard let nsImage = NSImage(contentsOf: imageURL),
+      let tiff = nsImage.tiffRepresentation,
+      let bitmap = NSBitmapImageRep(data: tiff),
+      let cgImage = bitmap.cgImage else {
+  FileHandle.standardError.write(Data("Failed to load image\n".utf8))
+  exit(3)
+}
+
+func recognize(level: VNRequestTextRecognitionLevel, correction: Bool) throws -> [String] {
+  let request = VNRecognizeTextRequest()
+  request.recognitionLevel = level
+  request.usesLanguageCorrection = correction
+  request.minimumTextHeight = 0.008
+  request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US", "ja-JP"]
+  if #available(macOS 13.0, *) {
+    request.automaticallyDetectsLanguage = true
+  }
+  let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+  try handler.perform([request])
+
+  let observations = request.results as? [VNRecognizedTextObservation] ?? []
+  let sorted = observations.sorted { lhs, rhs in
+    let yDelta = abs(lhs.boundingBox.origin.y - rhs.boundingBox.origin.y)
+    if yDelta > 0.02 {
+      return lhs.boundingBox.origin.y > rhs.boundingBox.origin.y
+    }
+    return lhs.boundingBox.origin.x < rhs.boundingBox.origin.x
+  }
+  return sorted.compactMap { obs -> String? in
+    obs.topCandidates(1).first?.string
+  }
+}
+
+do {
+  var lines = try recognize(level: .accurate, correction: true)
+  if lines.isEmpty {
+    lines = try recognize(level: .fast, correction: false)
+  }
+  let output = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+  FileHandle.standardOutput.write(Data(output.utf8))
+} catch {
+  FileHandle.standardError.write(Data("Vision request failed: \(error.localizedDescription)\n".utf8))
+  exit(4)
+}
+"#;
+
+        let script_path = std::env::temp_dir().join(format!(
+            "mykey-ocr-{}.swift",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&script_path, swift_script).map_err(|e| e.to_string())?;
+        let args = vec![
+            script_path.to_string_lossy().to_string(),
+            image_path.to_string_lossy().to_string(),
+        ];
+        let output = run_command_with_timeout("swift", &args, Duration::from_secs(20))
+            .map_err(|e| format!("Failed to run swift OCR: {}", e))?;
+        let _ = fs::remove_file(&script_path);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if stderr.is_empty() {
+                "Apple OCR failed".to_string()
+            } else {
+                format!("Apple OCR failed: {}", stderr)
+            });
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if text.is_empty() {
+            return Err("Apple OCR returned empty text (try larger area or higher contrast)".to_string());
+        }
+        Ok(text)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = image_path;
+        Err("Apple OCR provider only supports macOS".to_string())
+    }
+}
+
+async fn ocr_with_ocr_space(
+    provider: &ProviderConfig,
+    api_key: &str,
+    image_path: &Path,
+) -> Result<String, String> {
+    let mut endpoint = resolve_quick_endpoint(provider);
+    if endpoint.trim().is_empty() {
+        endpoint = "https://api.ocr.space".to_string();
+    }
+    let url = if endpoint.contains("/parse/image") {
+        endpoint
+    } else {
+        format!("{}/parse/image", endpoint.trim_end_matches('/'))
+    };
+
+    let bytes = fs::read(image_path).map_err(|e| e.to_string())?;
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name("capture.png")
+        .mime_str("image/png")
+        .map_err(|e| e.to_string())?;
+    let form = reqwest::multipart::Form::new()
+        .text("isOverlayRequired", "false")
+        .text("OCREngine", "2")
+        .part("file", part);
+
+    let key = if api_key.trim().is_empty() {
+        "helloworld".to_string()
+    } else {
+        api_key.trim().to_string()
+    };
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?
+        .post(&url)
+        .header("apikey", key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("OCR.Space request failed: {}", e))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+    if !status.is_success() {
+        return Err(format!("OCR.Space HTTP {}: {}", status.as_u16(), truncate_text(&body, 180)));
+    }
+    if parsed
+        .get("IsErroredOnProcessing")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        let error_text = parsed
+            .get("ErrorMessage")
+            .map(|value| {
+                if let Some(array) = value.as_array() {
+                    array
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                } else {
+                    value.as_str().unwrap_or_default().to_string()
+                }
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "OCR.Space processing error".to_string());
+        return Err(error_text);
+    }
+    let text = parsed
+        .get("ParsedResults")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("ParsedText"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    if text.is_empty() {
+        return Err("OCR.Space returned empty text".to_string());
+    }
+    Ok(text)
+}
+
+fn extract_paddleocr_texts(payload: &Value) -> Vec<String> {
+    if let Some(layout_items) = payload
+        .get("result")
+        .and_then(|value| value.get("layoutParsingResults"))
+        .and_then(|value| value.as_array())
+    {
+        let mut lines = Vec::new();
+        for item in layout_items {
+            let markdown_text = item
+                .get("markdown")
+                .and_then(|value| value.get("text"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !markdown_text.is_empty() {
+                lines.push(markdown_text);
+            }
+        }
+        if !lines.is_empty() {
+            return lines;
+        }
+    }
+
+    let mut lines = Vec::new();
+    let maybe_results = payload
+        .get("results")
+        .or_else(|| payload.get("result"))
+        .or_else(|| payload.get("data"));
+
+    let Some(results) = maybe_results else {
+        return lines;
+    };
+
+    if let Some(items) = results.as_array() {
+        for item in items {
+            if let Some(rows) = item.as_array() {
+                for row in rows {
+                    if let Some(text) = row.get("text").and_then(|value| value.as_str()) {
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            lines.push(text.to_string());
+                        }
+                    }
+                }
+            } else if let Some(text) = item.get("text").and_then(|value| value.as_str()) {
+                let text = text.trim();
+                if !text.is_empty() {
+                    lines.push(text.to_string());
+                }
+            }
+        }
+    }
+
+    lines
+}
+
+async fn ocr_with_paddleocr(
+    provider: &ProviderConfig,
+    api_key: &str,
+    image_path: &Path,
+) -> Result<String, String> {
+    let mut endpoint = resolve_quick_endpoint(provider);
+    if endpoint.trim().is_empty() || endpoint.contains("127.0.0.1:8868") {
+        endpoint = "https://39p4je2aq9v4jezd.aistudio-app.com/layout-parsing".to_string();
+    }
+
+    if api_key.trim().is_empty() {
+        return Err("PaddleOCR token is required (set provider API Key / PADDLEOCR_TOKEN)".to_string());
+    }
+
+    let base = endpoint.trim_end_matches('/').to_string();
+    let mut candidates = Vec::new();
+    if base.ends_with("/layout-parsing") {
+        candidates.push(base.clone());
+    } else {
+        candidates.push(base.clone());
+        candidates.push(format!("{}/layout-parsing", base));
+    }
+
+    let image_bytes = fs::read(image_path).map_err(|e| e.to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(image_bytes);
+    let payload = json!({
+        "file": encoded,
+        "fileType": 1,
+        "useDocOrientationClassify": false,
+        "useDocUnwarping": false,
+        "useChartRecognition": false
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut last_error = String::new();
+    for url in candidates {
+        let response = client
+            .post(&url)
+            .header("Authorization", format!("token {}", api_key.trim()))
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await;
+
+        let response = match response {
+            Ok(value) => value,
+            Err(error) => {
+                last_error = format!("PaddleOCR request failed for {}: {}", url, error);
+                continue;
+            }
+        };
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            last_error = format!(
+                "PaddleOCR HTTP {} at {}: {}",
+                status.as_u16(),
+                url,
+                truncate_text(&body, 160)
+            );
+            continue;
+        }
+
+        let parsed = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+        let lines = extract_paddleocr_texts(&parsed);
+        if lines.is_empty() {
+            last_error = format!(
+                "PaddleOCR returned empty results at {}: {}",
+                url,
+                truncate_text(&body, 160)
+            );
+            continue;
+        }
+        return Ok(lines.join("\n"));
+    }
+
+    if last_error.is_empty() {
+        Err("PaddleOCR returned empty response".to_string())
+    } else {
+        Err(last_error)
+    }
+}
+
+#[tauri::command]
 pub fn mykey_capabilities() -> Result<Vec<MykeyCapability>, String> {
     Ok(vec![
         MykeyCapability {
             id: "health.ping".to_string(),
             description: "Quick ping endpoint for agent health".to_string(),
+            requires_master_password: false,
+            mutating: false,
+            params: vec![],
+        },
+        MykeyCapability {
+            id: "capabilities.list".to_string(),
+            description: "List all available mykey agent commands".to_string(),
             requires_master_password: false,
             mutating: false,
             params: vec![],
@@ -323,6 +2111,13 @@ pub fn mykey_capabilities() -> Result<Vec<MykeyCapability>, String> {
             requires_master_password: true,
             mutating: true,
             params: vec!["id:string".to_string()],
+        },
+        MykeyCapability {
+            id: "projects.clear".to_string(),
+            description: "Clear all project data for reset/testing".to_string(),
+            requires_master_password: true,
+            mutating: true,
+            params: vec![],
         },
     ])
 }
@@ -427,6 +2222,10 @@ pub fn mykey_command(
             let id = required_string_arg(&args, "id")?;
             vault.delete_project(&id)?;
             Ok(json!({ "ok": true, "id": id }))
+        }
+        "projects.clear" => {
+            vault.clear_project_data()?;
+            Ok(json!({ "ok": true }))
         }
         _ => Err(format!("Unknown mykey command: {}", command)),
     }
@@ -941,6 +2740,93 @@ fn parse_headers(raw: Option<&str>) -> HeaderMap {
     headers
 }
 
+fn command_exists(command: &str) -> bool {
+    Command::new("which")
+        .arg(command)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn build_local_provider_probe(
+    requested_url: &str,
+    tested_url: &str,
+    checks: &[(&str, bool)],
+) -> EndpointSpeedTestResult {
+    let missing: Vec<&str> = checks
+        .iter()
+        .filter_map(|(name, ok)| if *ok { None } else { Some(*name) })
+        .collect();
+
+    if missing.is_empty() {
+        EndpointSpeedTestResult {
+            requested_url: requested_url.to_string(),
+            tested_url: Some(tested_url.to_string()),
+            success: true,
+            status_code: Some(200),
+            latency_ms: Some(0),
+            error: None,
+        }
+    } else {
+        EndpointSpeedTestResult {
+            requested_url: requested_url.to_string(),
+            tested_url: Some(tested_url.to_string()),
+            success: false,
+            status_code: None,
+            latency_ms: None,
+            error: Some(format!("Missing local command(s): {}", missing.join(", "))),
+        }
+    }
+}
+
+fn test_apple_local_provider(base: &str, requested_url: &str) -> Option<EndpointSpeedTestResult> {
+    if !base.starts_with("apple://") {
+        return None;
+    }
+
+    if !cfg!(target_os = "macos") {
+        return Some(EndpointSpeedTestResult {
+            requested_url: requested_url.to_string(),
+            tested_url: Some(base.to_string()),
+            success: false,
+            status_code: None,
+            latency_ms: None,
+            error: Some("Apple local provider only supports macOS".to_string()),
+        });
+    }
+
+    if base.starts_with("apple://translate") {
+        return Some(build_local_provider_probe(
+            requested_url,
+            "apple://translate",
+            &[
+                ("shortcuts", command_exists("shortcuts")),
+                ("osascript", command_exists("osascript")),
+            ],
+        ));
+    }
+
+    if base.starts_with("apple://ocr") {
+        return Some(build_local_provider_probe(
+            requested_url,
+            "apple://ocr",
+            &[
+                ("screencapture", command_exists("screencapture")),
+                ("swift", command_exists("swift")),
+            ],
+        ));
+    }
+
+    Some(EndpointSpeedTestResult {
+        requested_url: requested_url.to_string(),
+        tested_url: Some(base.to_string()),
+        success: false,
+        status_code: None,
+        latency_ms: None,
+        error: Some("Unknown apple local provider endpoint".to_string()),
+    })
+}
+
 fn truncate_text(input: &str, max_chars: usize) -> String {
     let trimmed = input.trim();
     if trimmed.chars().count() <= max_chars {
@@ -1156,6 +3042,10 @@ pub async fn test_provider_endpoint(
         });
     }
 
+    if let Some(local_probe) = test_apple_local_provider(&base, &url) {
+        return Ok(local_probe);
+    }
+
     let timeout = timeout_ms.unwrap_or(8000).clamp(1000, 60_000) as u64;
     let mut request_headers = parse_headers(headers.as_deref());
 
@@ -1176,10 +3066,12 @@ pub async fn test_provider_endpoint(
         }
     }
 
-    let mut candidates = vec![format!("{}/models", base)];
+    let mut candidates: Vec<(String, bool)> = vec![(format!("{}/models", base), false)];
     if !base.ends_with("/v1") {
-        candidates.push(format!("{}/v1/models", base));
+        candidates.push((format!("{}/v1/models", base), false));
     }
+    // Fallback probe for non-model providers (translation/search/ocr), which may not expose /models.
+    candidates.push((base.clone(), true));
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(timeout))
@@ -1188,7 +3080,7 @@ pub async fn test_provider_endpoint(
 
     let mut last_error: Option<String> = None;
 
-    for target in candidates {
+    for (target, allow_client_error) in candidates {
         let start = std::time::Instant::now();
         let response = client
             .get(&target)
@@ -1201,6 +3093,16 @@ pub async fn test_provider_endpoint(
                 let status = resp.status().as_u16();
                 let latency = start.elapsed().as_millis() as i64;
                 if resp.status().is_success() {
+                    return Ok(EndpointSpeedTestResult {
+                        requested_url: url,
+                        tested_url: Some(target),
+                        success: true,
+                        status_code: Some(status),
+                        latency_ms: Some(latency),
+                        error: None,
+                    });
+                }
+                if allow_client_error && resp.status().is_client_error() {
                     return Ok(EndpointSpeedTestResult {
                         requested_url: url,
                         tested_url: Some(target),
@@ -1703,6 +3605,26 @@ pub fn delete_backup(
     vault.delete_backup_file(backup_path)
 }
 
+fn open_macos_settings_url(url: &str) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("/usr/bin/open")
+            .arg(url)
+            .status()
+            .map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(format!("Failed to open macOS settings url: {}", url));
+        }
+        Ok(true)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = url;
+        Err("This command is only supported on macOS".to_string())
+    }
+}
+
 #[tauri::command]
 pub fn open_path(path: String) -> Result<bool, String> {
     let target = Path::new(path.trim());
@@ -1843,6 +3765,18 @@ pub fn auto_scan_projects(
     }
 
     Ok(added)
+}
+
+#[tauri::command]
+pub fn clear_project_data(
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.clear_project_data()
 }
 
 #[tauri::command]
@@ -2306,6 +4240,18 @@ fn detect_provider(var_name: &str, value: &str) -> Option<&'static str> {
     if name_lower.contains("anthropic") || name_lower.contains("claude") {
         return Some("anthropic");
     }
+    if name_lower.contains("google_translate") || name_lower.contains("google-translate") {
+        return Some("google-translate");
+    }
+    if name_lower.contains("deepl") {
+        return Some("deepl");
+    }
+    if name_lower.contains("azure_translator")
+        || name_lower.contains("microsoft_translator")
+        || name_lower.contains("microsoft_translate")
+    {
+        return Some("microsoft-translate");
+    }
     if name_lower.contains("gemini") || name_lower.contains("google") {
         return Some("gemini");
     }
@@ -2453,6 +4399,11 @@ fn provider_label(provider: &str) -> &'static str {
         "perplexity" => "Perplexity",
         "together" => "Together",
         "xai" => "xAI",
+        "deepl" => "DeepL",
+        "google-translate" => "Google Translate",
+        "google-translate-free" => "Google Translate (Free)",
+        "microsoft-translate" => "Microsoft Translator",
+        "apple-translate" => "Apple Translate (macOS)",
         "volcengine" => "Volcengine",
         "glm" => "GLM",
         "qwen" => "Qwen",
@@ -2710,7 +4661,9 @@ fn ensure_onepassword_vault(vault_name: &str) -> Result<(), String> {
     if create_output.status.success() {
         Ok(())
     } else {
-        Err(String::from_utf8_lossy(&create_output.stderr).trim().to_string())
+        Err(String::from_utf8_lossy(&create_output.stderr)
+            .trim()
+            .to_string())
     }
 }
 
@@ -2750,7 +4703,9 @@ fn onepassword_write_secret(
     if create_output.status.success() {
         Ok(())
     } else {
-        Err(String::from_utf8_lossy(&create_output.stderr).trim().to_string())
+        Err(String::from_utf8_lossy(&create_output.stderr)
+            .trim()
+            .to_string())
     }
 }
 
@@ -2763,7 +4718,9 @@ fn onepassword_collect_project_entries(
         .output()
         .map_err(|e| e.to_string())?;
     if !list_output.status.success() {
-        return Err(String::from_utf8_lossy(&list_output.stderr).trim().to_string());
+        return Err(String::from_utf8_lossy(&list_output.stderr)
+            .trim()
+            .to_string());
     }
 
     let items_json = String::from_utf8_lossy(&list_output.stdout).to_string();
@@ -2779,7 +4736,9 @@ fn onepassword_collect_project_entries(
             continue;
         };
         let detail_output = Command::new("op")
-            .args(["item", "get", item_id, "--vault", vault_name, "--format", "json"])
+            .args([
+                "item", "get", item_id, "--vault", vault_name, "--format", "json",
+            ])
             .output()
             .map_err(|e| e.to_string())?;
         if !detail_output.status.success() {
@@ -2821,11 +4780,16 @@ fn onepassword_collect_project_entries(
             if !value_output.status.success() {
                 continue;
             }
-            let value = String::from_utf8_lossy(&value_output.stdout).trim().to_string();
+            let value = String::from_utf8_lossy(&value_output.stdout)
+                .trim()
+                .to_string();
             if value.is_empty() {
                 continue;
             }
-            result.entry(project).or_default().push((label.to_string(), value));
+            result
+                .entry(project)
+                .or_default()
+                .push((label.to_string(), value));
         }
     }
 
@@ -2837,7 +4801,10 @@ fn onepassword_collect_project_entries(
     Ok(result)
 }
 
-fn write_project_env_file(project_path: &Path, entries: &[(String, String)]) -> Result<String, String> {
+fn write_project_env_file(
+    project_path: &Path,
+    entries: &[(String, String)],
+) -> Result<String, String> {
     let target = if project_path.join("wrangler.toml").exists()
         || project_path.join("wrangler.json").exists()
         || project_path.join("wrangler.jsonc").exists()
@@ -2851,12 +4818,18 @@ fn write_project_env_file(project_path: &Path, entries: &[(String, String)]) -> 
     let mut lines = if existing.is_empty() {
         Vec::new()
     } else {
-        existing.lines().map(|line| line.to_string()).collect::<Vec<_>>()
+        existing
+            .lines()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
     };
 
     for (key, value) in entries {
         let formatted = format!("{}={}", key, format_env_value(value));
-        if let Some(index) = lines.iter().position(|line| line.starts_with(&format!("{key}="))) {
+        if let Some(index) = lines
+            .iter()
+            .position(|line| line.starts_with(&format!("{key}=")))
+        {
             lines[index] = formatted;
         } else {
             lines.push(formatted);

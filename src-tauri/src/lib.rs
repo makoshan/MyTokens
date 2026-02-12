@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
+use tauri::Manager;
+use tauri::WebviewWindowBuilder;
+use tauri::WebviewUrl;
+use tauri_plugin_global_shortcut::ShortcutState;
 
 mod commands;
 mod gateway;
@@ -15,6 +19,93 @@ pub struct AppState {
     vault: Arc<Mutex<Vault>>,
     usage: Arc<Mutex<usage::UsageState>>,
     gateway: Arc<Mutex<gateway::GatewayRuntime>>,
+    quick_runtime: Arc<Mutex<QuickRuntimeState>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuickRuntimeState {
+    pub translate_hotkey: String,
+    pub ocr_hotkey: String,
+    pub last_action_type: Option<String>,
+    pub last_source_text: Option<String>,
+    pub last_ocr_text: Option<String>,
+    pub last_result: Option<QuickActionResult>,
+    pub last_trigger_shortcut: Option<String>,
+    pub last_trigger_at: Option<String>,
+    pub last_register_at: Option<String>,
+    pub last_register_error: Option<String>,
+}
+
+impl Default for QuickRuntimeState {
+    fn default() -> Self {
+        Self {
+            translate_hotkey: "Option+D".to_string(),
+            ocr_hotkey: "Option+S".to_string(),
+            last_action_type: None,
+            last_source_text: None,
+            last_ocr_text: None,
+            last_result: None,
+            last_trigger_shortcut: None,
+            last_trigger_at: None,
+            last_register_at: None,
+            last_register_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QuickActionSettings {
+    pub translate_hotkey: String,
+    pub ocr_hotkey: String,
+    pub default_translate_provider: String,
+    pub default_ocr_provider: String,
+    pub source_lang: String,
+    pub target_lang: String,
+    pub auto_close_seconds: i64,
+    pub updated_at: String,
+}
+
+impl Default for QuickActionSettings {
+    fn default() -> Self {
+        Self {
+            translate_hotkey: "Option+D".to_string(),
+            ocr_hotkey: "Option+S".to_string(),
+            default_translate_provider: "google-translate".to_string(),
+            default_ocr_provider: "apple-ocr".to_string(),
+            source_lang: "auto".to_string(),
+            target_lang: "zh-Hans".to_string(),
+            auto_close_seconds: 15,
+            updated_at: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QuickActionResult {
+    pub action_type: String,
+    pub source_text: Option<String>,
+    pub ocr_text: Option<String>,
+    pub result_text: Option<String>,
+    pub provider: String,
+    pub latency_ms: i64,
+    pub status: String,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QuickActionHistoryRecord {
+    pub id: String,
+    pub action_type: String,
+    pub source_text: Option<String>,
+    pub ocr_text: Option<String>,
+    pub result_text: Option<String>,
+    pub provider: String,
+    pub latency_ms: i64,
+    pub status: String,
+    pub error_code: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -339,6 +430,7 @@ pub fn run() {
         vault: Arc::new(Mutex::new(vault)),
         usage: Arc::new(Mutex::new(usage::UsageState::default())),
         gateway: Arc::new(Mutex::new(gateway::GatewayRuntime::default())),
+        quick_runtime: Arc::new(Mutex::new(QuickRuntimeState::default())),
     };
 
     tauri::Builder::default()
@@ -352,6 +444,18 @@ pub fn run() {
                 )?;
             }
             app.handle().plugin(tauri_plugin_dialog::init())?;
+            app.handle().plugin(
+                tauri_plugin_global_shortcut::Builder::new()
+                    .with_handler(|app, shortcut, event| {
+                        if event.state != ShortcutState::Pressed {
+                            return;
+                        }
+                        commands::dispatch_quick_shortcut(app, &shortcut);
+                    })
+                    .build(),
+            )?;
+            ensure_quick_result_window(app)?;
+            let _ = commands::register_quick_hotkeys_on_startup(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -411,12 +515,48 @@ pub fn run() {
             commands::restore_backup,
             commands::delete_backup,
             commands::open_path,
+            commands::get_quick_action_settings,
+            commands::set_quick_action_settings,
+            commands::register_quick_hotkeys,
+            commands::trigger_quick_translate,
+            commands::trigger_quick_ocr,
+            commands::retry_last_quick_action,
+            commands::hide_quick_result_panel,
+            commands::get_last_quick_action_result,
+            commands::get_quick_action_history,
+            commands::get_quick_hotkey_diagnostics,
+            commands::get_macos_permission_status,
+            commands::open_macos_accessibility_settings,
+            commands::open_macos_automation_settings,
+            commands::open_macos_screen_capture_settings,
             commands::add_project,
             commands::get_projects,
             commands::delete_project,
             commands::update_project,
             commands::auto_scan_projects,
+            commands::clear_project_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn ensure_quick_result_window(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    if app.get_webview_window("quick-result").is_some() {
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(
+        app,
+        "quick-result",
+        WebviewUrl::App("index.html#/quick-result".into()),
+    )
+    .title("MyKey Quick Result")
+    .inner_size(560.0, 420.0)
+    .min_inner_size(440.0, 320.0)
+    .visible(false)
+    .resizable(true)
+    .always_on_top(true)
+    .decorations(true)
+    .skip_taskbar(true)
+    .build()?;
+    Ok(())
 }

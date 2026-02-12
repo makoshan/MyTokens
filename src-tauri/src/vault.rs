@@ -7,7 +7,8 @@ use crate::{
     GatewayTrafficMetrics, GatewayTrafficPoint, GlobalSettingsPayload, IntegrationConfigSnapshot,
     OpencodeConfigSnapshot, PromptTemplate, ProviderAppBinding, ProviderAppBindingInput,
     ProviderConfig, ProviderDetails, ProviderEndpoint, ProviderEndpointInput, ProviderEnvVar,
-    ProviderEnvVarInput, ProviderModel, ServiceConfig,
+    ProviderEnvVarInput, ProviderModel, QuickActionHistoryRecord, QuickActionResult,
+    QuickActionSettings, ServiceConfig,
 };
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -109,6 +110,7 @@ impl Vault {
         vault.ensure_usage_provider_settings();
         vault.ensure_global_settings_defaults();
         vault.ensure_app_routes_defaults();
+        vault.ensure_quick_action_defaults();
         vault.refresh_app_integration_detection();
         vault.migrate_legacy_secrets();
         vault.ensure_unified_relations_defaults();
@@ -346,6 +348,34 @@ impl Vault {
         }
 
         Ok(())
+    }
+
+    pub fn clear_project_data(&mut self) -> Result<bool, String> {
+        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+
+        tx.execute("DELETE FROM project_bindings", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM projects", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM tool_bindings WHERE scope_type = 'project'", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute("UPDATE credentials SET source = NULL", [])
+            .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
+
+        let credential_ids: Vec<String> = self.credentials.keys().cloned().collect();
+        for credential_id in credential_ids {
+            let _ = self
+                .secret_manager
+                .delete(&project_label_secret_id(&credential_id));
+        }
+
+        for credential in self.credentials.values_mut() {
+            credential.source = None;
+        }
+
+        Ok(true)
     }
 
     pub fn delete_credential(&mut self, id: &str) -> Result<(), String> {
@@ -1312,6 +1342,18 @@ impl Vault {
                 finished_at TEXT,
                 detail_json TEXT NOT NULL DEFAULT '{}'
             );
+            CREATE TABLE IF NOT EXISTS quick_action_history (
+                id TEXT PRIMARY KEY,
+                action_type TEXT NOT NULL,
+                source_text TEXT,
+                ocr_text TEXT,
+                result_text TEXT,
+                provider TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                error_code TEXT,
+                created_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_provider_endpoints_provider ON provider_endpoints(provider);
             CREATE INDEX IF NOT EXISTS idx_provider_models_provider ON provider_models(provider);
             CREATE INDEX IF NOT EXISTS idx_provider_env_vars_provider ON provider_env_vars(provider);
@@ -1324,7 +1366,8 @@ impl Vault {
             CREATE INDEX IF NOT EXISTS idx_tool_bindings_scope ON tool_bindings(scope_type, scope_id);
             CREATE INDEX IF NOT EXISTS idx_backup_runs_started_at ON backup_runs(started_at);
             CREATE INDEX IF NOT EXISTS idx_gateway_logs_created_at ON gateway_request_logs(created_at);
-            CREATE INDEX IF NOT EXISTS idx_gateway_logs_app_type ON gateway_request_logs(app_type);",
+            CREATE INDEX IF NOT EXISTS idx_gateway_logs_app_type ON gateway_request_logs(app_type);
+            CREATE INDEX IF NOT EXISTS idx_quick_action_history_created_at ON quick_action_history(created_at);",
         )
         .map_err(|e| e.to_string())?;
 
@@ -1711,6 +1754,140 @@ impl Vault {
                 ],
             );
         }
+    }
+
+    fn ensure_quick_action_defaults(&mut self) {
+        if self
+            .meta_get("quick_action_settings")
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return;
+        }
+        let mut defaults = QuickActionSettings::default();
+        defaults.updated_at = Local::now().to_rfc3339();
+        if let Ok(serialized) = serde_json::to_string(&defaults) {
+            let _ = self.meta_set("quick_action_settings", &serialized);
+        }
+    }
+
+    pub fn get_quick_action_settings(&self) -> Result<QuickActionSettings, String> {
+        let raw = self.meta_get("quick_action_settings")?;
+        if let Some(serialized) = raw {
+            if let Ok(mut parsed) = serde_json::from_str::<QuickActionSettings>(&serialized) {
+                if parsed.translate_hotkey.trim().is_empty() {
+                    parsed.translate_hotkey = "Option+D".to_string();
+                }
+                if parsed.ocr_hotkey.trim().is_empty() {
+                    parsed.ocr_hotkey = "Option+S".to_string();
+                }
+                if parsed.default_translate_provider.trim().is_empty() {
+                    parsed.default_translate_provider = "google-translate".to_string();
+                }
+                if parsed.default_ocr_provider.trim().is_empty() {
+                    parsed.default_ocr_provider = "apple-ocr".to_string();
+                }
+                if parsed.source_lang.trim().is_empty() {
+                    parsed.source_lang = "auto".to_string();
+                }
+                if parsed.target_lang.trim().is_empty() {
+                    parsed.target_lang = "zh-Hans".to_string();
+                }
+                if parsed.auto_close_seconds <= 0 {
+                    parsed.auto_close_seconds = 15;
+                }
+                return Ok(parsed);
+            }
+        }
+
+        let mut defaults = QuickActionSettings::default();
+        defaults.updated_at = Local::now().to_rfc3339();
+        Ok(defaults)
+    }
+
+    pub fn set_quick_action_settings(
+        &mut self,
+        settings: QuickActionSettings,
+    ) -> Result<QuickActionSettings, String> {
+        let mut next = settings;
+        next.translate_hotkey = normalize_hotkey(&next.translate_hotkey, "Option+D");
+        next.ocr_hotkey = normalize_hotkey(&next.ocr_hotkey, "Option+S");
+        next.default_translate_provider = normalize_non_empty(
+            &next.default_translate_provider,
+            "google-translate",
+        );
+        next.default_ocr_provider = normalize_non_empty(&next.default_ocr_provider, "apple-ocr");
+        next.source_lang = normalize_non_empty(&next.source_lang, "auto");
+        next.target_lang = normalize_non_empty(&next.target_lang, "zh-Hans");
+        next.auto_close_seconds = next.auto_close_seconds.clamp(3, 120);
+        next.updated_at = Local::now().to_rfc3339();
+
+        let serialized = serde_json::to_string(&next).map_err(|e| e.to_string())?;
+        self.meta_set("quick_action_settings", &serialized)?;
+        Ok(next)
+    }
+
+    pub fn append_quick_action_history(&self, result: &QuickActionResult) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO quick_action_history
+                (id, action_type, source_text, ocr_text, result_text, provider, latency_ms, status, error_code, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    result.action_type,
+                    result.source_text,
+                    result.ocr_text,
+                    result.result_text,
+                    result.provider,
+                    result.latency_ms,
+                    result.status,
+                    result.error_code,
+                    result.created_at,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_quick_action_history(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<QuickActionHistoryRecord>, String> {
+        let capped_limit = limit.clamp(1, 200);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, action_type, source_text, ocr_text, result_text, provider, latency_ms, status, error_code, created_at
+                 FROM quick_action_history
+                 ORDER BY created_at DESC
+                 LIMIT ?1",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let rows = stmt
+            .query_map(params![capped_limit], |row| {
+                Ok(QuickActionHistoryRecord {
+                    id: row.get(0)?,
+                    action_type: row.get(1)?,
+                    source_text: row.get(2)?,
+                    ocr_text: row.get(3)?,
+                    result_text: row.get(4)?,
+                    provider: row.get(5)?,
+                    latency_ms: row.get(6)?,
+                    status: row.get(7)?,
+                    error_code: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(items)
     }
 
     pub fn get_global_settings(&mut self) -> Result<GlobalSettingsPayload, String> {
@@ -4074,6 +4251,7 @@ impl Vault {
         self.ensure_usage_provider_settings();
         self.ensure_global_settings_defaults();
         self.ensure_app_routes_defaults();
+        self.ensure_quick_action_defaults();
         self.refresh_app_integration_detection();
         self.migrate_legacy_secrets();
         self.ensure_unified_relations_defaults();
@@ -4885,6 +5063,20 @@ impl Vault {
         }
         Ok(())
     }
+}
+
+fn normalize_non_empty(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn normalize_hotkey(value: &str, fallback: &str) -> String {
+    let compact = value.replace(' ', "");
+    normalize_non_empty(&compact, fallback)
 }
 
 fn bool_to_int(value: bool) -> i64 {

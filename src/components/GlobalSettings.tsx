@@ -7,11 +7,18 @@ import {
   GatewayPolicySettings,
   GatewayRequestLog,
   GlobalSettingsPayload,
+  MacosPermissionStatus,
+  QuickActionSettings,
+  QuickHotkeyDiagnostics,
   ServiceConfig,
 } from '../types/settings'
+import type { ProviderConfig } from '../types/provider'
+import { getProviderCategory } from '../utils/provider'
+import { suppressProjectAutoScanOnce } from '../utils/project'
 
 interface GlobalSettingsProps {
   masterPassword: string
+  onProjectDataCleared?: () => Promise<void> | void
 }
 
 const integrationLabels: Record<string, string> = {
@@ -77,7 +84,7 @@ const GATEWAY_TRAFFIC_WINDOWS = [
   { label: '24 小时', value: 1440 },
 ]
 
-export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) {
+export default function GlobalSettings({ masterPassword, onProjectDataCleared }: GlobalSettingsProps) {
   const [settings, setSettings] = useState<GlobalSettingsPayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -85,6 +92,7 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
   const [backupMessage, setBackupMessage] = useState<string>('')
   const [restoreMessage, setRestoreMessage] = useState<string>('')
   const [deleteBackupMessage, setDeleteBackupMessage] = useState<string>('')
+  const [clearProjectMessage, setClearProjectMessage] = useState<string>('')
   const [portDrafts, setPortDrafts] = useState<Record<string, string>>({})
   const [gatewayPolicy, setGatewayPolicy] = useState<GatewayPolicySettings | null>(null)
   const [gatewayLogs, setGatewayLogs] = useState<GatewayRequestLog[]>([])
@@ -98,6 +106,11 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
   const [projectSyncNotice, setProjectSyncNotice] = useState<{ level: ProjectSyncNoticeLevel; text: string } | null>(
     null
   )
+  const [quickSettings, setQuickSettings] = useState<QuickActionSettings | null>(null)
+  const [quickProviders, setQuickProviders] = useState<ProviderConfig[]>([])
+  const [quickDiagnostics, setQuickDiagnostics] = useState<QuickHotkeyDiagnostics | null>(null)
+  const [permissionStatus, setPermissionStatus] = useState<MacosPermissionStatus | null>(null)
+  const [quickSaveMessage, setQuickSaveMessage] = useState<string>('')
 
   const services = settings?.services ?? []
   const integrations = settings?.integrations ?? []
@@ -110,7 +123,7 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
       if (showLoading) {
         setLoading(true)
       }
-      const [payload, policy, logs, traffic] = await Promise.all([
+      const [payload, policy, logs, traffic, quick, providers, diagnostics, perms] = await Promise.all([
         invoke<GlobalSettingsPayload>('get_global_settings', {
           masterPassword,
         }),
@@ -125,11 +138,23 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
           windowMinutes,
           masterPassword,
         }),
+        invoke<QuickActionSettings>('get_quick_action_settings', {
+          masterPassword,
+        }),
+        invoke<ProviderConfig[]>('get_providers', { masterPassword }),
+        invoke<QuickHotkeyDiagnostics>('get_quick_hotkey_diagnostics', {
+          masterPassword,
+        }),
+        invoke<MacosPermissionStatus>('get_macos_permission_status'),
       ])
       setSettings(payload)
       setGatewayPolicy(policy)
       setGatewayLogs(logs)
       setGatewayTraffic(traffic)
+      setQuickSettings(quick)
+      setQuickProviders(providers)
+      setQuickDiagnostics(diagnostics)
+      setPermissionStatus(perms)
       setBudgetDraft(policy.daily_budget_usd ? policy.daily_budget_usd.toFixed(2) : '')
       setError(null)
     } catch (err) {
@@ -190,6 +215,14 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
       100
     )
   }, [gatewayTraffic])
+  const translateProviderOptions = useMemo(
+    () => quickProviders.filter((item) => getProviderCategory(item.provider) === 'translation'),
+    [quickProviders]
+  )
+  const ocrProviderOptions = useMemo(
+    () => quickProviders.filter((item) => getProviderCategory(item.provider) === 'ocr'),
+    [quickProviders]
+  )
   const shipkeyBusy = busyKey?.startsWith('project-sync:') ?? false
   const shipkeyScanPreviewBusy = busyKey === 'project-sync:backup'
   const shipkeyScanWriteBusy = busyKey === 'project-sync:restore'
@@ -507,6 +540,34 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
     }
   }
 
+  const clearProjectData = async () => {
+    if (
+      !confirm('清除项目数据会删除项目列表、项目绑定、项目作用域工具绑定，并清空密钥来源与项目标签。\n此操作不会删除密钥本身。确定继续吗？')
+    ) {
+      return
+    }
+
+    setBusyKey('project-clear')
+    setProjectSyncResult(null)
+    setProjectSyncNotice(null)
+    setClearProjectMessage('')
+    try {
+      await invoke<boolean>('clear_project_data', {
+        masterPassword,
+      })
+      suppressProjectAutoScanOnce()
+      setScannedProjects([])
+      await onProjectDataCleared?.()
+      setClearProjectMessage('项目数据已清除，可重新开始配置项目。')
+      await refresh(false)
+    } catch (err) {
+      console.error(err)
+      alert(`清除项目数据失败: ${String(err)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
   const openPath = async (path: string) => {
     setBusyKey(`open:${path}`)
     try {
@@ -514,6 +575,63 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
     } catch (err) {
       console.error(err)
       alert(`打开路径失败: ${String(err)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const saveQuickActionSettings = async () => {
+    if (!quickSettings) return
+    setBusyKey('quick-settings')
+    setQuickSaveMessage('')
+    try {
+      const saved = await invoke<QuickActionSettings>('set_quick_action_settings', {
+        settings: quickSettings,
+        masterPassword,
+      })
+      setQuickSettings(saved)
+      const diagnostics = await invoke<QuickHotkeyDiagnostics>('get_quick_hotkey_diagnostics', {
+        masterPassword,
+      })
+      setQuickDiagnostics(diagnostics)
+      setQuickSaveMessage('快捷翻译设置已保存并重新注册热键')
+    } catch (err) {
+      console.error(err)
+      setQuickSaveMessage(`保存失败: ${String(err)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const refreshQuickDiagnostics = async () => {
+    setBusyKey('quick-diagnostics')
+    try {
+      const [diagnostics, perms] = await Promise.all([
+        invoke<QuickHotkeyDiagnostics>('get_quick_hotkey_diagnostics', {
+          masterPassword,
+        }),
+        invoke<MacosPermissionStatus>('get_macos_permission_status'),
+      ])
+      setQuickDiagnostics(diagnostics)
+      setPermissionStatus(perms)
+    } catch (err) {
+      console.error(err)
+      setQuickSaveMessage(`读取热键诊断失败: ${String(err)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const openPermissionSettings = async (
+    key: string,
+    command: 'open_macos_accessibility_settings' | 'open_macos_automation_settings' | 'open_macos_screen_capture_settings'
+  ) => {
+    setBusyKey(key)
+    try {
+      await invoke(command)
+    } catch (err) {
+      console.error(err)
+      setQuickSaveMessage(`打开系统设置失败: ${String(err)}`)
     } finally {
       setBusyKey(null)
     }
@@ -558,6 +676,188 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
             {settings.debug_mode ? 'Debug 模式已开启' : 'Debug 模式已关闭'}
           </span>
         </div>
+      </section>
+
+      <section className="panel settings-section">
+        <div className="panel-header">
+          <h2>快捷翻译（Bob 风格）</h2>
+          <span className="panel-count">MVP</span>
+        </div>
+        {quickSettings ? (
+          <div className="settings-list">
+            <div className="settings-item">
+              <div className="settings-item-header">
+                <div>
+                  <div className="settings-item-title">划词与截图热键</div>
+                  <div className="settings-item-subtitle">
+                    推荐使用 Option+D（划词）与 Option+S（截图）。
+                  </div>
+                </div>
+              </div>
+              <div className="settings-item-controls">
+                <div className="port-editor">
+                  <input
+                    value={quickSettings.translate_hotkey}
+                    onChange={(event) =>
+                      setQuickSettings((prev) =>
+                        prev ? { ...prev, translate_hotkey: event.target.value } : prev
+                      )
+                    }
+                    placeholder="Option+D"
+                  />
+                </div>
+                <div className="port-editor">
+                  <input
+                    value={quickSettings.ocr_hotkey}
+                    onChange={(event) =>
+                      setQuickSettings((prev) =>
+                        prev ? { ...prev, ocr_hotkey: event.target.value } : prev
+                      )
+                    }
+                    placeholder="Option+S"
+                  />
+                </div>
+              </div>
+              <div className="settings-item-controls">
+                <label className="shipkey-field">
+                  <span>翻译 Provider</span>
+                  <select
+                    className="shipkey-target-select"
+                    value={quickSettings.default_translate_provider}
+                    onChange={(event) =>
+                      setQuickSettings((prev) =>
+                        prev
+                          ? { ...prev, default_translate_provider: event.target.value }
+                          : prev
+                      )
+                    }
+                  >
+                    {translateProviderOptions.map((provider) => (
+                      <option key={provider.provider} value={provider.provider}>
+                        {provider.label || provider.provider}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="shipkey-field">
+                  <span>OCR Provider</span>
+                  <select
+                    className="shipkey-target-select"
+                    value={quickSettings.default_ocr_provider}
+                    onChange={(event) =>
+                      setQuickSettings((prev) =>
+                        prev ? { ...prev, default_ocr_provider: event.target.value } : prev
+                      )
+                    }
+                  >
+                    {ocrProviderOptions.map((provider) => (
+                      <option key={provider.provider} value={provider.provider}>
+                        {provider.label || provider.provider}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="settings-item-controls">
+                <label className="shipkey-field">
+                  <span>源语言</span>
+                  <input
+                    value={quickSettings.source_lang}
+                    onChange={(event) =>
+                      setQuickSettings((prev) =>
+                        prev ? { ...prev, source_lang: event.target.value } : prev
+                      )
+                    }
+                    placeholder="auto"
+                  />
+                </label>
+                <label className="shipkey-field">
+                  <span>目标语言</span>
+                  <input
+                    value={quickSettings.target_lang}
+                    onChange={(event) =>
+                      setQuickSettings((prev) =>
+                        prev ? { ...prev, target_lang: event.target.value } : prev
+                      )
+                    }
+                    placeholder="zh-Hans"
+                  />
+                </label>
+              </div>
+              <div className="settings-item-controls">
+                <button
+                  className="btn btn-primary"
+                  disabled={busyKey === 'quick-settings'}
+                  onClick={saveQuickActionSettings}
+                >
+                  {busyKey === 'quick-settings' ? '保存中...' : '保存并注册热键'}
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  disabled={busyKey === 'quick-diagnostics'}
+                  onClick={refreshQuickDiagnostics}
+                >
+                  {busyKey === 'quick-diagnostics' ? '诊断中...' : '热键诊断'}
+                </button>
+              </div>
+              {quickDiagnostics ? (
+                <div className="settings-item-subtitle">
+                  <div>translate: {quickDiagnostics.translate_hotkey} / {quickDiagnostics.translate_registered ? '已注册' : '未注册'}</div>
+                  <div>ocr: {quickDiagnostics.ocr_hotkey} / {quickDiagnostics.ocr_registered ? '已注册' : '未注册'}</div>
+                  <div>最近触发: {quickDiagnostics.last_trigger_shortcut || '-'} {quickDiagnostics.last_trigger_at ? `@ ${new Date(quickDiagnostics.last_trigger_at).toLocaleString()}` : ''}</div>
+                  <div>最近注册: {quickDiagnostics.last_register_at ? new Date(quickDiagnostics.last_register_at).toLocaleString() : '-'}</div>
+                  <div>注册错误: {quickDiagnostics.last_register_error || '无'}</div>
+                  {(quickDiagnostics.translate_parse_error || quickDiagnostics.ocr_parse_error) ? (
+                    <div>
+                      解析错误: {quickDiagnostics.translate_parse_error || quickDiagnostics.ocr_parse_error}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              {permissionStatus ? (
+                <div className="settings-item-subtitle">
+                  <div>辅助功能: {permissionStatus.accessibility_granted ? '已授权' : '未授权'}</div>
+                  <div>自动化(System Events): {permissionStatus.automation_granted ? '已授权' : '未授权'}</div>
+                  <div>划词能力: {permissionStatus.selection_capture_ready ? '就绪' : '未就绪'}</div>
+                  <div>{permissionStatus.guidance}</div>
+                  {permissionStatus.automation_error ? <div>自动化错误: {permissionStatus.automation_error}</div> : null}
+                  <div className="settings-item-controls">
+                    <button
+                      className="btn btn-secondary"
+                      disabled={busyKey === 'open-perm-accessibility'}
+                      onClick={() =>
+                        openPermissionSettings('open-perm-accessibility', 'open_macos_accessibility_settings')
+                      }
+                    >
+                      打开辅助功能
+                    </button>
+                    <button
+                      className="btn btn-secondary"
+                      disabled={busyKey === 'open-perm-automation'}
+                      onClick={() =>
+                        openPermissionSettings('open-perm-automation', 'open_macos_automation_settings')
+                      }
+                    >
+                      打开自动化
+                    </button>
+                    <button
+                      className="btn btn-secondary"
+                      disabled={busyKey === 'open-perm-screen'}
+                      onClick={() =>
+                        openPermissionSettings('open-perm-screen', 'open_macos_screen_capture_settings')
+                      }
+                    >
+                      打开屏幕录制
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {quickSaveMessage ? <div className="settings-item-subtitle">{quickSaveMessage}</div> : null}
+            </div>
+          </div>
+        ) : (
+          <div className="settings-item-subtitle">快捷翻译设置加载中...</div>
+        )}
       </section>
 
       <section className="panel settings-section">
@@ -1055,6 +1355,17 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
                 </div>
               </div>
             </div>
+
+            <div className="settings-item-controls">
+              <button
+                className="btn btn-danger"
+                disabled={busyKey === 'project-clear'}
+                onClick={clearProjectData}
+              >
+                {busyKey === 'project-clear' ? '清空中...' : '一键清空项目数据'}
+              </button>
+            </div>
+            {clearProjectMessage ? <div className="backup-message">{clearProjectMessage}</div> : null}
 
             <div className="shipkey-grid">
               <label className="shipkey-field">

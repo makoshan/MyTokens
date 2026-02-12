@@ -5,6 +5,7 @@ import './ProjectManager.css'
 import { getProviderDisplayName } from '../utils/provider'
 import type { Project } from '../types/project'
 import { getCredentialsLinkedToProject, resolveCredentialProjectName } from '../utils/linkage'
+import { consumeProjectAutoScanSuppression, suppressProjectAutoScanOnce } from '../utils/project'
 
 interface Credential {
   id: string
@@ -21,6 +22,7 @@ interface ProjectManagerProps {
   focusProjectName?: string
   focusProjectToken?: number
   onProjectsChanged?: (projects: Project[]) => void
+  onProjectDataCleared?: () => Promise<void> | void
   onError: (msg: string) => void
 }
 
@@ -45,11 +47,13 @@ export default function ProjectManager({
   focusProjectName,
   focusProjectToken,
   onProjectsChanged,
+  onProjectDataCleared,
   onError,
 }: ProjectManagerProps) {
   const [projects, setProjects] = useState<Project[]>(initialProjects)
   const [loading, setLoading] = useState(false)
   const [scanning, setScanning] = useState(false)
+  const [clearing, setClearing] = useState(false)
   const [scanStatus, setScanStatus] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedProjectId, setSelectedProjectId] = useState('')
@@ -78,6 +82,10 @@ export default function ProjectManager({
   async function initializeProjects() {
     if (!masterPassword) return
     await fetchProjects()
+    if (consumeProjectAutoScanSuppression()) {
+      setScanStatus('项目数据已清空，已跳过一次自动扫描。可手动点击“自动扫描”重新导入。')
+      return
+    }
     await handleAutoScan(true)
   }
 
@@ -207,6 +215,36 @@ export default function ProjectManager({
     }
   }
 
+  async function handleClearProjectData() {
+    if (clearing) return
+    if (scanning) {
+      onError('自动扫描进行中，请稍后再清空项目数据。')
+      return
+    }
+    if (
+      !confirm(
+        '确定一键清空项目数据吗？\n将删除项目列表、项目绑定、项目作用域工具绑定，并清空密钥来源与项目标签。\n不会删除密钥本身。'
+      )
+    ) {
+      return
+    }
+
+    setClearing(true)
+    try {
+      await invoke<boolean>('clear_project_data', { masterPassword })
+      suppressProjectAutoScanOnce()
+      await onProjectDataCleared?.()
+      await fetchProjects()
+      setSearchQuery('')
+      setSelectedProjectId('')
+      setScanStatus('项目数据已清空，可重新自动扫描或手动添加。')
+    } catch (err) {
+      onError('清空项目数据失败: ' + err)
+    } finally {
+      setClearing(false)
+    }
+  }
+
   const sourceGroups = useMemo(() => {
     const groups: Record<string, { label: string; credentials: Credential[]; sources: string[] }> = {}
     credentials.forEach((cred) => {
@@ -314,9 +352,16 @@ export default function ProjectManager({
           <button
             className="btn btn-secondary"
             onClick={() => handleAutoScan(false)}
-            disabled={scanning}
+            disabled={scanning || clearing}
           >
             {scanning ? '扫描中...' : '自动扫描'}
+          </button>
+          <button
+            className="btn btn-danger"
+            onClick={handleClearProjectData}
+            disabled={clearing || scanning}
+          >
+            {clearing ? '清空中...' : '一键清空项目数据'}
           </button>
           <button className="btn btn-primary" onClick={openAddModal}>
             + 添加项目

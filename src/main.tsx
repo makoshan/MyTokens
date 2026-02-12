@@ -1,6 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
+import QuickResultPanel from './components/QuickResultPanel'
 import './index.css'
 
 const escapeHtml = (value: string) =>
@@ -39,6 +40,6 @@ window.addEventListener('unhandledrejection', (event) => {
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    {window.location.hash.startsWith('#/quick-result') ? <QuickResultPanel /> : <App />}
   </React.StrictMode>,
 )

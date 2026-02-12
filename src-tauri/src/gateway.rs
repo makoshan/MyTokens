@@ -22,7 +22,8 @@ use crate::vault::{GatewayRequestLogInput, GatewayResolvedRoute, Vault};
 const DEFAULT_GATEWAY_PORT: i64 = 8888;
 const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_RESPONSES_COMPACT_URL: &str = "https://chatgpt.com/backend-api/codex/responses/compact";
-const CODEX_DEFAULT_INSTRUCTIONS: &str = "You are Codex, based on GPT-5. You are a coding assistant.";
+const CODEX_DEFAULT_INSTRUCTIONS: &str =
+    "You are Codex, based on GPT-5. You are a coding assistant.";
 const CODEX_STRIP_FIELDS: &[&str] = &[
     "temperature",
     "top_p",
@@ -401,8 +402,8 @@ fn build_upstream_client(
     builder = builder.timeout(Duration::from_millis(timeout));
 
     if let Some(url) = proxy_url {
-        let mut proxy =
-            reqwest::Proxy::all(url).map_err(|err| format!("Invalid proxy URL '{}': {}", url, err))?;
+        let mut proxy = reqwest::Proxy::all(url)
+            .map_err(|err| format!("Invalid proxy URL '{}': {}", url, err))?;
         if let Some(username) = route
             .upstream_proxy_username
             .as_deref()
@@ -960,11 +961,9 @@ async fn relay_to_codex(
             root.remove(*field);
         }
 
-        if let Some(model) = route_model
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            root.entry("model").or_insert(Value::String(model.to_string()));
+        if let Some(model) = route_model.map(str::trim).filter(|value| !value.is_empty()) {
+            root.entry("model")
+                .or_insert(Value::String(model.to_string()));
         }
 
         if root
@@ -1319,7 +1318,10 @@ fn extract_output_text_from_response(response: &Value) -> Option<String> {
     }
 }
 
-fn build_synthesized_codex_response(output_text: Option<String>, requested_model: Option<&str>) -> Value {
+fn build_synthesized_codex_response(
+    output_text: Option<String>,
+    requested_model: Option<&str>,
+) -> Value {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_millis() as i64)

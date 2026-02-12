@@ -86,3 +86,49 @@ export interface GatewayTrafficMetrics {
   top_errors: GatewayErrorSummary[]
   timeline: GatewayTrafficPoint[]
 }
+
+export interface QuickActionSettings {
+  translate_hotkey: string
+  ocr_hotkey: string
+  default_translate_provider: string
+  default_ocr_provider: string
+  source_lang: string
+  target_lang: string
+  auto_close_seconds: number
+  updated_at: string
+}
+
+export interface QuickActionHistoryRecord {
+  id: string
+  action_type: string
+  source_text?: string | null
+  ocr_text?: string | null
+  result_text?: string | null
+  provider: string
+  latency_ms: number
+  status: string
+  error_code?: string | null
+  created_at: string
+}
+
+export interface QuickHotkeyDiagnostics {
+  translate_hotkey: string
+  ocr_hotkey: string
+  translate_registered: boolean
+  ocr_registered: boolean
+  translate_parse_error?: string | null
+  ocr_parse_error?: string | null
+  last_trigger_shortcut?: string | null
+  last_trigger_at?: string | null
+  last_register_at?: string | null
+  last_register_error?: string | null
+}
+
+export interface MacosPermissionStatus {
+  is_macos: boolean
+  accessibility_granted: boolean
+  automation_granted: boolean
+  selection_capture_ready: boolean
+  automation_error?: string | null
+  guidance: string
+}

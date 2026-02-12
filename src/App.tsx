@@ -330,6 +330,12 @@ function App() {
     }
   }
 
+  const handleProjectDataCleared = async () => {
+    await Promise.all([loadProjects(), loadCredentials()])
+    await loadProjectLabels()
+    setProjectFocus(null)
+  }
+
   const loadPrompts = async () => {
     if (!masterPassword) return
     try {
@@ -384,6 +390,13 @@ function App() {
       loadPrompts()
       loadDashboardOverview()
     }
+  }, [isAuthenticated, masterPassword])
+
+  useEffect(() => {
+    if (!isAuthenticated || !masterPassword) return
+    invoke<boolean>('register_quick_hotkeys', { masterPassword }).catch((error) => {
+      console.error('Failed to register quick hotkeys:', error)
+    })
   }, [isAuthenticated, masterPassword])
 
   useEffect(() => {
@@ -1081,6 +1094,7 @@ function App() {
               focusProjectName={projectFocus?.name}
               focusProjectToken={projectFocus?.token}
               onProjectsChanged={setProjects}
+              onProjectDataCleared={handleProjectDataCleared}
               onError={(msg) => alert(msg)}
             />
           ) : view === 'providers' ? (
@@ -1106,7 +1120,10 @@ function App() {
           ) : view === 'skills' ? (
             <OpencodeSkillManager masterPassword={masterPassword} />
           ) : view === 'settings' ? (
-            <GlobalSettings masterPassword={masterPassword} />
+            <GlobalSettings
+              masterPassword={masterPassword}
+              onProjectDataCleared={handleProjectDataCleared}
+            />
           ) : (
             <PromptManager
               prompts={prompts}

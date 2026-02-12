@@ -93,10 +93,33 @@ interface SuggestedCommand {
   resultText?: string
 }
 
+interface CommandRunResult {
+  command: string
+  ok: boolean
+  resultText: string
+}
+
 const ANALYZE_INTERVAL_MS = 5 * 60 * 1000
 const TRAFFIC_WINDOW_MINUTES = 60
 const CLIPPY_IDLE_GREET_MS = 3200
 const CLIPPY_IDLE_WAIT_MS = 4200
+const AUTO_REMINDER_CHECK_MS = 60 * 1000
+const AUTO_REMINDER_INTERVAL_MS = 12 * 60 * 1000
+const AUTO_REMINDER_INTERVAL_MINUTES = Math.round(AUTO_REMINDER_INTERVAL_MS / (60 * 1000))
+const AUTO_REMINDER_STORAGE_KEY = 'mykey.clippy.auto_remind_enabled'
+const CLIPPY_ANIMATION_PROTOCOL_STORAGE_KEY = 'mykey.clippy.animation_protocol_enabled'
+const CLIPPY_STYLE_PROMPT_STORAGE_KEY = 'mykey.clippy.style_prompt'
+const CLIPPY_STYLE_PROMPT_DEFAULT =
+  '语气偏务实、明确，先给结论，再给可执行步骤。优先结合当前网关和流量上下文，不给空泛建议。'
+
+type ClippyChatStatus =
+  | 'welcome'
+  | 'idle'
+  | 'thinking'
+  | 'responding'
+  | 'analyzing'
+  | 'executing'
+  | 'auto_reminding'
 
 type ClippyAnimationKey =
   | 'Alert'
@@ -134,6 +157,19 @@ const CLIPPY_IDLE_KEYS: ClippyAnimationKey[] = [
   'IdleHeadScratch',
   'IdleSideToSide',
   'CheckingSomething',
+]
+
+const CLIPPY_ANIMATION_HINT_KEYS: ClippyAnimationKey[] = [
+  'Thinking',
+  'GetAttention',
+  'Wave',
+  'Alert',
+  'CheckingSomething',
+  'IdleHeadScratch',
+  'IdleFingerTap',
+  'IdleEyeBrowRaise',
+  'IdleSideToSide',
+  'IdleAtom',
 ]
 
 function summarizeCurrentSituation(
@@ -375,10 +411,157 @@ function parseMykeyActionBlock(
   return { answerText: cleaned, actions }
 }
 
+function normalizeAnimationToken(value: string) {
+  return value.trim().toLowerCase().replace(/[\s_-]+/g, '')
+}
+
+function resolveAnimationKey(raw: string): ClippyAnimationKey | undefined {
+  const token = normalizeAnimationToken(raw)
+  if (!token) return undefined
+
+  const direct = (Object.keys(CLIPPY_ANIMATIONS) as ClippyAnimationKey[]).find(
+    (item) => normalizeAnimationToken(item) === token
+  )
+  if (direct) return direct
+
+  const aliasMap: Record<string, ClippyAnimationKey> = {
+    lookup: 'CheckingSomething',
+    lookupright: 'CheckingSomething',
+    lookupleft: 'CheckingSomething',
+    lookright: 'GetAttention',
+    lookleft: 'GetAttention',
+    lookdown: 'CheckingSomething',
+    lookdownleft: 'CheckingSomething',
+    lookdownright: 'CheckingSomething',
+    processing: 'Thinking',
+    searching: 'CheckingSomething',
+    writing: 'Thinking',
+    explain: 'GetAttention',
+    gestureup: 'Wave',
+    gesturedown: 'Wave',
+    gestureleft: 'GetAttention',
+    gestureright: 'GetAttention',
+  }
+  return aliasMap[token]
+}
+
+function parseAssistantPayload(
+  raw: string,
+  capabilityMap: Record<string, MykeyCapability>
+): { answerText: string; actions: SuggestedCommand[]; animationKey?: ClippyAnimationKey } {
+  const source = raw.trim()
+  const animationMatch = source.match(/^\s*\[\s*([A-Za-z0-9_\- ]+)\s*\]\s*/)
+  const animationKey = animationMatch ? resolveAnimationKey(animationMatch[1]) : undefined
+  const withoutAnimation =
+    animationKey && animationMatch ? source.slice(animationMatch[0].length).trimStart() : source
+  const parsed = parseMykeyActionBlock(withoutAnimation, capabilityMap)
+
+  return {
+    answerText: parsed.answerText,
+    actions: parsed.actions,
+    animationKey,
+  }
+}
+
+function chatStatusLabel(status: ClippyChatStatus) {
+  if (status === 'welcome') return '欢迎'
+  if (status === 'thinking') return '思考中'
+  if (status === 'responding') return '回复中'
+  if (status === 'analyzing') return '分析中'
+  if (status === 'executing') return '执行中'
+  if (status === 'auto_reminding') return '自动巡检'
+  return '待命'
+}
+
 function formatCommandResult(result: unknown) {
   const raw = typeof result === 'string' ? result : JSON.stringify(result)
   if (!raw) return 'ok'
   return raw.length > 280 ? `${raw.slice(0, 280)}...` : raw
+}
+
+function shouldTriggerAutoReminder(
+  suggestions: AssistantSuggestion[],
+  policy: GatewayPolicySettings | null,
+  traffic: GatewayTrafficMetrics | null
+) {
+  const top = suggestions[0]
+  if (!top) return false
+  if (top.severity === 'critical') return true
+
+  const requests = traffic?.total_requests ?? 0
+  if (top.severity === 'warning' && requests >= 8) return true
+
+  if (policy?.daily_budget_usd && policy.daily_budget_usd > 0) {
+    const ratio = policy.today_cost_usd / policy.daily_budget_usd
+    if (ratio >= 0.75) return true
+  }
+
+  if (traffic && traffic.total_requests >= 12) {
+    const successRate = traffic.success_requests / traffic.total_requests
+    if (successRate < 0.95) return true
+    if ((traffic.avg_latency_ms ?? 0) >= 4200) return true
+  }
+
+  return false
+}
+
+function buildAutoReminderSignature(
+  suggestions: AssistantSuggestion[],
+  policy: GatewayPolicySettings | null,
+  traffic: GatewayTrafficMetrics | null
+) {
+  const top = suggestions[0]
+  const successRate =
+    traffic && traffic.total_requests > 0 ? traffic.success_requests / traffic.total_requests : 1
+  const successBucket = Math.floor(successRate * 20)
+  const latencyBucket = Math.floor((traffic?.avg_latency_ms ?? 0) / 500)
+  const budgetBucket =
+    policy?.daily_budget_usd && policy.daily_budget_usd > 0
+      ? Math.floor((policy.today_cost_usd / policy.daily_budget_usd) * 10)
+      : -1
+
+  return [
+    top?.id || 'none',
+    top?.severity || 'info',
+    `s${successBucket}`,
+    `l${latencyBucket}`,
+    `b${budgetBucket}`,
+  ].join('|')
+}
+
+function buildAutoReminderFallback(
+  suggestions: AssistantSuggestion[],
+  policy: GatewayPolicySettings | null,
+  traffic: GatewayTrafficMetrics | null
+) {
+  const top = suggestions[0]
+  const snapshot = summarizeCurrentSituation(policy, traffic)
+  if (!top) return `当前无明显风险。${snapshot}`
+  if (top.severity === 'critical') {
+    return `检测到高优先级风险：${top.title}。建议现在先处理这个问题。${snapshot}`
+  }
+  if (top.severity === 'warning') {
+    return `发现需要关注的项：${top.title}。建议在本轮先优化该项，再复查成功率与延迟。${snapshot}`
+  }
+  return `当前整体稳定。建议继续观察趋势，并每次变更后复查数据。${snapshot}`
+}
+
+function compactReminderText(text: string) {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (!normalized) return '当前需要你关注一项风险，请打开面板查看详情。'
+  return normalized.length > 210 ? `${normalized.slice(0, 210)}...` : normalized
+}
+
+function mergeSuggestedCommands(current: SuggestedCommand[], incoming: SuggestedCommand[]) {
+  if (incoming.length === 0) return current
+  const exists = new Set(current.map((item) => `${item.command}|${JSON.stringify(item.args || {})}`))
+  const appended = incoming.filter((item) => {
+    const key = `${item.command}|${JSON.stringify(item.args || {})}`
+    if (exists.has(key)) return false
+    exists.add(key)
+    return true
+  })
+  return appended.length > 0 ? [...current, ...appended] : current
 }
 
 export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAssistantProps) {
@@ -395,6 +578,7 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       text: '我是 Clippy，已开始监控你的 API 流量、成本和稳定性。',
     },
   ])
+  const [chatStatus, setChatStatus] = useState<ClippyChatStatus>('welcome')
   const [askInput, setAskInput] = useState('')
   const [unread, setUnread] = useState(0)
   const [lastAnalyzedAt, setLastAnalyzedAt] = useState<Date | null>(null)
@@ -402,6 +586,37 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   const [gatewayCreds, setGatewayCreds] = useState<GatewayAccessCredentials | null>(null)
   const [capabilities, setCapabilities] = useState<MykeyCapability[]>([])
   const [suggestedCommands, setSuggestedCommands] = useState<SuggestedCommand[]>([])
+  const [batchExecuting, setBatchExecuting] = useState(false)
+  const [autoRemindEnabled, setAutoRemindEnabled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true
+    try {
+      const raw = window.localStorage.getItem(AUTO_REMINDER_STORAGE_KEY)
+      return raw === null ? true : raw === '1'
+    } catch {
+      return true
+    }
+  })
+  const [animationProtocolEnabled, setAnimationProtocolEnabled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true
+    try {
+      const raw = window.localStorage.getItem(CLIPPY_ANIMATION_PROTOCOL_STORAGE_KEY)
+      return raw === null ? true : raw === '1'
+    } catch {
+      return true
+    }
+  })
+  const [assistantStylePrompt, setAssistantStylePrompt] = useState<string>(() => {
+    if (typeof window === 'undefined') return CLIPPY_STYLE_PROMPT_DEFAULT
+    try {
+      const raw = window.localStorage.getItem(CLIPPY_STYLE_PROMPT_STORAGE_KEY)
+      return raw && raw.trim() ? raw.trim() : CLIPPY_STYLE_PROMPT_DEFAULT
+    } catch {
+      return CLIPPY_STYLE_PROMPT_DEFAULT
+    }
+  })
+  const [assistantStyleDraft, setAssistantStyleDraft] = useState(assistantStylePrompt)
+  const [styleEditorOpen, setStyleEditorOpen] = useState(false)
+  const [animationCue, setAnimationCue] = useState(0)
   const [agentError, setAgentError] = useState<string>('')
   const [greetingActive, setGreetingActive] = useState(true)
   const [avatarSrc, setAvatarSrc] = useState(CLIPPY_ANIMATIONS.Greeting.src)
@@ -412,6 +627,11 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   const idleAnimationRef = useRef<ClippyAnimationKey>()
   const clipTimeoutRef = useRef<number>()
   const idleTimeoutRef = useRef<number>()
+  const queuedAnimationRef = useRef<ClippyAnimationKey>()
+  const styleCommitTimerRef = useRef<number>()
+  const lastAutoReminderAtRef = useRef(0)
+  const lastAutoReminderSignatureRef = useRef('')
+  const autoReminderRunningRef = useRef(false)
   const runtimeGatewayOnline = agentMode === 'codex'
   const capabilityMap = useMemo(() => {
     const map: Record<string, MykeyCapability> = {}
@@ -427,13 +647,40 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   )
 
   const topSeverity = suggestions[0]?.severity || 'info'
+  const safeActionCount = useMemo(() => {
+    return suggestedCommands.filter(
+      (item) =>
+        !item.mutating && (item.status === 'pending' || item.status === 'failed')
+    ).length
+  }, [suggestedCommands])
+  const mutatingActionCount = useMemo(() => {
+    return suggestedCommands.filter(
+      (item) =>
+        item.mutating && (item.status === 'pending' || item.status === 'failed')
+    ).length
+  }, [suggestedCommands])
 
   const addAssistantMessage = (text: string) => {
     setMessages((prev) => [...prev, { id: `${Date.now()}-${prev.length}`, role: 'assistant', text }])
   }
 
+  const triggerClippyAnimation = (key: ClippyAnimationKey) => {
+    queuedAnimationRef.current = key
+    setAnimationCue((prev) => prev + 1)
+  }
+
+  const commitAssistantStyleDraft = () => {
+    const next = assistantStyleDraft.trim() || CLIPPY_STYLE_PROMPT_DEFAULT
+    setAssistantStylePrompt(next)
+    setAssistantStyleDraft(next)
+  }
+
   const runAnalysis = async (silent = false) => {
     if (!masterPassword) return
+    if (!silent) {
+      setChatStatus('analyzing')
+      triggerClippyAnimation('CheckingSomething')
+    }
     try {
       const [nextSettings, nextPolicy, nextTraffic, nextUsage] = await Promise.all([
         invoke<GlobalSettingsPayload>('get_global_settings', { masterPassword }),
@@ -478,6 +725,10 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       if (!silent) {
         addAssistantMessage(`分析失败：${normalizeError(error)}`)
       }
+    } finally {
+      if (!silent) {
+        setChatStatus('idle')
+      }
     }
   }
 
@@ -500,6 +751,7 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     const systemPrompt = [
       '你是 MyKey 内置的 Clippy 助手。输出请简短、直接、可执行。',
       '你的主要目标是帮助用户降低 API 成本、提高稳定性、改善路由配置。',
+      `用户偏好风格: ${assistantStylePrompt}`,
       `当前网关状态: ${runtimeGatewayOnline ? '在线' : '离线'}`,
       '模型策略（强约束）：当前主链路是 Codex，本轮优先模型必须是 gpt-5-codex。',
       '如果用户问“现在用哪个模型最合适”，默认先给出 gpt-5-codex，再说明何时降级。',
@@ -514,6 +766,9 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       '{"actions":[{"command":"gateway.status","args":{},"reason":"说明原因"}]}',
       '```',
       '只允许使用提供的能力命令，最多 3 条；若不需要执行则不要输出该代码块。',
+      animationProtocolEnabled
+        ? `你可以在回复开头使用一个动画标签，格式示例：[Thinking] 或 [GetAttention]。可用标签：${CLIPPY_ANIMATION_HINT_KEYS.join(', ')}。动画标签只允许出现一次且必须位于最开头。`
+        : '不要输出任何动画标签。',
       '可用命令:',
       capabilityHints || '- (无)',
       '默认使用中文回答。',
@@ -535,11 +790,13 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     setMessages((prev) => [...prev, { id: `${Date.now()}-u`, role: 'user', text: q }])
     setAskInput('')
     setBusy(true)
+    setChatStatus('thinking')
+    triggerClippyAnimation('Thinking')
 
     try {
       if (agentMode === 'codex' && gatewayCreds) {
         const rawAnswer = await askByCodex(q)
-        const { answerText, actions } = parseMykeyActionBlock(rawAnswer, capabilityMap)
+        const { answerText, actions, animationKey } = parseAssistantPayload(rawAnswer, capabilityMap)
         const displayText =
           answerText ||
           (actions.length > 0 ? '已生成可执行操作建议，请按需一键执行。' : rawAnswer)
@@ -548,13 +805,25 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
           displayText,
           runtimeGatewayOnline
         )
+        if (animationProtocolEnabled && animationKey) {
+          triggerClippyAnimation(animationKey)
+        } else {
+          triggerClippyAnimation('GetAttention')
+        }
+        setChatStatus('responding')
         addAssistantMessage(answer)
         if (actions.length > 0) {
-          setSuggestedCommands(actions)
-          addAssistantMessage(`已生成 ${actions.length} 条可执行操作建议，可在下方一键执行。`)
+          setSuggestedCommands((prev) => mergeSuggestedCommands(prev, actions))
+          const safeCount = actions.filter((item) => !item.mutating).length
+          const riskyCount = actions.filter((item) => item.mutating).length
+          addAssistantMessage(
+            `已生成 ${actions.length} 条可执行操作建议（只读 ${safeCount} / 变更 ${riskyCount}），可在下方按计划执行。`
+          )
         }
         setAgentError('')
       } else {
+        setChatStatus('responding')
+        triggerClippyAnimation('CheckingSomething')
         addAssistantMessage(buildFallbackAnswer(q, policy, traffic, suggestions))
       }
     } catch (error) {
@@ -564,11 +833,15 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       addAssistantMessage(`Codex 代理暂时不可用，已切换规则建议：${fallback}`)
     } finally {
       setBusy(false)
+      setChatStatus('idle')
     }
   }
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setGreetingActive(false), CLIPPY_IDLE_GREET_MS)
+    const timer = window.setTimeout(() => {
+      setGreetingActive(false)
+      setChatStatus('idle')
+    }, CLIPPY_IDLE_GREET_MS)
     return () => window.clearTimeout(timer)
   }, [])
 
@@ -612,7 +885,19 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       return clearAnimationTimers
     }
 
-    if (busy) {
+    const queuedAnimation = queuedAnimationRef.current
+    if (queuedAnimation) {
+      queuedAnimationRef.current = undefined
+      playOneShot(queuedAnimation)
+      return clearAnimationTimers
+    }
+
+    if (
+      busy ||
+      chatStatus === 'thinking' ||
+      chatStatus === 'analyzing' ||
+      chatStatus === 'auto_reminding'
+    ) {
       previousOpenRef.current = open
       previousSeverityRef.current = topSeverity
       setAvatarSrc(CLIPPY_ANIMATIONS.Thinking.src)
@@ -635,14 +920,18 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     }
 
     if (open) {
-      setAvatarSrc(CLIPPY_ANIMATIONS.GetAttention.src)
+      setAvatarSrc(
+        chatStatus === 'responding'
+          ? CLIPPY_ANIMATIONS.GetAttention.src
+          : CLIPPY_ANIMATIONS.Default.src
+      )
       return clearAnimationTimers
     }
 
     setAvatarSrc(CLIPPY_ANIMATIONS.Default.src)
     idleTimeoutRef.current = window.setTimeout(playIdleLoop, CLIPPY_IDLE_WAIT_MS)
     return clearAnimationTimers
-  }, [busy, greetingActive, open, topSeverity])
+  }, [animationCue, busy, chatStatus, greetingActive, open, topSeverity])
 
   useEffect(() => {
     if (!masterPassword) return
@@ -687,7 +976,7 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     runAnalysis(true)
     const timer = window.setInterval(() => runAnalysis(true), ANALYZE_INTERVAL_MS)
     return () => window.clearInterval(timer)
-  }, [masterPassword])
+  }, [masterPassword, runtimeGatewayOnline])
 
   useEffect(() => {
     openRef.current = open
@@ -697,16 +986,142 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     if (open) setUnread(0)
   }, [open])
 
-  const executeSuggestedCommand = async (id: string) => {
-    const target = suggestedCommands.find((item) => item.id === id)
-    if (!target || target.status === 'running') return
-    if (target.mutating) {
-      const confirmed = window.confirm(`该操作会修改配置：${target.command}\n是否继续执行？`)
-      if (!confirmed) return
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(AUTO_REMINDER_STORAGE_KEY, autoRemindEnabled ? '1' : '0')
+    } catch {
+      // ignore local storage failure
+    }
+  }, [autoRemindEnabled])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        CLIPPY_ANIMATION_PROTOCOL_STORAGE_KEY,
+        animationProtocolEnabled ? '1' : '0'
+      )
+    } catch {
+      // ignore local storage failure
+    }
+  }, [animationProtocolEnabled])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(CLIPPY_STYLE_PROMPT_STORAGE_KEY, assistantStylePrompt)
+    } catch {
+      // ignore local storage failure
+    }
+  }, [assistantStylePrompt])
+
+  useEffect(() => {
+    if (assistantStyleDraft.trim() === assistantStylePrompt.trim()) return
+    if (styleCommitTimerRef.current) {
+      window.clearTimeout(styleCommitTimerRef.current)
+    }
+    styleCommitTimerRef.current = window.setTimeout(() => {
+      commitAssistantStyleDraft()
+      styleCommitTimerRef.current = undefined
+    }, 900)
+    return () => {
+      if (styleCommitTimerRef.current) {
+        window.clearTimeout(styleCommitTimerRef.current)
+        styleCommitTimerRef.current = undefined
+      }
+    }
+  }, [assistantStyleDraft, assistantStylePrompt])
+
+  useEffect(() => {
+    if (!open && styleEditorOpen) {
+      commitAssistantStyleDraft()
+      setStyleEditorOpen(false)
+    }
+  }, [open, styleEditorOpen])
+
+  useEffect(() => {
+    if (!masterPassword) return
+    if (!autoRemindEnabled) return
+
+    const tick = async () => {
+      if (autoReminderRunningRef.current) return
+      if (busy || batchExecuting) return
+      if (!shouldTriggerAutoReminder(suggestions, policy, traffic)) return
+
+      const now = Date.now()
+      if (now - lastAutoReminderAtRef.current < AUTO_REMINDER_INTERVAL_MS) return
+
+      const signature = buildAutoReminderSignature(suggestions, policy, traffic)
+      if (
+        signature === lastAutoReminderSignatureRef.current &&
+        now - lastAutoReminderAtRef.current < AUTO_REMINDER_INTERVAL_MS * 2
+      ) {
+        return
+      }
+
+      autoReminderRunningRef.current = true
+      setChatStatus('auto_reminding')
+      try {
+        let reminderText = buildAutoReminderFallback(suggestions, policy, traffic)
+        let actions: SuggestedCommand[] = []
+
+        if (agentMode === 'codex' && gatewayCreds) {
+          try {
+            const raw = await askByCodex(
+              '这是系统定时巡检时刻。请给出一句自动提醒（80字内，直接结论+下一步），必要时可附带 mykey-actions。'
+            )
+            const parsed = parseAssistantPayload(raw, capabilityMap)
+            reminderText = parsed.answerText || reminderText
+            actions = parsed.actions
+            if (animationProtocolEnabled && parsed.animationKey) {
+              triggerClippyAnimation(parsed.animationKey)
+            }
+          } catch {
+            // keep fallback reminder
+          }
+        }
+
+        if (!actions.length) {
+          triggerClippyAnimation(suggestions[0]?.severity === 'critical' ? 'Alert' : 'CheckingSomething')
+        }
+        addAssistantMessage(`自动提醒：${compactReminderText(reminderText)}`)
+        if (actions.length > 0) {
+          setSuggestedCommands((prev) => mergeSuggestedCommands(prev, actions))
+          addAssistantMessage(`已附带 ${actions.length} 条可执行建议，可按需一键执行。`)
+        }
+        if (!openRef.current) {
+          setUnread((prev) => prev + 1)
+        }
+        lastAutoReminderAtRef.current = now
+        lastAutoReminderSignatureRef.current = signature
+      } finally {
+        autoReminderRunningRef.current = false
+        setChatStatus('idle')
+      }
     }
 
+    void tick()
+    const timer = window.setInterval(tick, AUTO_REMINDER_CHECK_MS)
+    return () => window.clearInterval(timer)
+  }, [
+    agentMode,
+    animationProtocolEnabled,
+    assistantStylePrompt,
+    autoRemindEnabled,
+    batchExecuting,
+    busy,
+    capabilityMap,
+    gatewayCreds,
+    masterPassword,
+    policy,
+    suggestions,
+    traffic,
+  ])
+
+  const runSuggestedCommand = async (
+    target: SuggestedCommand,
+    options?: { suppressChatMessage?: boolean }
+  ): Promise<CommandRunResult> => {
     setSuggestedCommands((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, status: 'running' } : item))
+      prev.map((item) => (item.id === target.id ? { ...item, status: 'running' } : item))
     )
 
     try {
@@ -718,25 +1133,91 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       const resultText = formatCommandResult(result)
       setSuggestedCommands((prev) =>
         prev.map((item) =>
-          item.id === id ? { ...item, status: 'success', resultText } : item
+          item.id === target.id ? { ...item, status: 'success', resultText } : item
         )
       )
-      addAssistantMessage(`已执行 ${target.command}：${resultText}`)
-      await runAnalysis(true)
+      if (!options?.suppressChatMessage) {
+        addAssistantMessage(`已执行 ${target.command}：${resultText}`)
+      }
+      return { command: target.command, ok: true, resultText }
     } catch (error) {
       const message = normalizeError(error)
       setSuggestedCommands((prev) =>
         prev.map((item) =>
-          item.id === id ? { ...item, status: 'failed', resultText: message } : item
+          item.id === target.id ? { ...item, status: 'failed', resultText: message } : item
         )
       )
-      addAssistantMessage(`执行 ${target.command} 失败：${message}`)
+      if (!options?.suppressChatMessage) {
+        addAssistantMessage(`执行 ${target.command} 失败：${message}`)
+      }
+      return { command: target.command, ok: false, resultText: message }
     }
+  }
+
+  const executeSuggestedCommand = async (id: string) => {
+    const target = suggestedCommands.find((item) => item.id === id)
+    if (!target || target.status === 'running' || batchExecuting) return
+    if (target.mutating) {
+      const confirmed = window.confirm(`该操作会修改配置：${target.command}\n是否继续执行？`)
+      if (!confirmed) return
+    }
+
+    setChatStatus('executing')
+    triggerClippyAnimation(target.mutating ? 'Alert' : 'GetAttention')
+    try {
+      const result = await runSuggestedCommand(target)
+      if (result.ok) {
+        await runAnalysis(true)
+      }
+    } finally {
+      setChatStatus('idle')
+    }
+  }
+
+  const executeAllSafeCommands = async () => {
+    if (batchExecuting) return
+    const targets = suggestedCommands.filter(
+      (item) => !item.mutating && (item.status === 'pending' || item.status === 'failed')
+    )
+    if (targets.length === 0) {
+      addAssistantMessage('当前没有可批量执行的只读动作。')
+      return
+    }
+
+    setBatchExecuting(true)
+    setBusy(true)
+    setChatStatus('executing')
+    triggerClippyAnimation('CheckingSomething')
+    try {
+      const results: CommandRunResult[] = []
+      for (const target of targets) {
+        const result = await runSuggestedCommand(target, { suppressChatMessage: true })
+        results.push(result)
+      }
+      await runAnalysis(true)
+      const success = results.filter((item) => item.ok)
+      const failed = results.filter((item) => !item.ok)
+      let summary = `批量执行完成：成功 ${success.length}，失败 ${failed.length}。`
+      if (failed.length > 0) {
+        summary += ` 失败命令：${failed.map((item) => item.command).join(', ')}`
+      }
+      addAssistantMessage(summary)
+    } finally {
+      setBatchExecuting(false)
+      setBusy(false)
+      setChatStatus('idle')
+    }
+  }
+
+  const clearSuggestedCommands = () => {
+    setSuggestedCommands([])
   }
 
   const executeAction = async (action: AssistantAction) => {
     try {
       setBusy(true)
+      setChatStatus('executing')
+      triggerClippyAnimation('GetAttention')
       if (action.kind === 'navigate') {
         onNavigate(action.view)
         setOpen(false)
@@ -759,6 +1240,7 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       addAssistantMessage(`执行失败：${normalizeError(error)}`)
     } finally {
       setBusy(false)
+      setChatStatus('idle')
     }
   }
 
@@ -780,6 +1262,7 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
                 <p className={`clippy-agent-status ${agentMode === 'codex' ? 'online' : 'offline'}`}>
                   {agentMode === 'codex' ? 'Codex 代理在线' : '规则模式（Codex 未连接）'}
                 </p>
+                <p className="clippy-agent-phase">状态：{chatStatusLabel(chatStatus)}</p>
               </div>
             </div>
             <button className="clippy-close-btn" onClick={() => setOpen(false)}>
@@ -790,6 +1273,73 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
           <div className="clippy-summary">
             <span className={`clippy-pill ${topSeverity}`}>{topSeverity.toUpperCase()}</span>
             <p>{summarizeCurrentSituation(policy, traffic)}</p>
+            <div className="clippy-auto-row">
+              <span className="clippy-auto-hint">
+                自动提醒：{autoRemindEnabled ? '已开启' : '已关闭'}（约每 {AUTO_REMINDER_INTERVAL_MINUTES} 分钟）
+              </span>
+              <div className="clippy-auto-actions">
+                <button
+                  className="btn btn-secondary clippy-auto-toggle"
+                  onClick={() => {
+                    lastAutoReminderAtRef.current = 0
+                    lastAutoReminderSignatureRef.current = ''
+                    void runAnalysis(true)
+                  }}
+                  disabled={busy}
+                >
+                  立即巡检
+                </button>
+                <button
+                  className="btn btn-secondary clippy-auto-toggle"
+                  onClick={() =>
+                    setAutoRemindEnabled((prev) => {
+                      const next = !prev
+                      if (next) {
+                        lastAutoReminderAtRef.current = 0
+                        lastAutoReminderSignatureRef.current = ''
+                      }
+                      return next
+                    })
+                  }
+                  disabled={busy}
+                >
+                  {autoRemindEnabled ? '关闭提醒' : '开启提醒'}
+                </button>
+              </div>
+            </div>
+            <div className="clippy-style-config">
+              <button
+                className="btn btn-secondary clippy-auto-toggle"
+                onClick={() => setStyleEditorOpen((prev) => !prev)}
+                disabled={busy}
+              >
+                {styleEditorOpen ? '收起互动设置' : '互动设置'}
+              </button>
+              {styleEditorOpen && (
+                <div className="clippy-style-editor">
+                  <label htmlFor="clippy-style-prompt">助手风格提示（延迟保存）</label>
+                  <textarea
+                    id="clippy-style-prompt"
+                    rows={3}
+                    value={assistantStyleDraft}
+                    onChange={(event) => setAssistantStyleDraft(event.target.value)}
+                    onBlur={commitAssistantStyleDraft}
+                    placeholder={CLIPPY_STYLE_PROMPT_DEFAULT}
+                  />
+                  <label className="clippy-style-check">
+                    <input
+                      type="checkbox"
+                      checked={animationProtocolEnabled}
+                      onChange={(event) => setAnimationProtocolEnabled(event.target.checked)}
+                    />
+                    <span>启用动画标签协议（支持回答开头使用 [Thinking] 等标签）</span>
+                  </label>
+                  <p className="clippy-style-note">
+                    可用动画标签：{CLIPPY_ANIMATION_HINT_KEYS.join(', ')}
+                  </p>
+                </div>
+              )}
+            </div>
             {agentError ? <p className="clippy-agent-error">模型连接提示：{agentError}</p> : null}
           </div>
 
@@ -816,7 +1366,28 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
 
           {suggestedCommands.length > 0 && (
             <div className="clippy-tools">
-              <div className="clippy-tools-title">AI 可执行建议</div>
+              <div className="clippy-tools-header">
+                <div className="clippy-tools-title">
+                  AI 可执行建议
+                  {mutatingActionCount > 0 ? `（变更待确认 ${mutatingActionCount}）` : ''}
+                </div>
+                <div className="clippy-tools-actions">
+                  <button
+                    className="btn btn-secondary"
+                    onClick={executeAllSafeCommands}
+                    disabled={busy || batchExecuting || safeActionCount === 0}
+                  >
+                    {batchExecuting ? '批量执行中...' : `执行全部只读(${safeActionCount})`}
+                  </button>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={clearSuggestedCommands}
+                    disabled={busy || batchExecuting}
+                  >
+                    清空
+                  </button>
+                </div>
+              </div>
               {suggestedCommands.slice(0, 4).map((item) => (
                 <article key={item.id} className="clippy-tool-item">
                   <div className="clippy-tool-command">
@@ -830,7 +1401,7 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
                     <button
                       className="btn btn-secondary"
                       onClick={() => executeSuggestedCommand(item.id)}
-                      disabled={busy || item.status === 'running'}
+                      disabled={busy || batchExecuting || item.status === 'running'}
                     >
                       {item.status === 'running'
                         ? '执行中...'

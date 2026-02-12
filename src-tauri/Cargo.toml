@@ -19,6 +19,7 @@ tauri-build = { version = "2.5.4", features = [] }
 
 [dependencies]
 serde_json = "1.0"
+base64 = "0.22"
 json5 = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
@@ -37,7 +38,8 @@ thiserror = "1.0"
 keyring = "2.3"
 toml = "0.8"
 shellexpand = "3.1"
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream", "multipart"] }
 tauri-plugin-dialog = "2.6.0"
+tauri-plugin-global-shortcut = "2.3.0"
 axum = { version = "0.8.4", features = ["json"] }
 tokio = { version = "1", features = ["net", "sync"] }

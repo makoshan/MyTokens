@@ -1464,7 +1464,7 @@ function getFormProfile(category: ProviderCategory | null) {
       apiKeyLabel: 'API Key',
       showBaseUrl: true,
       baseUrlLabel: '接口地址（可选）',
-      baseUrlTip: '可选：填写翻译服务的端点地址，不要以斜杠结尾。',
+      baseUrlTip: '可选：填写翻译服务的端点地址，不要以斜杠结尾。测速默认验证连通性（不校验翻译结果）。',
       showModels: false,
       modelLabel: '',
       modelPlaceholder: '',

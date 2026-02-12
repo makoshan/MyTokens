@@ -88,11 +88,7 @@ impl SecretManager {
     }
 
     pub fn primary_name(&self) -> Option<&str> {
-        if !self.primary.is_empty()
-            && self
-                .providers
-                .iter()
-                .any(|(name, _)| name == &self.primary)
+        if !self.primary.is_empty() && self.providers.iter().any(|(name, _)| name == &self.primary)
         {
             return Some(self.primary.as_str());
         }

@@ -55,6 +55,9 @@
 ![Key Management](./docs/images/key-list.png)
 *统一管理所有 API 密钥，支持快速搜索和分组。*
 
+### 技术方案
+- [Bob 风格快捷翻译与 OCR 技术方案](./docs/bob-feature-tech-plan.md)
+
 ---
 
 ## 🚀 下载与安装

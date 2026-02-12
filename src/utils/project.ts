@@ -14,3 +14,26 @@ export function deriveProjectLabelFromSource(source?: string | null): string {
   }
   return first
 }
+
+const PROJECT_AUTO_SCAN_SUPPRESS_ONCE_KEY = 'mykey:project-auto-scan:suppress-once'
+
+export function suppressProjectAutoScanOnce() {
+  try {
+    localStorage.setItem(PROJECT_AUTO_SCAN_SUPPRESS_ONCE_KEY, '1')
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function consumeProjectAutoScanSuppression(): boolean {
+  try {
+    const shouldSuppress = localStorage.getItem(PROJECT_AUTO_SCAN_SUPPRESS_ONCE_KEY) === '1'
+    if (shouldSuppress) {
+      localStorage.removeItem(PROJECT_AUTO_SCAN_SUPPRESS_ONCE_KEY)
+      return true
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return false
+}
