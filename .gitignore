@@ -33,3 +33,4 @@ shipkey/
 image*.png
 image copy*.png
 claude-relay-service/
+src/assets/clippy/

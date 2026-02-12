@@ -1,242 +1,113 @@
-# MyKey - AI 资产保险箱
+# MyKey - AI Asset Vault & Intelligent Gateway
 
-一个本地优先的、跨平台的桌面应用，用于集中托管开发者的关键数字资产（API 密钥、钱包私钥等），并作为 AI Agent 的权限管理与使用监控中枢。
+<p align="center">
+  <img src="./src-tauri/icons/128x128.png" width="128" height="128" alt="MyKey Logo">
+</p>
 
-![MyKey](https://img.shields.io/badge/MyKey-v1.0.0-blue)
-![Tauri](https://img.shields.io/badge/Tauri-2.10.0-orange)
-![React](https://img.shields.io/badge/React-19.2.4-61dafb)
-![Rust](https://img.shields.io/badge/Rust-1.77.2-ce422b)
+<p align="center">
+  <a href="https://github.com/makoshan/Mykey/releases"><img src="https://img.shields.io/github/v/release/makoshan/Mykey?style=flat-square&color=blue" alt="GitHub Release"></a>
+  <img src="https://img.shields.io/badge/Platform-macOS-lightgrey?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
+</p>
 
-## ✨ 核心特性
+**MyKey** 是一个本地优先的桌面应用，专为开发者设计。它不仅是你的 API 密钥保险箱，更是 AI Agent 时代的智能网关。
 
-### 🔐 安全管理
-- **本地优先**: 所有数据存储在本地，永不上云
-- **强加密**: 使用 AES-256-GCM 加密敏感数据（生产环境）
-- **主密码保护**: 使用 Argon2 派生密钥，确保主密码安全
-- **内存安全**: Rust 后端确保内存安全，无缓冲区溢出风险
-
-### 📊 可视化管理
-- **统一界面**: 在一个地方查看和管理所有 API 密钥
-- **按提供商分组**: 自动按 OpenAI、Anthropic、Gemini 等分组
-- **快速搜索**: 快速查找和切换密钥
-- **详细信息**: 查看密钥的创建时间、使用状态等
-
-### 📁 智能导入
-- **自动扫描**: 从项目目录自动发现 `.env` 文件
-- **智能识别**: 基于正则表达式自动识别不同提供商的密钥
-- **批量导入**: 一键导入所有发现的密钥
-- **安全解析**: 完全在本地解析，不上传任何内容
-
-### 🎯 支持的提供商
-
-| 提供商 | 状态 | 说明 |
-|--------|------|------|
-| OpenAI | ✅ 完全支持 | Chat Completions, Embeddings 等 |
-| Anthropic | ✅ 完全支持 | Claude API |
-| Google Gemini | ✅ 完全支持 | Gemini API |
-| DeepSeek | ✅ 完全支持 | DeepSeek API |
-| Kimi | ⏳ 计划中 | 即将支持 |
-| Cursor | ⏳ 计划中 | 即将支持 |
-
-## 🚀 快速开始
-
-### 系统要求
-
-- **macOS**: 10.13 或更高版本
-- **Windows**: Windows 10 或更高版本（即将支持）
-- **Linux**: Ubuntu 18.04 或更高版本（即将支持）
-
-### 安装
-
-#### 方式 1: 下载预编译应用 (推荐)
-
-从 [GitHub Releases](https://github.com/yourusername/mykey/releases) 下载最新的 `.dmg` 文件，双击安装。
-
-#### 方式 2: 从源代码构建
-
-**前置要求**:
-- Rust 1.77.2+
-- Node.js 18+
-- Xcode Command Line Tools (macOS)
-
-**构建步骤**:
-
-```bash
-# 克隆项目
-git clone https://github.com/yourusername/mykey.git
-cd mykey
-
-# 运行构建脚本
-./build-mac.sh
-
-# 或手动构建
-npm install
-npm run build
-npm run tauri:build
-```
-
-详见 [BUILD_MAC.md](./BUILD_MAC.md)
-
-### 首次使用
-
-1. **启动应用**: 打开 MyKey 应用
-2. **设置主密码**: 输入一个强密码作为主密码（首次使用）
-3. **添加密钥**: 
-   - 点击 "+ 添加密钥" 手动添加
-   - 或点击 "📁 导入" 从 `.env` 文件导入
-4. **查看和管理**: 在列表中查看、编辑、删除密钥
-
-## 📖 使用指南
-
-### 添加密钥
-
-1. 点击顶部的 "+ 添加密钥" 按钮
-2. 选择提供商（OpenAI、Anthropic 等）
-3. 输入密钥名称（便于识别）
-4. 输入 API 密钥
-5. 点击 "添加" 保存
-
-### 导入密钥
-
-1. 点击顶部的 "📁 导入" 按钮
-2. 粘贴 `.env` 文件的内容
-3. MyKey 会自动识别所有密钥
-4. 点击 "导入" 完成
-
-### 编辑密钥
-
-1. 在列表中选择一个密钥
-2. 点击右侧的 "✏️" 按钮
-3. 修改信息
-4. 点击 "更新" 保存
-
-### 删除密钥
-
-1. 在列表中选择一个密钥
-2. 点击右侧的 "🗑️" 按钮
-3. 确认删除
-
-### 查看密钥详情
-
-1. 在列表中点击一个密钥
-2. 右侧面板会显示详细信息
-3. 点击 "显示" 可以查看完整的密钥内容
-
-## 🔧 开发
-
-### 项目结构
-
-```
-mykey/
-├── src/                          # React 前端
-│   ├── App.tsx                  # 主应用
-│   ├── components/              # React 组件
-│   └── ...
-├── src-tauri/                   # Rust 后端
-│   ├── src/
-│   │   ├── lib.rs              # 库入口
-│   │   ├── vault.rs            # 密钥保险箱
-│   │   └── commands.rs         # Tauri 命令
-│   └── Cargo.toml              # Rust 依赖
-├── index.html                   # HTML 入口
-├── vite.config.ts              # Vite 配置
-├── tsconfig.json               # TypeScript 配置
-└── package.json                # Node.js 依赖
-```
-
-### 开发模式
-
-```bash
-# 启动开发服务器
-npm run tauri:dev
-```
-
-这会同时启动：
-- Vite 开发服务器 (http://localhost:3000)
-- Tauri 应用窗口
-- 热重载支持
-
-### 构建
-
-```bash
-# 构建前端
-npm run build
-
-# 构建应用
-npm run tauri:build
-
-# 输出位置
-# macOS: src-tauri/target/release/bundle/macos/MyKey.app
-# DMG: src-tauri/target/release/bundle/dmg/MyKey_*.dmg
-```
-
-## 🔐 安全考虑
-
-### 当前实现 (MVP)
-
-- ✅ 本地存储，不上云
-- ✅ 主密码保护
-- ✅ 主密码哈希已升级为 Argon2（兼容旧版本自动迁移）
-- ✅ SQLite 持久化存储
-- ⚠️ 网关审计流水、预算阻断、全局熔断仍在持续实现中
-
-### 生产级改进
-
-我们计划在后续版本中实现：
-
-- [x] Argon2 密钥派生
-- [ ] AES-256-GCM 加密
-- [x] SQLite 数据库持久化
-- [ ] 硬件安全模块 (HSM) 支持
-- [ ] 端到端加密云备份
-- [ ] 审计日志（按请求粒度）
-
-## 🤝 贡献
-
-欢迎贡献！请按照以下步骤：
-
-1. Fork 项目
-2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'Add amazing feature'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
-5. 开启 Pull Request
-
-## 📝 许可证
-
-本项目采用 MIT 许可证。详见 [LICENSE](./LICENSE) 文件。
-
-## 🙋 常见问题
-
-### Q: 我的密钥是否安全？
-A: 是的。所有密钥都存储在本地，使用主密码保护。我们不收集、不存储、不上传任何用户数据。
-
-### Q: 如果我忘记了主密码怎么办？
-A: 不幸的是，由于安全原因，无法恢复。您需要重新设置主密码，这将清除所有现有密钥。
-
-### Q: 支持哪些操作系统？
-A: 目前支持 macOS。Windows 和 Linux 支持即将推出。
-
-### Q: 可以在多台设备上使用吗？
-A: 目前不支持。每台设备都有独立的本地存储。我们计划在未来版本中添加端到端加密的云同步功能。
-
-### Q: 应用多少钱？
-A: MyKey 是免费开源软件！
-
-## 📞 联系方式
-
-- 📧 Email: support@mykey.app
-- 🐦 Twitter: [@MyKeyApp](https://twitter.com/mykeyapp)
-- 💬 Discord: [加入我们的社区](https://discord.gg/mykey)
-- 🐛 Bug 报告: [GitHub Issues](https://github.com/yourusername/mykey/issues)
-
-## 🙏 致谢
-
-感谢以下项目的启发和支持：
-
-- [Tauri](https://tauri.app) - 轻量级跨平台应用框架
-- [cc-switch](https://github.com/farion1231/cc-switch) - API 代理架构参考
-- [ShipKey](https://github.com/chekusu/shipkey) - 密钥管理理念参考
+它集成了 **Clippy AI 助手**，帮助你实时监控 API 成本、分析稳定性，并智能路由请求。所有数据加密存储在本地，安全无忧。
 
 ---
 
-**MyKey**: 让 AI 资产管理变得简单、安全、透明。🔐✨
+## ✨ 核心特性
+
+### 📎 Clippy Assistant (New!)
+内置智能助手，实时分析你的 API 使用情况。
+- **成本预警**: 当每日预算接近上限时自动提醒。
+- **稳定性监控**: 实时检测 API 错误率和延迟，建议切换线路。
+- **智能对话**: 直接问它 "我现在最该优化什么？"，获取可执行建议。
+
+### 📊 Usage Dashboard
+全新设计的可视化看板，让每一分钱都花得明明白白。
+- **实时流量**: 监控 RPS、成功率、平均延迟。
+- **成本追踪**: 按 Provider、模型、时间维度统计消耗。
+- **额度监控**: 直观展示各个 Key 的剩余额度。
+
+### 🔐 本地资产保险箱
+- **零信任架构**: 数据仅存储在本地 SQLite，绝不上云。
+- **军工级加密**: 敏感字段使用 **Argon2** 派生密钥 + **AES-256-GCM** 加密。
+- **自动导入**: 智能扫描项目目录下的 `.env` 文件，一键导入。
+
+### 🔌 多 Provider 支持
+无缝支持主流 AI 服务商：
+- OpenAI (GPT-4o, o1)
+- Anthropic (Claude 3.5 Sonnet)
+- Google Gemini (Pro 1.5)
+- DeepSeek (V3)
+- 更多即将推出...
+
+---
+
+## 📸 界面预览
+
+### 仪表盘与 Clippy
+![Usage Dashboard](./docs/images/dashboard-clippy.png)
+*实时监控 API 流量与成本，Clippy 随时待命。*
+
+### 密钥管理
+![Key Management](./docs/images/key-list.png)
+*统一管理所有 API 密钥，支持快速搜索和分组。*
+
+---
+
+## 🚀 下载与安装
+
+### 方式 1: 预编译安装包 (推荐)
+
+目前支持 macOS (Intel & Apple Silicon)。Windows 和 Linux 版本正在开发中。
+
+[![Download for macOS](https://img.shields.io/badge/Download-macOS_Universal-blue?style=for-the-badge&logo=apple)](https://github.com/makoshan/Mykey/releases/latest)
+
+1. 点击上方按钮前往 Releases 页面。
+2. 下载最新的 `.dmg` 文件。
+3. 双击安装并拖入应用程序文件夹。
+
+### 方式 2: 从源码构建
+
+如果你更喜欢折腾，可以自己编译：
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/makoshan/Mykey.git
+cd Mykey
+
+# 2. 安装依赖
+npm install
+
+# 3. 运行开发模式
+npm run tauri:dev
+
+# 4. 构建发布版本
+npm run tauri:build
+```
+
+---
+
+## 🔧 常见问题
+
+**Q: 我的 Key 会被上传吗？**
+A: **绝对不会**。MyKey 是本地优先应用，所有网络请求仅发生在你的设备与 AI 服务商之间。
+
+**Q: Clippy 助手是如何工作的？**
+A: Clippy 运行在本地，基于你本地的网关日志进行规则分析。如果启用 Codex 模式（可选），它会通过你配置的 API Key 调用大模型来生成更智能的建议。
+
+---
+
+## 🤝 贡献
+
+欢迎提交 Issue 和 Pull Request！
+
+感谢以下项目提供的灵感：
+- [ClaudeBar](https://github.com/tddworks/ClaudeBar)
+- [cc-switch](https://github.com/farion1231/cc-switch)
+
+## 📝 许可证
+
+MIT License.
