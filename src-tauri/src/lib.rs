@@ -358,6 +358,8 @@ pub fn run() {
             commands::set_master_password,
             commands::authenticate,
             commands::is_password_set,
+            commands::mykey_capabilities,
+            commands::mykey_command,
             commands::add_credential,
             commands::get_credentials,
             commands::update_credential,

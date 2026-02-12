@@ -184,6 +184,15 @@ pub struct OnePasswordSyncSummary {
     pub results: Vec<OnePasswordProjectSyncResult>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MykeyCapability {
+    pub id: String,
+    pub description: String,
+    pub requires_master_password: bool,
+    pub mutating: bool,
+    pub params: Vec<String>,
+}
+
 #[derive(Default)]
 struct EnvScanResult {
     parsed_keys: Vec<ParsedKey>,
@@ -203,6 +212,224 @@ struct WranglerScanResult {
     file: Option<String>,
     projects: Vec<String>,
     bindings: Vec<String>,
+}
+
+fn as_object_args(args: Option<Value>) -> Result<serde_json::Map<String, Value>, String> {
+    match args {
+        None => Ok(serde_json::Map::new()),
+        Some(Value::Object(map)) => Ok(map),
+        Some(_) => Err("args must be a JSON object".to_string()),
+    }
+}
+
+fn required_string_arg(
+    args: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<String, String> {
+    let value = args
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| format!("Missing required string arg: {}", key))?;
+    Ok(value.to_string())
+}
+
+fn optional_string_arg(args: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+}
+
+#[tauri::command]
+pub fn mykey_capabilities() -> Result<Vec<MykeyCapability>, String> {
+    Ok(vec![
+        MykeyCapability {
+            id: "health.ping".to_string(),
+            description: "Quick ping endpoint for agent health".to_string(),
+            requires_master_password: false,
+            mutating: false,
+            params: vec![],
+        },
+        MykeyCapability {
+            id: "gateway.status".to_string(),
+            description: "Read gateway service status, policy and 60m traffic metrics".to_string(),
+            requires_master_password: true,
+            mutating: false,
+            params: vec![],
+        },
+        MykeyCapability {
+            id: "gateway.circuit_breaker.set".to_string(),
+            description: "Enable or disable gateway global circuit breaker".to_string(),
+            requires_master_password: true,
+            mutating: true,
+            params: vec!["enabled:boolean".to_string()],
+        },
+        MykeyCapability {
+            id: "gateway.daily_budget.set".to_string(),
+            description: "Set gateway daily budget; null clears it".to_string(),
+            requires_master_password: true,
+            mutating: true,
+            params: vec!["daily_budget_usd:number|null".to_string()],
+        },
+        MykeyCapability {
+            id: "routes.list".to_string(),
+            description: "List all app -> provider routes".to_string(),
+            requires_master_password: true,
+            mutating: false,
+            params: vec![],
+        },
+        MykeyCapability {
+            id: "routes.set".to_string(),
+            description: "Set route mapping for one app".to_string(),
+            requires_master_password: true,
+            mutating: true,
+            params: vec![
+                "app_type:string".to_string(),
+                "provider:string".to_string(),
+                "model?:string".to_string(),
+            ],
+        },
+        MykeyCapability {
+            id: "providers.list".to_string(),
+            description: "List provider configs".to_string(),
+            requires_master_password: true,
+            mutating: false,
+            params: vec![],
+        },
+        MykeyCapability {
+            id: "projects.list".to_string(),
+            description: "List managed projects".to_string(),
+            requires_master_password: true,
+            mutating: false,
+            params: vec![],
+        },
+        MykeyCapability {
+            id: "projects.add".to_string(),
+            description: "Add managed project".to_string(),
+            requires_master_password: true,
+            mutating: true,
+            params: vec![
+                "name:string".to_string(),
+                "path:string".to_string(),
+                "credential_id?:string".to_string(),
+            ],
+        },
+        MykeyCapability {
+            id: "projects.delete".to_string(),
+            description: "Delete managed project by id".to_string(),
+            requires_master_password: true,
+            mutating: true,
+            params: vec!["id:string".to_string()],
+        },
+    ])
+}
+
+#[tauri::command]
+pub fn mykey_command(
+    command: String,
+    args: Option<Value>,
+    master_password: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let cmd = command.trim().to_lowercase();
+    if cmd.is_empty() {
+        return Err("command is empty".to_string());
+    }
+    if cmd == "health.ping" {
+        return Ok(json!({
+            "ok": true,
+            "service": "mykey-agent",
+            "command": "health.ping",
+        }));
+    }
+    if cmd == "capabilities.list" {
+        return Ok(json!({ "capabilities": mykey_capabilities()? }));
+    }
+
+    let args = as_object_args(args)?;
+    let password = master_password
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "master_password is required".to_string())?;
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&password) {
+        return Err("Invalid master password".to_string());
+    }
+
+    match cmd.as_str() {
+        "gateway.status" => {
+            let settings = vault.get_global_settings()?;
+            let policy = vault.get_gateway_policy_settings()?;
+            let traffic = vault.get_gateway_traffic_metrics(60)?;
+            let service = settings
+                .services
+                .iter()
+                .find(|item| item.service_name == "gateway")
+                .cloned();
+            Ok(json!({
+                "gateway_service": service,
+                "policy": policy,
+                "traffic_60m": traffic,
+            }))
+        }
+        "gateway.circuit_breaker.set" => {
+            let enabled = args
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| "Missing required boolean arg: enabled".to_string())?;
+            vault.set_gateway_circuit_breaker(enabled)?;
+            Ok(json!({ "ok": true, "enabled": enabled }))
+        }
+        "gateway.daily_budget.set" => {
+            let budget = match args.get("daily_budget_usd") {
+                Some(Value::Null) | None => None,
+                Some(value) => value.as_f64(),
+            };
+            if args.contains_key("daily_budget_usd")
+                && !matches!(args.get("daily_budget_usd"), Some(Value::Null))
+                && budget.is_none()
+            {
+                return Err("daily_budget_usd must be number or null".to_string());
+            }
+            vault.set_gateway_daily_budget(budget)?;
+            Ok(json!({ "ok": true, "daily_budget_usd": budget }))
+        }
+        "routes.list" => {
+            let routes = vault.get_app_routes()?;
+            Ok(json!({ "routes": routes }))
+        }
+        "routes.set" => {
+            let app_type = required_string_arg(&args, "app_type")?;
+            let provider = required_string_arg(&args, "provider")?;
+            let model = optional_string_arg(&args, "model");
+            let route = vault.set_app_route(&app_type, &provider, model)?;
+            Ok(json!({ "route": route }))
+        }
+        "providers.list" => {
+            let providers = vault.get_providers();
+            Ok(json!({ "providers": providers }))
+        }
+        "projects.list" => {
+            let projects = vault.get_projects()?;
+            Ok(json!({ "projects": projects }))
+        }
+        "projects.add" => {
+            let name = required_string_arg(&args, "name")?;
+            let path = required_string_arg(&args, "path")?;
+            let credential_id = optional_string_arg(&args, "credential_id");
+            let project = vault.add_project(name, path, credential_id)?;
+            Ok(json!({ "project": project }))
+        }
+        "projects.delete" => {
+            let id = required_string_arg(&args, "id")?;
+            vault.delete_project(&id)?;
+            Ok(json!({ "ok": true, "id": id }))
+        }
+        _ => Err(format!("Unknown mykey command: {}", command)),
+    }
 }
 
 #[tauri::command]
