@@ -248,6 +248,93 @@
   flex-wrap: wrap;
 }
 
+.clippy-tools {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(248, 250, 252, 0.8);
+}
+
+.clippy-tools-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.clippy-tool-item {
+  border: 1px dashed rgba(148, 163, 184, 0.55);
+  border-radius: 10px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: #fff;
+}
+
+.clippy-tool-item p {
+  margin: 0;
+  font-size: 12px;
+  color: #475569;
+  line-height: 1.4;
+}
+
+.clippy-tool-command {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.clippy-tool-command code {
+  font-size: 11px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+.clippy-tool-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #b45309;
+  background: rgba(254, 243, 199, 0.9);
+}
+
+.clippy-tool-status {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  color: #64748b;
+}
+
+.clippy-tool-status.running {
+  color: #1d4ed8;
+  border-color: rgba(59, 130, 246, 0.4);
+  background: rgba(219, 234, 254, 0.9);
+}
+
+.clippy-tool-status.success {
+  color: #047857;
+  border-color: rgba(16, 185, 129, 0.4);
+  background: rgba(209, 250, 229, 0.9);
+}
+
+.clippy-tool-status.failed {
+  color: #b91c1c;
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(254, 226, 226, 0.9);
+}
+
+.clippy-tool-result {
+  color: #0f172a !important;
+}
+
 .clippy-chat {
   border: 1px solid var(--border);
   border-radius: 12px;

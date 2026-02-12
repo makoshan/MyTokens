@@ -1,14 +1,13 @@
 use crate::{
     provider_defaults, secret_store::config::SecretStoreProviderConfig, secret_store::Secret,
-    secret_store::SecretManager,
-    secret_store::SecretMetadata, secret_store::SecretStoreConfig, usage::CostUsage,
-    usage::UsageQuota, usage::UsageSnapshot, AppIntegration, AppRoute, Credential,
-    ExternalLibraryMcp, ExternalLibrarySkill, GatewayAccessCredentials, GatewayPolicySettings,
-    GatewayRequestLog, GatewayErrorSummary, GatewayTrafficGroup, GatewayTrafficMetrics,
-    GatewayTrafficPoint, GlobalSettingsPayload, IntegrationConfigSnapshot, OpencodeConfigSnapshot,
-    PromptTemplate, ProviderAppBinding, ProviderAppBindingInput, ProviderConfig, ProviderDetails,
-    ProviderEndpoint, ProviderEndpointInput, ProviderEnvVar, ProviderEnvVarInput, ProviderModel,
-    ServiceConfig,
+    secret_store::SecretManager, secret_store::SecretMetadata, secret_store::SecretStoreConfig,
+    usage::CostUsage, usage::UsageQuota, usage::UsageSnapshot, AppIntegration, AppRoute,
+    Credential, ExternalLibraryMcp, ExternalLibrarySkill, GatewayAccessCredentials,
+    GatewayErrorSummary, GatewayPolicySettings, GatewayRequestLog, GatewayTrafficGroup,
+    GatewayTrafficMetrics, GatewayTrafficPoint, GlobalSettingsPayload, IntegrationConfigSnapshot,
+    OpencodeConfigSnapshot, PromptTemplate, ProviderAppBinding, ProviderAppBindingInput,
+    ProviderConfig, ProviderDetails, ProviderEndpoint, ProviderEndpointInput, ProviderEnvVar,
+    ProviderEnvVarInput, ProviderModel, ServiceConfig,
 };
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -355,9 +354,10 @@ impl Vault {
         }
         let _ = self.secret_manager.delete(id);
         let _ = self.secret_manager.delete(&project_label_secret_id(id));
-        let _ = self
-            .conn
-            .execute("DELETE FROM secret_refs WHERE credential_id = ?1", params![id]);
+        let _ = self.conn.execute(
+            "DELETE FROM secret_refs WHERE credential_id = ?1",
+            params![id],
+        );
         let _ = self.conn.execute(
             "UPDATE project_bindings SET credential_id = NULL, updated_at = ?1 WHERE credential_id = ?2",
             params![Local::now().to_rfc3339(), id],
@@ -2163,10 +2163,7 @@ impl Vault {
         }
     }
 
-    fn resolve_route_provider_auth(
-        &self,
-        provider: &str,
-    ) -> Result<RouteProviderAuth, String> {
+    fn resolve_route_provider_auth(&self, provider: &str) -> Result<RouteProviderAuth, String> {
         let config = self
             .get_provider_config(provider)
             .ok_or_else(|| format!("Provider not found: {}", provider))?;
@@ -2201,11 +2198,8 @@ impl Vault {
             .and_then(|item| Self::non_empty_owned(&item.base_url))
             .or_else(|| Self::non_empty_owned(&config.base_url));
 
-        let headers = primary_endpoint.and_then(|item| {
-            item.headers
-                .as_deref()
-                .and_then(Self::non_empty_owned)
-        });
+        let headers = primary_endpoint
+            .and_then(|item| item.headers.as_deref().and_then(Self::non_empty_owned));
 
         let timeout_ms = primary_endpoint
             .and_then(|item| item.timeout_ms)
@@ -2230,16 +2224,15 @@ impl Vault {
             None
         };
         let proxy_url = endpoint_proxy.or(provider_proxy);
-        let (proxy_username, proxy_password) = if proxy_url.is_some()
-            && config.details.proxy_config_enabled
-        {
-            (
-                Self::non_empty_owned(&config.details.proxy_username),
-                Self::non_empty_owned(&config.details.proxy_password),
-            )
-        } else {
-            (None, None)
-        };
+        let (proxy_username, proxy_password) =
+            if proxy_url.is_some() && config.details.proxy_config_enabled {
+                (
+                    Self::non_empty_owned(&config.details.proxy_username),
+                    Self::non_empty_owned(&config.details.proxy_password),
+                )
+            } else {
+                (None, None)
+            };
 
         Ok(RouteProviderAuth {
             api_key,
@@ -3119,7 +3112,8 @@ impl Vault {
             .get_provider_config(provider)
             .ok_or_else(|| format!("Provider not found: {}", provider))?;
         let details = &provider_config.details;
-        let selected_model = self.resolve_route_model_for_app("claude-code", &provider_config, model);
+        let selected_model =
+            self.resolve_route_model_for_app("claude-code", &provider_config, model);
         let default_haiku =
             Self::non_empty_owned(&details.default_haiku_model).or_else(|| selected_model.clone());
         let default_sonnet =
@@ -3267,10 +3261,7 @@ impl Vault {
             .resolve_route_model_for_app("codex", &provider_config, model)
             .unwrap_or_else(|| "gpt-5".to_string());
 
-        root.insert(
-            "model".to_string(),
-            Value::String(selected_model),
-        );
+        root.insert("model".to_string(), Value::String(selected_model));
         root.insert(
             "model_provider".to_string(),
             Value::String("mykey".to_string()),
@@ -3801,7 +3792,8 @@ impl Vault {
                 for table in copied_tables {
                     let quoted = quote_identifier(&table);
                     let delete_sql = format!("DELETE FROM main.{quoted}");
-                    let insert_sql = format!("INSERT INTO main.{quoted} SELECT * FROM backup.{quoted}");
+                    let insert_sql =
+                        format!("INSERT INTO main.{quoted} SELECT * FROM backup.{quoted}");
                     self.conn
                         .execute_batch(&delete_sql)
                         .map_err(|e| e.to_string())?;
@@ -3867,6 +3859,33 @@ impl Vault {
         }
 
         result
+    }
+
+    pub fn delete_backup_file(&self, backup_path: String) -> Result<bool, String> {
+        let trimmed = backup_path.trim();
+        if trimmed.is_empty() {
+            return Err("Backup path cannot be empty".to_string());
+        }
+
+        let input_path = PathBuf::from(trimmed);
+        if !input_path.exists() {
+            return Err(format!("Backup file not found: {}", input_path.display()));
+        }
+        if !input_path.is_file() {
+            return Err(format!(
+                "Backup path is not a file: {}",
+                input_path.display()
+            ));
+        }
+
+        let canonical_backup = input_path.canonicalize().unwrap_or(input_path.clone());
+        let canonical_db = self.db_path.canonicalize().unwrap_or(self.db_path.clone());
+        if canonical_backup == canonical_db {
+            return Err("Refusing to delete active vault database".to_string());
+        }
+
+        std::fs::remove_file(&canonical_backup).map_err(|e| e.to_string())?;
+        Ok(true)
     }
 
     fn record_backup_run_start(&self, run_type: &str, detail: Value) -> Result<String, String> {
@@ -4852,9 +4871,10 @@ impl Vault {
     }
 
     pub fn delete_project(&mut self, id: &str) -> Result<(), String> {
-        let _ = self
-            .conn
-            .execute("DELETE FROM project_bindings WHERE project_id = ?1", params![id]);
+        let _ = self.conn.execute(
+            "DELETE FROM project_bindings WHERE project_id = ?1",
+            params![id],
+        );
         let count = self
             .conn
             .execute("DELETE FROM projects WHERE id = ?1", params![id])

@@ -409,6 +409,7 @@ pub fn run() {
             commands::clippy_codex_chat,
             commands::backup_now,
             commands::restore_backup,
+            commands::delete_backup,
             commands::open_path,
             commands::add_project,
             commands::get_projects,

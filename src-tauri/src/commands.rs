@@ -1691,6 +1691,19 @@ pub fn restore_backup(
 }
 
 #[tauri::command]
+pub fn delete_backup(
+    backup_path: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.delete_backup_file(backup_path)
+}
+
+#[tauri::command]
 pub fn open_path(path: String) -> Result<bool, String> {
     let target = Path::new(path.trim());
     if !target.exists() {

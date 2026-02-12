@@ -20,17 +20,8 @@ yarn-error.log*
 *.dmg
 *.app
 
-# Unrelated nested repositories in this workspace
-ClaudeBar/
-cc-switch/
-claude-code-tool-manager/
-infisical/
-Personal_AI_Infrastructure/
-shipkey/
-文档/
-
 # Large local screenshots/assets
 image*.png
 image copy*.png
-claude-relay-service/
-src/assets/clippy/
+Docs_code/
+src/assets/

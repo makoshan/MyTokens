@@ -84,6 +84,7 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [backupMessage, setBackupMessage] = useState<string>('')
   const [restoreMessage, setRestoreMessage] = useState<string>('')
+  const [deleteBackupMessage, setDeleteBackupMessage] = useState<string>('')
   const [portDrafts, setPortDrafts] = useState<Record<string, string>>({})
   const [gatewayPolicy, setGatewayPolicy] = useState<GatewayPolicySettings | null>(null)
   const [gatewayLogs, setGatewayLogs] = useState<GatewayRequestLog[]>([])
@@ -428,6 +429,7 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
   const createBackup = async () => {
     setBusyKey('backup-now')
     setRestoreMessage('')
+    setDeleteBackupMessage('')
     try {
       const backupPath = await invoke<string>('backup_now', {
         targetDir: null,
@@ -458,6 +460,7 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
 
     setBusyKey('backup-restore')
     setBackupMessage('')
+    setDeleteBackupMessage('')
     try {
       await invoke<boolean>('restore_backup', {
         backupPath: selected,
@@ -468,6 +471,37 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
     } catch (err) {
       console.error(err)
       alert(`恢复备份失败: ${String(err)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const deleteBackup = async () => {
+    const selected = await openDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: 'SQLite Backup', extensions: ['db', 'sqlite', 'sqlite3'] }],
+    })
+    if (!selected || Array.isArray(selected)) {
+      return
+    }
+    if (!confirm(`确定删除备份文件吗？\n${selected}`)) {
+      return
+    }
+
+    setBusyKey('backup-delete')
+    setBackupMessage('')
+    setRestoreMessage('')
+    try {
+      await invoke<boolean>('delete_backup', {
+        backupPath: selected,
+        masterPassword,
+      })
+      setDeleteBackupMessage(`已删除备份: ${selected}`)
+      await refresh(false)
+    } catch (err) {
+      console.error(err)
+      alert(`删除备份失败: ${String(err)}`)
     } finally {
       setBusyKey(null)
     }
@@ -999,9 +1033,17 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
               >
                 恢复备份
               </button>
+              <button
+                className="btn btn-secondary"
+                disabled={busyKey === 'backup-delete'}
+                onClick={deleteBackup}
+              >
+                删除备份
+              </button>
             </div>
             {backupMessage && <div className="backup-message">{backupMessage}</div>}
             {restoreMessage && <div className="backup-message">{restoreMessage}</div>}
+            {deleteBackupMessage && <div className="backup-message">{deleteBackupMessage}</div>}
           </div>
 
           <div className="settings-item">

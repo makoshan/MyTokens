@@ -65,6 +65,34 @@ interface GatewayAccessCredentials {
   api_key: string
 }
 
+interface MykeyCapability {
+  id: string
+  description: string
+  requires_master_password: boolean
+  mutating: boolean
+  params: string[]
+}
+
+interface MykeyActionPlan {
+  actions?: Array<{
+    command?: string
+    args?: Record<string, unknown>
+    reason?: string
+  }>
+}
+
+type SuggestedCommandStatus = 'pending' | 'running' | 'success' | 'failed'
+
+interface SuggestedCommand {
+  id: string
+  command: string
+  args: Record<string, unknown>
+  reason: string
+  mutating: boolean
+  status: SuggestedCommandStatus
+  resultText?: string
+}
+
 const ANALYZE_INTERVAL_MS = 5 * 60 * 1000
 const TRAFFIC_WINDOW_MINUTES = 60
 const CLIPPY_IDLE_GREET_MS = 3200
@@ -310,6 +338,49 @@ function normalizeCodexAnswerForModelQuestion(
   return `当前你的网关链路已连通，首选模型应为 gpt-5-codex；只有在你明确要求极限省成本时，才考虑降级。\n${answer}`
 }
 
+function parseMykeyActionBlock(
+  raw: string,
+  capabilityMap: Record<string, MykeyCapability>
+): { answerText: string; actions: SuggestedCommand[] } {
+  const match = raw.match(/```mykey-actions\s*([\s\S]*?)```/i)
+  if (!match) {
+    return { answerText: raw.trim(), actions: [] }
+  }
+
+  const block = (match[1] || '').trim()
+  let actions: SuggestedCommand[] = []
+  try {
+    const parsed = JSON.parse(block) as MykeyActionPlan
+    const parsedActions = Array.isArray(parsed.actions) ? parsed.actions.slice(0, 3) : []
+    actions = parsedActions
+      .map((item, index) => {
+        const command = (item.command || '').trim()
+        if (!command || !capabilityMap[command]) return null
+        const args = item.args && typeof item.args === 'object' ? item.args : {}
+        return {
+          id: `${Date.now()}-${index}`,
+          command,
+          args: args as Record<string, unknown>,
+          reason: (item.reason || '').trim() || 'AI 建议执行',
+          mutating: capabilityMap[command].mutating,
+          status: 'pending' as SuggestedCommandStatus,
+        }
+      })
+      .filter((item): item is SuggestedCommand => item !== null)
+  } catch {
+    actions = []
+  }
+
+  const cleaned = raw.replace(match[0], '').trim()
+  return { answerText: cleaned, actions }
+}
+
+function formatCommandResult(result: unknown) {
+  const raw = typeof result === 'string' ? result : JSON.stringify(result)
+  if (!raw) return 'ok'
+  return raw.length > 280 ? `${raw.slice(0, 280)}...` : raw
+}
+
 export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAssistantProps) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -329,6 +400,8 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   const [lastAnalyzedAt, setLastAnalyzedAt] = useState<Date | null>(null)
   const [agentMode, setAgentMode] = useState<AgentMode>('fallback')
   const [gatewayCreds, setGatewayCreds] = useState<GatewayAccessCredentials | null>(null)
+  const [capabilities, setCapabilities] = useState<MykeyCapability[]>([])
+  const [suggestedCommands, setSuggestedCommands] = useState<SuggestedCommand[]>([])
   const [agentError, setAgentError] = useState<string>('')
   const [greetingActive, setGreetingActive] = useState(true)
   const [avatarSrc, setAvatarSrc] = useState(CLIPPY_ANIMATIONS.Greeting.src)
@@ -340,6 +413,13 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   const clipTimeoutRef = useRef<number>()
   const idleTimeoutRef = useRef<number>()
   const runtimeGatewayOnline = agentMode === 'codex'
+  const capabilityMap = useMemo(() => {
+    const map: Record<string, MykeyCapability> = {}
+    for (const item of capabilities) {
+      map[item.id] = item
+    }
+    return map
+  }, [capabilities])
 
   const suggestions = useMemo(
     () => buildSuggestions(settings, policy, traffic, usageStatuses, runtimeGatewayOnline),
@@ -412,6 +492,10 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       .slice(-4)
       .map((item) => `${item.role === 'assistant' ? '助手' : '用户'}: ${item.text}`)
       .join('\n')
+    const capabilityHints = capabilities
+      .slice(0, 20)
+      .map((item) => `- ${item.id}${item.params.length ? `(${item.params.join(', ')})` : ''}`)
+      .join('\n')
 
     const systemPrompt = [
       '你是 MyKey 内置的 Clippy 助手。输出请简短、直接、可执行。',
@@ -425,6 +509,13 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       '当前风险与建议:',
       riskTop || '暂无高优先级风险。',
       '如果用户提问不明确，优先给出接下来 1-3 步具体操作。',
+      '你可以建议执行 mykey 命令。若建议执行，请在回复末尾附加一个代码块：',
+      '```mykey-actions',
+      '{"actions":[{"command":"gateway.status","args":{},"reason":"说明原因"}]}',
+      '```',
+      '只允许使用提供的能力命令，最多 3 条；若不需要执行则不要输出该代码块。',
+      '可用命令:',
+      capabilityHints || '- (无)',
       '默认使用中文回答。',
     ].join('\n')
 
@@ -448,8 +539,20 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     try {
       if (agentMode === 'codex' && gatewayCreds) {
         const rawAnswer = await askByCodex(q)
-        const answer = normalizeCodexAnswerForModelQuestion(q, rawAnswer, runtimeGatewayOnline)
+        const { answerText, actions } = parseMykeyActionBlock(rawAnswer, capabilityMap)
+        const displayText =
+          answerText ||
+          (actions.length > 0 ? '已生成可执行操作建议，请按需一键执行。' : rawAnswer)
+        const answer = normalizeCodexAnswerForModelQuestion(
+          q,
+          displayText,
+          runtimeGatewayOnline
+        )
         addAssistantMessage(answer)
+        if (actions.length > 0) {
+          setSuggestedCommands(actions)
+          addAssistantMessage(`已生成 ${actions.length} 条可执行操作建议，可在下方一键执行。`)
+        }
         setAgentError('')
       } else {
         addAssistantMessage(buildFallbackAnswer(q, policy, traffic, suggestions))
@@ -547,6 +650,17 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
 
     const bootstrapAgent = async () => {
       try {
+        const caps = await invoke<MykeyCapability[]>('mykey_capabilities')
+        if (!canceled) {
+          setCapabilities(caps)
+        }
+      } catch {
+        if (!canceled) {
+          setCapabilities([])
+        }
+      }
+
+      try {
         const creds = await invoke<GatewayAccessCredentials>('get_gateway_access_credentials', {
           appType: 'codex',
           masterPassword,
@@ -582,6 +696,43 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   useEffect(() => {
     if (open) setUnread(0)
   }, [open])
+
+  const executeSuggestedCommand = async (id: string) => {
+    const target = suggestedCommands.find((item) => item.id === id)
+    if (!target || target.status === 'running') return
+    if (target.mutating) {
+      const confirmed = window.confirm(`该操作会修改配置：${target.command}\n是否继续执行？`)
+      if (!confirmed) return
+    }
+
+    setSuggestedCommands((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, status: 'running' } : item))
+    )
+
+    try {
+      const result = await invoke<unknown>('mykey_command', {
+        command: target.command,
+        args: target.args,
+        masterPassword,
+      })
+      const resultText = formatCommandResult(result)
+      setSuggestedCommands((prev) =>
+        prev.map((item) =>
+          item.id === id ? { ...item, status: 'success', resultText } : item
+        )
+      )
+      addAssistantMessage(`已执行 ${target.command}：${resultText}`)
+      await runAnalysis(true)
+    } catch (error) {
+      const message = normalizeError(error)
+      setSuggestedCommands((prev) =>
+        prev.map((item) =>
+          item.id === id ? { ...item, status: 'failed', resultText: message } : item
+        )
+      )
+      addAssistantMessage(`执行 ${target.command} 失败：${message}`)
+    }
+  }
 
   const executeAction = async (action: AssistantAction) => {
     try {
@@ -662,6 +813,36 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
               </article>
             ))}
           </div>
+
+          {suggestedCommands.length > 0 && (
+            <div className="clippy-tools">
+              <div className="clippy-tools-title">AI 可执行建议</div>
+              {suggestedCommands.slice(0, 4).map((item) => (
+                <article key={item.id} className="clippy-tool-item">
+                  <div className="clippy-tool-command">
+                    <code>{item.command}</code>
+                    {item.mutating && <span className="clippy-tool-tag">变更</span>}
+                    <span className={`clippy-tool-status ${item.status}`}>{item.status}</span>
+                  </div>
+                  <p>{item.reason}</p>
+                  {item.resultText ? <p className="clippy-tool-result">{item.resultText}</p> : null}
+                  <div className="clippy-action-row">
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => executeSuggestedCommand(item.id)}
+                      disabled={busy || item.status === 'running'}
+                    >
+                      {item.status === 'running'
+                        ? '执行中...'
+                        : item.status === 'success'
+                          ? '再次执行'
+                          : '执行'}
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
 
           <div className="clippy-chat">
             <div className="clippy-chat-log">
