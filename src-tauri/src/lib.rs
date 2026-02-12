@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 mod commands;
 mod gateway;
@@ -12,9 +12,18 @@ mod vault;
 use vault::Vault;
 
 pub struct AppState {
-    vault: Mutex<Vault>,
-    usage: Mutex<usage::UsageState>,
-    gateway: Mutex<gateway::GatewayRuntime>,
+    vault: Arc<Mutex<Vault>>,
+    usage: Arc<Mutex<usage::UsageState>>,
+    gateway: Arc<Mutex<gateway::GatewayRuntime>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GatewayAccessCredentials {
+    pub app_type: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub provider: String,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -172,6 +181,29 @@ pub struct GlobalSettingsPayload {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GatewayPolicySettings {
+    pub circuit_breaker_enabled: bool,
+    pub daily_budget_usd: Option<f64>,
+    pub today_request_count: i64,
+    pub today_cost_usd: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GatewayRequestLog {
+    pub id: String,
+    pub created_at: String,
+    pub app_type: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub endpoint: String,
+    pub status_code: i64,
+    pub latency_ms: i64,
+    pub blocked_reason: Option<String>,
+    pub error_code: Option<String>,
+    pub estimated_cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Project {
     pub id: String,
     pub name: String,
@@ -185,9 +217,9 @@ pub struct Project {
 pub fn run() {
     let vault = Vault::new();
     let app_state = AppState {
-        vault: Mutex::new(vault),
-        usage: Mutex::new(usage::UsageState::default()),
-        gateway: Mutex::new(gateway::GatewayRuntime::default()),
+        vault: Arc::new(Mutex::new(vault)),
+        usage: Arc::new(Mutex::new(usage::UsageState::default())),
+        gateway: Arc::new(Mutex::new(gateway::GatewayRuntime::default())),
     };
 
     tauri::Builder::default()
@@ -233,14 +265,20 @@ pub fn run() {
             commands::set_global_service_enabled,
             commands::set_global_service_auto_start,
             commands::set_global_service_port,
+            commands::get_gateway_policy_settings,
+            commands::set_gateway_circuit_breaker,
+            commands::set_gateway_daily_budget,
+            commands::get_gateway_request_logs,
             commands::get_app_routes,
             commands::set_app_route,
+            commands::detect_app_route_from_live_config,
             commands::get_opencode_config_snapshot,
             commands::save_opencode_config_snapshot,
             commands::get_integration_config_snapshot,
             commands::save_integration_config_snapshot,
             commands::get_claude_tool_manager_mcps,
             commands::get_claude_tool_manager_skills,
+            commands::get_gateway_access_credentials,
             commands::backup_now,
             commands::open_path,
             commands::add_project,

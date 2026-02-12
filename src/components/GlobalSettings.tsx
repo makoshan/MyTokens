@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import './GlobalSettings.css'
-import { GlobalSettingsPayload, ServiceConfig } from '../types/settings'
+import {
+  GatewayPolicySettings,
+  GatewayRequestLog,
+  GlobalSettingsPayload,
+  ServiceConfig,
+} from '../types/settings'
 
 interface GlobalSettingsProps {
   masterPassword: string
@@ -12,6 +17,11 @@ const integrationLabels: Record<string, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
   gemini: 'Gemini',
+  github: 'GitHub Copilot',
+  antigravity: 'Antigravity',
+  'z.ai': 'Z.ai',
+  amp: 'Amp',
+  aws: 'AWS Bedrock',
   cursor: 'Cursor',
   opencode: 'OpenCode',
   openclaw: 'OpenClaw',
@@ -35,6 +45,9 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [backupMessage, setBackupMessage] = useState<string>('')
   const [portDrafts, setPortDrafts] = useState<Record<string, string>>({})
+  const [gatewayPolicy, setGatewayPolicy] = useState<GatewayPolicySettings | null>(null)
+  const [gatewayLogs, setGatewayLogs] = useState<GatewayRequestLog[]>([])
+  const [budgetDraft, setBudgetDraft] = useState<string>('')
 
   const services = settings?.services ?? []
   const integrations = settings?.integrations ?? []
@@ -47,10 +60,22 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
       if (showLoading) {
         setLoading(true)
       }
-      const payload = await invoke<GlobalSettingsPayload>('get_global_settings', {
-        masterPassword,
-      })
+      const [payload, policy, logs] = await Promise.all([
+        invoke<GlobalSettingsPayload>('get_global_settings', {
+          masterPassword,
+        }),
+        invoke<GatewayPolicySettings>('get_gateway_policy_settings', {
+          masterPassword,
+        }),
+        invoke<GatewayRequestLog[]>('get_gateway_request_logs', {
+          limit: 80,
+          masterPassword,
+        }),
+      ])
       setSettings(payload)
+      setGatewayPolicy(policy)
+      setGatewayLogs(logs)
+      setBudgetDraft(policy.daily_budget_usd ? policy.daily_budget_usd.toFixed(2) : '')
       setError(null)
     } catch (err) {
       console.error('Failed to load global settings:', err)
@@ -170,6 +195,49 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
     } catch (err) {
       console.error(err)
       alert(`更新 Debug 模式失败: ${String(err)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const toggleCircuitBreaker = async (enabled: boolean) => {
+    setBusyKey('gateway-circuit-breaker')
+    try {
+      await invoke('set_gateway_circuit_breaker', {
+        enabled,
+        masterPassword,
+      })
+      await refresh(false)
+    } catch (err) {
+      console.error(err)
+      alert(`更新全局熔断失败: ${String(err)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const saveDailyBudget = async () => {
+    const raw = budgetDraft.trim()
+    let parsedBudget: number | null = null
+    if (raw.length > 0) {
+      const value = Number(raw)
+      if (!Number.isFinite(value) || value <= 0) {
+        alert('预算必须是大于 0 的数字，留空表示不限制')
+        return
+      }
+      parsedBudget = value
+    }
+
+    setBusyKey('gateway-daily-budget')
+    try {
+      await invoke('set_gateway_daily_budget', {
+        dailyBudgetUsd: parsedBudget,
+        masterPassword,
+      })
+      await refresh(false)
+    } catch (err) {
+      console.error(err)
+      alert(`保存每日预算失败: ${String(err)}`)
     } finally {
       setBusyKey(null)
     }
@@ -387,6 +455,96 @@ export default function GlobalSettings({ masterPassword }: GlobalSettingsProps) 
           <h2>诊断与备份</h2>
         </div>
         <div className="settings-list">
+          <div className="settings-item">
+            <div className="settings-item-header">
+              <div>
+                <div className="settings-item-title">网关风控</div>
+                <div className="settings-item-subtitle">
+                  管理全局熔断与每日预算，并查看最近请求流水。
+                </div>
+              </div>
+              <div className="settings-item-badges">
+                <span
+                  className={`service-badge ${
+                    gatewayPolicy?.circuit_breaker_enabled ? 'stopped' : 'enabled'
+                  }`}
+                >
+                  {gatewayPolicy?.circuit_breaker_enabled ? '熔断已开启' : '熔断关闭'}
+                </span>
+              </div>
+            </div>
+            <div className="settings-item-controls">
+              <button
+                className={`btn ${
+                  gatewayPolicy?.circuit_breaker_enabled ? 'btn-primary' : 'btn-secondary'
+                }`}
+                disabled={busyKey === 'gateway-circuit-breaker'}
+                onClick={() => toggleCircuitBreaker(!gatewayPolicy?.circuit_breaker_enabled)}
+              >
+                {gatewayPolicy?.circuit_breaker_enabled ? '恢复网关' : '紧急停止'}
+              </button>
+              <div className="port-editor">
+                <input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={budgetDraft}
+                  onChange={(event) => setBudgetDraft(event.target.value)}
+                  placeholder="每日预算 USD"
+                />
+                <button
+                  className="btn btn-secondary"
+                  disabled={busyKey === 'gateway-daily-budget'}
+                  onClick={saveDailyBudget}
+                >
+                  保存预算
+                </button>
+              </div>
+            </div>
+            <div className="settings-item-subtitle">
+              今日请求 {gatewayPolicy?.today_request_count ?? 0} 次，累计成本 $
+              {(gatewayPolicy?.today_cost_usd ?? 0).toFixed(4)}
+              {gatewayPolicy?.daily_budget_usd
+                ? ` / 预算 $${gatewayPolicy.daily_budget_usd.toFixed(2)}`
+                : ' / 未设置预算'}
+            </div>
+            <div className="gateway-log-table-wrap">
+              <table className="gateway-log-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>应用</th>
+                    <th>端点</th>
+                    <th>状态</th>
+                    <th>耗时</th>
+                    <th>原因</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {gatewayLogs.slice(0, 20).map((item) => (
+                    <tr key={item.id}>
+                      <td>{new Date(item.created_at).toLocaleTimeString()}</td>
+                      <td>{integrationLabels[item.app_type] || item.app_type}</td>
+                      <td>
+                        <code>{item.endpoint}</code>
+                      </td>
+                      <td>{item.status_code}</td>
+                      <td>{item.latency_ms}ms</td>
+                      <td>{item.blocked_reason || item.error_code || '-'}</td>
+                    </tr>
+                  ))}
+                  {gatewayLogs.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="gateway-log-empty">
+                        暂无网关请求记录
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           <div className="settings-item">
             <div className="settings-item-header">
               <div>

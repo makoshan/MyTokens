@@ -29,6 +29,9 @@ pub async fn refresh_all_providers(
         opencode_key,
         openclaw_key,
         claude_cli_path,
+        amp_cli_path,
+        gemini_cli_path,
+        kimi_cli_path,
     ) = {
         let vault = app_state.vault.lock().unwrap();
         let credentials = vault.get_credentials();
@@ -52,6 +55,15 @@ pub async fn refresh_all_providers(
                     .ok()
                     .filter(|v| !v.trim().is_empty())
             });
+        let amp_cli_path = find_credential_value(&credentials, "AMP_CLI_PATH")
+            .or_else(|| std::env::var("AMP_CLI_PATH").ok().filter(|v| !v.trim().is_empty()));
+        let gemini_cli_path = find_credential_value(&credentials, "GEMINI_CLI_PATH")
+            .or_else(|| std::env::var("GEMINI_CLI_PATH").ok().filter(|v| !v.trim().is_empty()));
+        let kimi_cli_path = find_credential_value(&credentials, "KIMI_CLI_PATH")
+            .or_else(|| {
+                find_credential_value(&credentials, "KIMI_CODING_CLI_PATH")
+                    .or_else(|| std::env::var("KIMI_CLI_PATH").ok().filter(|v| !v.trim().is_empty()))
+            });
         (
             vault.get_provider_config("openai"),
             vault.get_provider_config("anthropic"),
@@ -62,6 +74,9 @@ pub async fn refresh_all_providers(
             opencode_key,
             openclaw_key,
             claude_cli_path,
+            amp_cli_path,
+            gemini_cli_path,
+            kimi_cli_path,
         )
     };
 
@@ -94,7 +109,14 @@ pub async fn refresh_all_providers(
             _ => (None, None),
         };
 
-        match probe(provider, config, key_override, claude_cli_path.as_deref()).await {
+        let cli_path_override = match provider {
+            "amp" => amp_cli_path.as_deref(),
+            "gemini" => gemini_cli_path.as_deref(),
+            "kimi" => kimi_cli_path.as_deref(),
+            _ => claude_cli_path.as_deref(),
+        };
+
+        match probe(provider, config, key_override, cli_path_override).await {
             Ok(mut snapshot) => {
                 snapshot.provider_id = provider.to_string();
                 {
@@ -192,13 +214,16 @@ impl UsageState {
 
 mod cli;
 
-pub const KNOWN_PROVIDERS: [&str; 6] = [
+pub const KNOWN_PROVIDERS: [&str; 9] = [
     "openai",
     "anthropic",
     "antigravity",
     "claude-code",
     "opencode",
     "openclaw",
+    "gemini",
+    "kimi",
+    "amp",
 ];
 
 pub async fn probe(
@@ -214,7 +239,10 @@ pub async fn probe(
         "openai" => probe_openai(config, api_key_override).await,
         "opencode" => probe_openai_api(config, api_key_override, "OpenCode").await,
         "openclaw" => probe_openai_api(config, api_key_override, "OpenClaw").await,
+        "gemini" => cli::probe_gemini_cli("gemini", claude_cli_path_override),
+        "kimi" => cli::probe_kimi_cli("kimi", claude_cli_path_override),
         "antigravity" => probe_antigravity().await,
+        "amp" => cli::probe_amp_cli("amp", claude_cli_path_override),
         _ => Err(format!("Unknown provider: {}", provider_id)),
     }
 }

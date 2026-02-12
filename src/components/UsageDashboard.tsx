@@ -7,13 +7,23 @@ import type { ProviderLinkageContext } from '../utils/linkage';
 
 interface UsageDashboardProps {
   providerContextById?: Record<string, ProviderLinkageContext>
+  quickStats?: Array<{
+    key: string
+    label: string
+    value: number
+    view: 'keys' | 'projects' | 'mcp' | 'skills' | 'apps'
+  }>
+  onNavigate?: (view: 'providers' | 'keys' | 'projects' | 'mcp' | 'skills' | 'apps') => void
 }
 
 export default function UsageDashboard({
   providerContextById = {},
+  quickStats = [],
+  onNavigate,
 }: UsageDashboardProps) {
   const [statuses, setStatuses] = useState<ProviderUsageStatus[]>([]);
   const [loading, setLoading] = useState(false);
+  const excludedProviders = new Set(['opencode', 'openclaw'])
 
   const fetchSummary = async () => {
     try {
@@ -43,7 +53,9 @@ export default function UsageDashboard({
     fetchSummary();
   }, []);
 
-  const enabledStatuses = statuses.filter((status) => status.enabled);
+  const enabledStatuses = statuses.filter(
+    (status) => status.enabled && !excludedProviders.has(status.provider_id)
+  );
   const healthyCount = enabledStatuses.filter(
     (status) => !status.error && (status.snapshot?.quotas.length ?? 0) > 0
   ).length;
@@ -56,11 +68,16 @@ export default function UsageDashboard({
   );
   const claudeStatuses = enabledStatuses.filter((status) => status.provider_id.includes('anthropic'));
   const claudeCoverage = claudeStatuses.filter((status) => (status.snapshot?.quotas.length ?? 0) > 0).length;
-  const latestUpdate = enabledStatuses
-    .map((status) => status.snapshot?.captured_at)
-    .filter((value): value is string => Boolean(value))
-    .sort()
-    .slice(-1)[0];
+
+  const summaryItems: Array<{
+    key: string
+    label: string
+    value: number
+    view: 'providers' | 'keys' | 'projects' | 'mcp' | 'skills' | 'apps'
+  }> = [
+    { key: 'providers', label: '供应商', value: enabledStatuses.length, view: 'providers' },
+    ...quickStats,
+  ]
 
   return (
     <div className="usage-dashboard">
@@ -70,22 +87,30 @@ export default function UsageDashboard({
           <p className="usage-subtitle">
             用量优先基于本机 OAuth/CLI 会话抓取，必要时回退到密钥库中的 API Key。
           </p>
-          <div className="usage-header-meta">
-            <span className="usage-pill">{enabledStatuses.length} Providers</span>
-            {latestUpdate ? (
-              <span className="usage-updated-at">
-                Updated {new Date(latestUpdate).toLocaleTimeString()}
-              </span>
-            ) : null}
+          <div className="usage-header-meta-line">
+            <div className="usage-summary-row">
+              {summaryItems.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className="usage-summary-chip"
+                  onClick={() => onNavigate?.(item.view)}
+                >
+                  <span className="usage-summary-value">{item.value}</span>
+                  <span className="usage-summary-label">{item.label}</span>
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         <button
+          type="button"
           className={`usage-refresh-btn ${loading ? 'is-loading' : ''}`}
           onClick={handleRefreshAll}
           disabled={loading}
         >
           <span className="usage-symbol usage-refresh-icon" aria-hidden>↻</span>
-          Refetch All
+          全部刷新
         </button>
       </header>
 

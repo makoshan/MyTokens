@@ -99,6 +99,8 @@ type UsageSnapshot = {
 }
 
 type DashboardOverview = {
+  keys: number
+  projects: number
   apps: number
   mcps: number
   skills: number
@@ -204,6 +206,8 @@ function App() {
   const [hasPassword, setHasPassword] = useState<boolean | null>(null)
   const [projectLabelsByCredential, setProjectLabelsByCredential] = useState<Record<string, string>>({})
   const [dashboardOverview, setDashboardOverview] = useState<DashboardOverview>({
+    keys: 0,
+    projects: 0,
     apps: 0,
     mcps: 0,
     skills: 0,
@@ -338,13 +342,15 @@ function App() {
         (item) => item.app_type !== 'openai-compatible' && item.app_type !== 'claude'
       ).length
       setDashboardOverview({
+        keys: credentials.length,
+        projects: projects.length,
         apps: appCount,
         mcps: mcps.length,
         skills: skills.length,
       })
     } catch (error) {
       console.error('Failed to load dashboard overview:', error)
-      setDashboardOverview({ apps: 0, mcps: 0, skills: 0 })
+      setDashboardOverview({ keys: 0, projects: 0, apps: 0, mcps: 0, skills: 0 })
     }
   }
 
@@ -365,6 +371,14 @@ function App() {
       loadDashboardOverview()
     }
   }, [isAuthenticated, masterPassword])
+
+  useEffect(() => {
+    setDashboardOverview((prev) => ({
+      ...prev,
+      keys: credentials.length,
+      projects: projects.length,
+    }))
+  }, [credentials.length, projects.length])
 
   const providerContextById = useMemo(
     () => buildProviderContextMap(credentials, projectLabelsByCredential, projects),
@@ -808,37 +822,17 @@ function App() {
 
         <main className="content-main">
           {view === 'dashboard' ? (
-            <div className="dashboard-view">
-              <section className="dashboard-overview">
-                <div className="dashboard-overview-header">
-                  <h2>Overview</h2>
-                </div>
-                <div className="dashboard-overview-grid">
-                  <button className="dashboard-overview-card" onClick={() => setView('keys')}>
-                    <span>密钥</span>
-                    <strong>{credentials.length}</strong>
-                  </button>
-                  <button className="dashboard-overview-card" onClick={() => setView('projects')}>
-                    <span>项目</span>
-                    <strong>{projects.length}</strong>
-                  </button>
-                  <button className="dashboard-overview-card" onClick={() => setView('mcp')}>
-                    <span>MCP</span>
-                    <strong>{dashboardOverview.mcps}</strong>
-                  </button>
-                  <button className="dashboard-overview-card" onClick={() => setView('skills')}>
-                    <span>Skills</span>
-                    <strong>{dashboardOverview.skills}</strong>
-                  </button>
-                  <button className="dashboard-overview-card" onClick={() => setView('apps')}>
-                    <span>应用</span>
-                    <strong>{dashboardOverview.apps}</strong>
-                  </button>
-                </div>
-              </section>
-
-              <UsageDashboard providerContextById={providerContextById} />
-            </div>
+            <UsageDashboard
+              providerContextById={providerContextById}
+              quickStats={[
+                { key: 'keys', label: '密钥', value: dashboardOverview.keys, view: 'keys' },
+                { key: 'projects', label: '项目', value: dashboardOverview.projects, view: 'projects' },
+                { key: 'mcp', label: 'MCP', value: dashboardOverview.mcps, view: 'mcp' },
+                { key: 'skills', label: '技能', value: dashboardOverview.skills, view: 'skills' },
+                { key: 'apps', label: '应用', value: dashboardOverview.apps, view: 'apps' },
+              ]}
+              onNavigate={(nextView) => setView(nextView)}
+            />
           ) : view === 'keys' ? (
             <div className="keys-view">
               <section className="panel">

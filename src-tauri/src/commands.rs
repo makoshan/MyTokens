@@ -1,7 +1,7 @@
 use crate::{
     usage, AppRoute, AppState, Credential, ExternalLibraryMcp, ExternalLibrarySkill,
-    GlobalSettingsPayload, IntegrationConfigSnapshot, OpencodeConfigSnapshot, Project,
-    PromptTemplate, ProviderConfig,
+    GatewayAccessCredentials, GatewayPolicySettings, GatewayRequestLog, GlobalSettingsPayload,
+    IntegrationConfigSnapshot, OpencodeConfigSnapshot, Project, PromptTemplate, ProviderConfig,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -497,6 +497,60 @@ pub fn set_global_service_port(
 }
 
 #[tauri::command]
+pub fn get_gateway_policy_settings(
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<GatewayPolicySettings, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.get_gateway_policy_settings()
+}
+
+#[tauri::command]
+pub fn set_gateway_circuit_breaker(
+    enabled: bool,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.set_gateway_circuit_breaker(enabled)?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn set_gateway_daily_budget(
+    daily_budget_usd: Option<f64>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.set_gateway_daily_budget(daily_budget_usd)?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn get_gateway_request_logs(
+    limit: Option<i64>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<GatewayRequestLog>, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    let limit = limit.unwrap_or(100).clamp(1, 500);
+    vault.get_gateway_request_logs(limit)
+}
+
+#[tauri::command]
 pub fn get_app_routes(
     master_password: String,
     state: State<'_, AppState>,
@@ -521,6 +575,19 @@ pub fn set_app_route(
         return Err("Invalid master password".to_string());
     }
     vault.set_app_route(&app_type, &provider, model)
+}
+
+#[tauri::command]
+pub fn detect_app_route_from_live_config(
+    app_type: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Option<AppRoute>, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.detect_app_route_from_live_config(&app_type)
 }
 
 #[tauri::command]
@@ -597,6 +664,19 @@ pub fn get_claude_tool_manager_skills(
         return Err("Invalid master password".to_string());
     }
     vault.get_claude_tool_manager_skills()
+}
+
+#[tauri::command]
+pub fn get_gateway_access_credentials(
+    app_type: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<GatewayAccessCredentials, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.get_gateway_access_credentials(&app_type)
 }
 
 #[tauri::command]
@@ -927,6 +1007,13 @@ fn detect_provider(var_name: &str, value: &str) -> Option<&'static str> {
     if name_lower.contains("openclaw") {
         return Some("openclaw");
     }
+    if name_lower.contains("ampcode")
+        || name_lower == "amp_api_key"
+        || name_lower == "amp_cli_path"
+        || name_lower.starts_with("amp_")
+    {
+        return Some("amp");
+    }
 
     if value_lower.starts_with("sk-") {
         return Some("openai");
@@ -957,6 +1044,7 @@ fn provider_label(provider: &str) -> &'static str {
         "kimi" => "Kimi",
         "opencode" => "OpenCode",
         "openclaw" => "OpenClaw",
+        "amp" => "Amp",
         _ => "Provider",
     }
 }

@@ -34,6 +34,7 @@ const PROVIDER_CATEGORIES: Record<string, ProviderCategory> = {
   cursor: 'model',
   opencode: 'model',
   openclaw: 'model',
+  amp: 'model',
   deepl: 'translation',
   'google-translate': 'translation',
   tavily: 'search',
@@ -75,6 +76,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   cursor: 'Cursor',
   opencode: 'OpenCode',
   openclaw: 'OpenClaw',
+  amp: 'Amp',
   other: 'Other',
 }
 
@@ -109,6 +111,7 @@ const PROVIDER_COLORS: Record<string, string> = {
   cursor: '#2563eb',
   opencode: '#0f766e',
   openclaw: '#b45309',
+  amp: '#f34e3f',
   other: '#6b7280',
 }
 

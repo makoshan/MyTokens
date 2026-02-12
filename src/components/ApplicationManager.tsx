@@ -22,8 +22,22 @@ interface IntegrationConfigSnapshot {
   config: unknown
 }
 
+interface GatewayAccessCredentials {
+  app_type: string
+  base_url: string
+  api_key: string
+  provider: string
+  model?: string | null
+}
+
 interface AppConfigDraft {
   other: string
+}
+
+interface QuickProviderPreset {
+  provider: string
+  label: string
+  model?: string
 }
 
 interface AppEntryDraft {
@@ -44,10 +58,42 @@ const APP_MODEL_HINTS: Record<string, string[]> = {
   'claude-code': ['claude-sonnet-4-20250514', 'claude-3-5-sonnet'],
 }
 
+const APP_QUICK_PROVIDER_PRESETS: Record<string, QuickProviderPreset[]> = {
+  'claude-code': [
+    { provider: 'anthropic', label: 'Claude Official', model: 'claude-sonnet-4-20250514' },
+    { provider: 'deepseek', label: 'DeepSeek', model: 'deepseek-chat' },
+    { provider: 'glm', label: 'Zhipu GLM', model: 'glm-4.7' },
+    { provider: 'kimi', label: 'Kimi', model: 'kimi-k2-0905-preview' },
+  ],
+  codex: [
+    { provider: 'openai', label: 'OpenAI Official', model: 'gpt-5' },
+    { provider: 'openrouter', label: 'OpenRouter', model: 'openrouter/auto' },
+    { provider: 'deepseek', label: 'DeepSeek', model: 'deepseek-chat' },
+    { provider: 'qwen', label: 'Qwen', model: 'qwen3-max' },
+  ],
+  opencode: [
+    { provider: 'openai', label: 'OpenAI Official', model: 'gpt-5' },
+    { provider: 'openrouter', label: 'OpenRouter', model: 'openrouter/auto' },
+    { provider: 'deepseek', label: 'DeepSeek', model: 'deepseek-chat' },
+    { provider: 'kimi', label: 'Kimi', model: 'kimi-k2-0905-preview' },
+  ],
+  openclaw: [
+    { provider: 'openai', label: 'OpenAI Official', model: 'gpt-5' },
+    { provider: 'openrouter', label: 'OpenRouter', model: 'openrouter/auto' },
+    { provider: 'deepseek', label: 'DeepSeek', model: 'deepseek-chat' },
+    { provider: 'glm', label: 'Zhipu GLM', model: 'glm-4.7' },
+  ],
+}
+
 const APP_LABELS: Record<string, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
   gemini: 'Gemini',
+  github: 'GitHub Copilot',
+  antigravity: 'Antigravity',
+  'z.ai': 'Z.ai',
+  amp: 'Amp',
+  aws: 'AWS Bedrock',
   cursor: 'Cursor',
   opencode: 'OpenCode',
   openclaw: 'OpenClaw',
@@ -146,6 +192,11 @@ function isAppVisible(appType: string): boolean {
 function fallbackProvider(appType: string): string {
   if (appType === 'claude-code') return 'anthropic'
   if (appType === 'gemini') return 'gemini'
+  if (appType === 'github') return 'github-copilot'
+  if (appType === 'antigravity') return 'antigravity'
+  if (appType === 'z.ai') return 'zai'
+  if (appType === 'amp') return 'amp'
+  if (appType === 'aws') return 'bedrock'
   return 'openai'
 }
 
@@ -176,6 +227,7 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
   const [appSkillEntries, setAppSkillEntries] = useState<Record<string, AppEntryDraft[]>>({})
   const [appSkillKeys, setAppSkillKeys] = useState<Record<string, 'skill' | 'skills'>>({})
   const [appTabByType, setAppTabByType] = useState<Record<string, AppConfigTab>>({})
+  const [gatewayAccessByApp, setGatewayAccessByApp] = useState<Record<string, GatewayAccessCredentials>>({})
 
   const providerSelectGroups = useMemo(() => buildProviderSelectGroups(providers), [providers])
   const providerValueSet = useMemo(() => new Set(providers.map((item) => item.provider)), [providers])
@@ -266,6 +318,29 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
         .map((item) => item.app_type)
         .filter((appType) => MANAGED_CONFIG_APPS.has(appType))
       await loadManagedConfigs(managedTypes)
+
+      const gatewayApps = ['claude-code', 'codex'].filter((appType) =>
+        visibleIntegrations.some((item) => item.app_type === appType)
+      )
+      const gatewayResults = await Promise.all(
+        gatewayApps.map(async (appType) => {
+          try {
+            const creds = await invoke<GatewayAccessCredentials>('get_gateway_access_credentials', {
+              appType,
+              masterPassword,
+            })
+            return [appType, creds] as const
+          } catch {
+            return null
+          }
+        })
+      )
+      const gatewayMap: Record<string, GatewayAccessCredentials> = {}
+      gatewayResults.forEach((item) => {
+        if (!item) return
+        gatewayMap[item[0]] = item[1]
+      })
+      setGatewayAccessByApp(gatewayMap)
     } catch (err) {
       console.error(err)
       setError('加载应用配置失败')
@@ -395,13 +470,17 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
       alert('请选择一个提供商')
       return
     }
+    await saveRouteByDraft(appType, draft.provider, draft.model)
+  }
+
+  const saveRouteByDraft = async (appType: string, provider: string, modelDraft: string) => {
     setBusyKey(`route:${appType}`)
     setNotice(null)
     try {
       const saved = await invoke<AppRoute>('set_app_route', {
         appType,
-        provider: draft.provider,
-        model: draft.model.trim() ? draft.model.trim() : null,
+        provider,
+        model: modelDraft.trim() ? modelDraft.trim() : null,
         masterPassword,
       })
       setRoutes((previous) => {
@@ -410,6 +489,13 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
         next.sort((a, b) => appLabel(a.app_type).localeCompare(appLabel(b.app_type)))
         return next
       })
+      setDrafts((previous) => ({
+        ...previous,
+        [appType]: {
+          provider,
+          model: modelDraft,
+        },
+      }))
       if (appType === 'claude-code') setNotice('已保存并同步 Claude Code 配置')
       else if (appType === 'opencode') setNotice('已保存并同步 OpenCode 配置')
       else if (appType === 'openclaw') setNotice('已保存并同步 OpenClaw 配置')
@@ -419,6 +505,49 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
       console.error(err)
       setNotice(null)
       alert(`保存应用路由失败: ${String(err)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const applyQuickProviderPreset = async (appType: string, preset: QuickProviderPreset) => {
+    const available = providers.some((item) => item.provider === preset.provider)
+    if (!available) {
+      alert(`未找到 ${preset.label}，请先在“提供商”页创建 ${preset.provider}`)
+      return
+    }
+    const model = preset.model || drafts[appType]?.model || ''
+    await saveRouteByDraft(appType, preset.provider, model)
+  }
+
+  const importRouteFromLive = async (appType: string) => {
+    setBusyKey(`route-import:${appType}`)
+    setNotice(null)
+    try {
+      const detected = await invoke<AppRoute | null>('detect_app_route_from_live_config', {
+        appType,
+        masterPassword,
+      })
+      if (!detected) {
+        setNotice(`${appLabel(appType)} 未检测到可导入的本地供应商路由`)
+        return
+      }
+      setDrafts((previous) => ({
+        ...previous,
+        [appType]: {
+          provider: detected.provider,
+          model: detected.model || '',
+        },
+      }))
+      setNotice(
+        `${appLabel(appType)} 已从本地配置导入: ${getProviderDisplayName(detected.provider)}${
+          detected.model ? ` · ${detected.model}` : ''
+        }（点击“保存路由”生效）`
+      )
+    } catch (err) {
+      console.error(err)
+      setNotice(null)
+      alert(`导入本地配置失败: ${String(err)}`)
     } finally {
       setBusyKey(null)
     }
@@ -466,8 +595,10 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
             draft.model,
             currentRoute?.model || '',
           ]).slice(0, 10)
+          const quickProviderPresets = APP_QUICK_PROVIDER_PRESETS[appType] || []
 
           const saving = busyKey === `route:${appType}`
+          const importing = busyKey === `route-import:${appType}`
           const toggling = busyKey === `integration:${appType}`
           const isManaged = MANAGED_CONFIG_APPS.has(appType)
           const activeTab: AppConfigTab = appTabByType[appType] || 'model'
@@ -541,6 +672,12 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
 
               {(!isManaged || activeTab === 'model') && (
                 <>
+                  {(appType === 'claude-code' || appType === 'codex') && gatewayAccessByApp[appType] ? (
+                    <div className="app-manager-notice app-manager-gateway-notice">
+                      Gateway API: <code>{gatewayAccessByApp[appType].base_url}</code> · Key:{' '}
+                      <code>{gatewayAccessByApp[appType].api_key}</code>
+                    </div>
+                  ) : null}
                   <div className="app-manager-controls">
                     <div className="app-manager-field">
                       <label>提供商</label>
@@ -629,7 +766,39 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
                     </div>
                   </div>
 
+                  {quickProviderPresets.length > 0 ? (
+                    <div className="app-manager-preset-box">
+                      <div className="app-manager-preset-title">快捷供应商导入（参考 CC Switch）</div>
+                      <div className="app-manager-preset-list">
+                        {quickProviderPresets.map((preset) => {
+                          const isActiveProvider = draft.provider === preset.provider
+                          const isApplying = busyKey === `route:${appType}`
+                          return (
+                            <button
+                              key={`${appType}:${preset.provider}`}
+                              type="button"
+                              className={`app-manager-preset-chip ${isActiveProvider ? 'active' : ''}`}
+                              disabled={isApplying}
+                              onClick={() => applyQuickProviderPreset(appType, preset)}
+                              title={preset.model ? `默认模型: ${preset.model}` : undefined}
+                            >
+                              {preset.label}
+                              {preset.model ? <span>{preset.model}</span> : null}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+
                   <div className="app-manager-actions">
+                    <button
+                      className="btn btn-secondary"
+                      disabled={importing || saving}
+                      onClick={() => importRouteFromLive(appType)}
+                    >
+                      {importing ? '导入中...' : '从本地配置导入'}
+                    </button>
                     <button
                       className={`btn ${integration.enabled ? 'btn-secondary' : 'btn-primary'}`}
                       disabled={toggling}

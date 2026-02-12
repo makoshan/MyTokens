@@ -2,11 +2,17 @@ use crate::{
     provider_defaults, secret_store::Secret, secret_store::SecretManager,
     secret_store::SecretMetadata, secret_store::SecretStoreConfig, usage::CostUsage,
     usage::UsageQuota, usage::UsageSnapshot, AppIntegration, AppRoute, Credential,
-    ExternalLibraryMcp, ExternalLibrarySkill, GlobalSettingsPayload, IntegrationConfigSnapshot,
-    OpencodeConfigSnapshot, PromptTemplate, ProviderAppBinding, ProviderConfig, ProviderEndpoint,
-    ProviderEnvVar, ProviderModel, ServiceConfig,
+    ExternalLibraryMcp, ExternalLibrarySkill, GatewayAccessCredentials, GatewayPolicySettings,
+    GatewayRequestLog, GlobalSettingsPayload, IntegrationConfigSnapshot, OpencodeConfigSnapshot,
+    PromptTemplate, ProviderAppBinding, ProviderConfig, ProviderEndpoint, ProviderEnvVar,
+    ProviderModel, ServiceConfig,
+};
+use argon2::{
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
 };
 use chrono::Local;
+use rand::rngs::OsRng;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -27,6 +33,28 @@ pub struct Vault {
     provider_env_vars: HashMap<String, Vec<ProviderEnvVar>>,
     provider_app_bindings: HashMap<String, Vec<ProviderAppBinding>>,
     secret_manager: SecretManager,
+}
+
+#[derive(Debug, Clone)]
+pub struct GatewayResolvedRoute {
+    pub app_type: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub upstream_api_key: String,
+    pub upstream_base_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GatewayRequestLogInput {
+    pub app_type: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub endpoint: String,
+    pub status_code: i64,
+    pub latency_ms: i64,
+    pub blocked_reason: Option<String>,
+    pub error_code: Option<String>,
+    pub estimated_cost_usd: Option<f64>,
 }
 
 impl Vault {
@@ -71,7 +99,7 @@ impl Vault {
         if self.master_password_hash.is_some() {
             return Err("Master password already set".to_string());
         }
-        let hash = format!("{:x}", md5::compute(password.as_bytes()));
+        let hash = Self::hash_master_password(password)?;
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('master_password_hash', ?1)",
@@ -84,8 +112,15 @@ impl Vault {
 
     pub fn authenticate(&self, password: &str) -> bool {
         if let Some(ref hash) = self.master_password_hash {
-            let input_hash = format!("{:x}", md5::compute(password.as_bytes()));
-            if hash == &input_hash {
+            if Self::verify_master_password(hash, password) {
+                if Self::is_legacy_md5_hash(hash) {
+                    if let Ok(upgraded_hash) = Self::hash_master_password(password) {
+                        let _ = self.conn.execute(
+                            "INSERT OR REPLACE INTO meta (key, value) VALUES ('master_password_hash', ?1)",
+                            params![upgraded_hash],
+                        );
+                    }
+                }
                 let _ = self.secret_manager.unlock_all(password);
                 true
             } else {
@@ -98,6 +133,33 @@ impl Vault {
 
     pub fn is_password_set(&self) -> bool {
         self.master_password_hash.is_some()
+    }
+
+    fn hash_master_password(password: &str) -> Result<String, String> {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map(|result| result.to_string())
+            .map_err(|e| format!("Failed to hash master password: {}", e))
+    }
+
+    fn verify_master_password(stored_hash: &str, password: &str) -> bool {
+        if stored_hash.starts_with("$argon2") {
+            let parsed_hash = match PasswordHash::new(stored_hash) {
+                Ok(value) => value,
+                Err(_) => return false,
+            };
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed_hash)
+                .is_ok()
+        } else {
+            let input_hash = format!("{:x}", md5::compute(password.as_bytes()));
+            stored_hash == input_hash
+        }
+    }
+
+    fn is_legacy_md5_hash(stored_hash: &str) -> bool {
+        stored_hash.len() == 32 && stored_hash.chars().all(|c| c.is_ascii_hexdigit())
     }
 
     pub fn add_credential(
@@ -737,6 +799,19 @@ impl Vault {
                 port INTEGER,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS gateway_request_logs (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT,
+                endpoint TEXT NOT NULL,
+                status_code INTEGER NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                blocked_reason TEXT,
+                error_code TEXT,
+                estimated_cost_usd REAL
+            );
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -752,7 +827,9 @@ impl Vault {
             CREATE INDEX IF NOT EXISTS idx_provider_apps_provider ON provider_apps(provider);
             CREATE INDEX IF NOT EXISTS idx_usage_snapshots_provider ON usage_snapshots(provider_id);
             CREATE INDEX IF NOT EXISTS idx_app_integrations_app_type ON app_integrations(app_type);
-            CREATE INDEX IF NOT EXISTS idx_projects_credential_id ON projects(credential_id);",
+            CREATE INDEX IF NOT EXISTS idx_projects_credential_id ON projects(credential_id);
+            CREATE INDEX IF NOT EXISTS idx_gateway_logs_created_at ON gateway_request_logs(created_at);
+            CREATE INDEX IF NOT EXISTS idx_gateway_logs_app_type ON gateway_request_logs(app_type);",
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -784,6 +861,9 @@ impl Vault {
             "claude-code",
             "opencode",
             "openclaw",
+            "gemini",
+            "kimi",
+            "amp",
         ];
         for provider in providers {
             let _ = self.conn.execute(
@@ -1049,6 +1129,14 @@ impl Vault {
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('log_level', 'info')",
             [],
         );
+        let _ = self.conn.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('gateway_circuit_breaker', 'false')",
+            [],
+        );
+        let _ = self.conn.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('gateway_daily_budget_usd', '')",
+            [],
+        );
 
         for (service_name, enabled, auto_start, port) in [
             ("gateway", true, false, Some(8888_i64)),
@@ -1071,6 +1159,11 @@ impl Vault {
             ("claude-code", false),
             ("codex", false),
             ("gemini", false),
+            ("github", false),
+            ("antigravity", false),
+            ("z.ai", false),
+            ("amp", false),
+            ("aws", false),
             ("cursor", false),
             ("opencode", false),
             ("openclaw", false),
@@ -1165,6 +1258,11 @@ impl Vault {
         match app_type {
             "claude" | "claude-code" => "anthropic",
             "gemini" => "gemini",
+            "github" => "github-copilot",
+            "antigravity" => "antigravity",
+            "z.ai" => "zai",
+            "amp" => "amp",
+            "aws" => "bedrock",
             "codex" | "cursor" | "opencode" | "openclaw" => "openai",
             _ => "openai",
         }
@@ -1176,6 +1274,11 @@ impl Vault {
             "claude-code",
             "codex",
             "gemini",
+            "github",
+            "antigravity",
+            "z.ai",
+            "amp",
+            "aws",
             "cursor",
             "opencode",
             "openclaw",
@@ -1502,9 +1605,558 @@ impl Vault {
         Ok((api_key, base_url))
     }
 
-    fn apply_claude_code_route(&self, provider: &str, model: Option<&str>) -> Result<(), String> {
+    fn gateway_port(&self) -> u16 {
+        self.get_service_runtime("gateway")
+            .ok()
+            .flatten()
+            .and_then(|(enabled, port)| {
+                if !enabled {
+                    return None;
+                }
+                port
+            })
+            .and_then(|value| u16::try_from(value).ok())
+            .unwrap_or(8888)
+    }
+
+    fn gateway_daily_budget_value(&self) -> Result<Option<f64>, String> {
+        let Some(raw) = self.meta_get("gateway_daily_budget_usd")? else {
+            return Ok(None);
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let value = trimmed
+            .parse::<f64>()
+            .map_err(|_| "Invalid gateway_daily_budget_usd value".to_string())?;
+        if value <= 0.0 {
+            return Ok(None);
+        }
+        Ok(Some(value))
+    }
+
+    fn gateway_circuit_breaker_enabled(&self) -> Result<bool, String> {
+        let value = self
+            .meta_get("gateway_circuit_breaker")?
+            .unwrap_or_else(|| "false".to_string());
+        let normalized = value.trim().to_ascii_lowercase();
+        Ok(matches!(normalized.as_str(), "1" | "true" | "yes" | "on"))
+    }
+
+    fn gateway_today_metrics(&self) -> Result<(i64, f64), String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT COUNT(*), COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0)
+                 FROM gateway_request_logs
+                 WHERE substr(created_at, 1, 10) = date('now', 'localtime')",
+            )
+            .map_err(|e| e.to_string())?;
+        let (count, cost) = stmt
+            .query_row([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)))
+            .map_err(|e| e.to_string())?;
+        Ok((count, cost))
+    }
+
+    pub fn get_gateway_policy_settings(&self) -> Result<GatewayPolicySettings, String> {
+        let circuit_breaker_enabled = self.gateway_circuit_breaker_enabled()?;
+        let daily_budget_usd = self.gateway_daily_budget_value()?;
+        let (today_request_count, today_cost_usd) = self.gateway_today_metrics()?;
+        Ok(GatewayPolicySettings {
+            circuit_breaker_enabled,
+            daily_budget_usd,
+            today_request_count,
+            today_cost_usd,
+        })
+    }
+
+    pub fn set_gateway_circuit_breaker(&self, enabled: bool) -> Result<(), String> {
+        self.meta_set(
+            "gateway_circuit_breaker",
+            if enabled { "true" } else { "false" },
+        )
+    }
+
+    pub fn set_gateway_daily_budget(&self, daily_budget_usd: Option<f64>) -> Result<(), String> {
+        let normalized = daily_budget_usd
+            .and_then(|value| if value > 0.0 { Some(value) } else { None })
+            .map(|value| format!("{:.6}", value))
+            .unwrap_or_default();
+        self.meta_set("gateway_daily_budget_usd", &normalized)
+    }
+
+    pub fn check_gateway_policy_block_reason(&self) -> Result<Option<String>, String> {
+        if self.gateway_circuit_breaker_enabled()? {
+            return Ok(Some("global_circuit_breaker".to_string()));
+        }
+        if let Some(budget) = self.gateway_daily_budget_value()? {
+            let (_, today_cost) = self.gateway_today_metrics()?;
+            if today_cost >= budget {
+                return Ok(Some("daily_budget_exceeded".to_string()));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn append_gateway_request_log(&self, item: GatewayRequestLogInput) -> Result<(), String> {
+        let now = Local::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO gateway_request_logs (
+                    id, created_at, app_type, provider, model, endpoint,
+                    status_code, latency_ms, blocked_reason, error_code, estimated_cost_usd
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    now,
+                    item.app_type,
+                    item.provider,
+                    item.model,
+                    item.endpoint,
+                    item.status_code,
+                    item.latency_ms,
+                    item.blocked_reason,
+                    item.error_code,
+                    item.estimated_cost_usd,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_gateway_request_logs(&self, limit: i64) -> Result<Vec<GatewayRequestLog>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, created_at, app_type, provider, model, endpoint,
+                        status_code, latency_ms, blocked_reason, error_code, estimated_cost_usd
+                 FROM gateway_request_logs
+                 ORDER BY created_at DESC
+                 LIMIT ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok(GatewayRequestLog {
+                    id: row.get(0)?,
+                    created_at: row.get(1)?,
+                    app_type: row.get(2)?,
+                    provider: row.get(3)?,
+                    model: row.get(4)?,
+                    endpoint: row.get(5)?,
+                    status_code: row.get(6)?,
+                    latency_ms: row.get(7)?,
+                    blocked_reason: row.get(8)?,
+                    error_code: row.get(9)?,
+                    estimated_cost_usd: row.get(10)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(result)
+    }
+
+    fn gateway_base_url(&self) -> String {
+        format!("http://127.0.0.1:{}/v1", self.gateway_port())
+    }
+
+    fn gateway_token_key(app_type: &str) -> String {
+        format!("gateway_token:{}", app_type)
+    }
+
+    fn get_or_create_gateway_token(&self, app_type: &str) -> Result<String, String> {
+        let key = Self::gateway_token_key(app_type);
+        if let Some(existing) = self.meta_get(&key)? {
+            if !existing.trim().is_empty() {
+                return Ok(existing);
+            }
+        }
+
+        let token = format!(
+            "sk-mykey-{}-{}",
+            Self::normalized_provider_key(app_type),
+            Uuid::new_v4().simple()
+        );
+        self.meta_set(&key, &token)?;
+        Ok(token)
+    }
+
+    fn get_app_route_by_type(&self, app_type: &str) -> Result<Option<AppRoute>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT app_type, provider, model, updated_at FROM app_routes WHERE app_type = ?1 LIMIT 1",
+            )
+            .map_err(|e| e.to_string())?;
+        let row = stmt
+            .query_row(params![app_type], |row| {
+                Ok(AppRoute {
+                    app_type: row.get(0)?,
+                    provider: row.get(1)?,
+                    model: row.get(2)?,
+                    updated_at: row.get(3)?,
+                })
+            })
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(row)
+    }
+
+    fn canonical_url_like(raw: &str) -> String {
+        let mut value = raw.trim().to_ascii_lowercase();
+        if let Some(stripped) = value.strip_prefix("https://") {
+            value = stripped.to_string();
+        } else if let Some(stripped) = value.strip_prefix("http://") {
+            value = stripped.to_string();
+        }
+        value.trim_end_matches('/').to_string()
+    }
+
+    fn infer_provider_by_base_url(&self, base_url: &str) -> Option<String> {
+        let target = Self::canonical_url_like(base_url);
+        if target.is_empty() {
+            return None;
+        }
+
+        let mut exact_match: Option<String> = None;
+        for (provider_id, config) in &self.providers {
+            let mut candidates = Vec::new();
+            if !config.base_url.trim().is_empty() {
+                candidates.push(config.base_url.as_str());
+            }
+            for endpoint in &config.endpoints {
+                if !endpoint.base_url.trim().is_empty() {
+                    candidates.push(endpoint.base_url.as_str());
+                }
+            }
+
+            for candidate in candidates {
+                let normalized = Self::canonical_url_like(candidate);
+                if normalized.is_empty() {
+                    continue;
+                }
+                if target == normalized {
+                    return Some(provider_id.clone());
+                }
+                if exact_match.is_none()
+                    && (target.starts_with(&normalized)
+                        || normalized.starts_with(&target)
+                        || target.contains(&normalized))
+                {
+                    exact_match = Some(provider_id.clone());
+                }
+            }
+        }
+
+        exact_match
+    }
+
+    fn infer_provider_by_model_key(&self, key: &str) -> Option<String> {
+        let key = key.trim();
+        if key.is_empty() {
+            return None;
+        }
+        if self.providers.contains_key(key) {
+            return Some(key.to_string());
+        }
+        let normalized = key.strip_prefix("mykey-").unwrap_or(key).trim().to_string();
+        if normalized.is_empty() {
+            return None;
+        }
+        self.providers.keys().find_map(|provider| {
+            if Self::normalized_provider_key(provider) == normalized {
+                Some(provider.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn detect_route_from_claude_config(&self, config: &Value) -> Option<(String, Option<String>)> {
+        let root = config.as_object()?;
+        let env = root.get("env").and_then(|value| value.as_object());
+        let model = env
+            .and_then(|map| map.get("ANTHROPIC_MODEL"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                root.get("model")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            });
+
+        let base_url = env
+            .and_then(|map| map.get("ANTHROPIC_BASE_URL"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        if let Some(url) = base_url {
+            if url.contains("127.0.0.1") || url.contains("localhost") {
+                if let Ok(Some(existing)) = self.get_app_route_by_type("claude-code") {
+                    return Some((existing.provider, model));
+                }
+                return Some(("anthropic".to_string(), model));
+            }
+            if let Some(provider) = self.infer_provider_by_base_url(&url) {
+                return Some((provider, model));
+            }
+        }
+
+        if model.is_some() {
+            return Some(("anthropic".to_string(), model));
+        }
+        None
+    }
+
+    fn detect_route_from_codex_config(&self, config: &Value) -> Option<(String, Option<String>)> {
+        let root = config.as_object()?;
+        let model = root
+            .get("model")
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        let model_provider = root
+            .get("model_provider")
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        if let Some(provider_key) = model_provider.as_deref() {
+            if provider_key == "mykey" {
+                if let Ok(Some(existing)) = self.get_app_route_by_type("codex") {
+                    return Some((existing.provider, model));
+                }
+                return Some(("openai".to_string(), model));
+            }
+            if let Some(provider) = self.infer_provider_by_model_key(provider_key) {
+                return Some((provider, model));
+            }
+        }
+
+        let provider_from_base = root
+            .get("model_providers")
+            .and_then(|value| value.as_object())
+            .and_then(|providers| {
+                if let Some(selected) = model_provider.as_deref() {
+                    providers
+                        .get(selected)
+                        .and_then(|entry| entry.as_object())
+                        .and_then(|entry| entry.get("base_url"))
+                        .and_then(|value| value.as_str())
+                        .and_then(|url| self.infer_provider_by_base_url(url))
+                } else {
+                    providers.values().find_map(|entry| {
+                        entry
+                            .as_object()
+                            .and_then(|obj| obj.get("base_url"))
+                            .and_then(|value| value.as_str())
+                            .and_then(|url| self.infer_provider_by_base_url(url))
+                    })
+                }
+            });
+
+        if let Some(provider) = provider_from_base {
+            return Some((provider, model));
+        }
+
+        if model.is_some() {
+            return Some(("openai".to_string(), model));
+        }
+        None
+    }
+
+    fn detect_route_from_opencode_config(
+        &self,
+        config: &Value,
+        app_type: &str,
+    ) -> Option<(String, Option<String>)> {
+        let root = config.as_object()?;
+        let model_ref = root
+            .get("model")
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        let (provider_key, model) = if let Some(reference) = model_ref {
+            let mut parts = reference.splitn(2, '/');
+            let provider_key = parts.next().unwrap_or_default().trim().to_string();
+            let model = parts
+                .next()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            (Some(provider_key), model)
+        } else {
+            (None, None)
+        };
+
+        if let Some(key) = provider_key.as_deref() {
+            if let Some(provider) = self.infer_provider_by_model_key(key) {
+                return Some((provider, model));
+            }
+
+            if let Some(base_url_provider) = root
+                .get("provider")
+                .and_then(|value| value.as_object())
+                .and_then(|providers| providers.get(key))
+                .and_then(|value| value.as_object())
+                .and_then(|provider| provider.get("options"))
+                .and_then(|value| value.as_object())
+                .and_then(|options| options.get("baseURL").or_else(|| options.get("baseUrl")))
+                .and_then(|value| value.as_str())
+                .and_then(|url| self.infer_provider_by_base_url(url))
+            {
+                return Some((base_url_provider, model));
+            }
+        }
+
+        if let Ok(Some(existing)) = self.get_app_route_by_type(app_type) {
+            return Some((existing.provider, model.or(existing.model)));
+        }
+        None
+    }
+
+    fn detect_route_from_openclaw_config(
+        &self,
+        config: &Value,
+    ) -> Option<(String, Option<String>)> {
+        let root = config.as_object()?;
+        let model_ref = root
+            .get("agents")
+            .and_then(|value| value.as_object())
+            .and_then(|agents| agents.get("defaults"))
+            .and_then(|value| value.as_object())
+            .and_then(|defaults| defaults.get("model"))
+            .and_then(|value| value.as_object())
+            .and_then(|model| model.get("primary"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        let (provider_key, model) = if let Some(reference) = model_ref {
+            let mut parts = reference.splitn(2, '/');
+            let provider_key = parts.next().unwrap_or_default().trim().to_string();
+            let model = parts
+                .next()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            (Some(provider_key), model)
+        } else {
+            (None, None)
+        };
+
+        if let Some(key) = provider_key.as_deref() {
+            if let Some(provider) = self.infer_provider_by_model_key(key) {
+                return Some((provider, model));
+            }
+
+            if let Some(base_url_provider) = root
+                .get("models")
+                .and_then(|value| value.as_object())
+                .and_then(|models| models.get("providers"))
+                .and_then(|value| value.as_object())
+                .and_then(|providers| providers.get(key))
+                .and_then(|value| value.as_object())
+                .and_then(|provider| provider.get("baseUrl").or_else(|| provider.get("baseURL")))
+                .and_then(|value| value.as_str())
+                .and_then(|url| self.infer_provider_by_base_url(url))
+            {
+                return Some((base_url_provider, model));
+            }
+        }
+
+        if let Ok(Some(existing)) = self.get_app_route_by_type("openclaw") {
+            return Some((existing.provider, model.or(existing.model)));
+        }
+        None
+    }
+
+    pub fn detect_app_route_from_live_config(
+        &self,
+        app_type: &str,
+    ) -> Result<Option<AppRoute>, String> {
+        let app_type = app_type.trim();
+        if app_type.is_empty() {
+            return Err("App type cannot be empty".to_string());
+        }
+
+        let snapshot = self.get_integration_config_snapshot(app_type)?;
+        let detected = match app_type {
+            "claude" | "claude-code" => self.detect_route_from_claude_config(&snapshot.config),
+            "codex" => self.detect_route_from_codex_config(&snapshot.config),
+            "opencode" => self.detect_route_from_opencode_config(&snapshot.config, app_type),
+            "openclaw" => self.detect_route_from_openclaw_config(&snapshot.config),
+            _ => None,
+        };
+
+        Ok(detected.map(|(provider, model)| AppRoute {
+            app_type: app_type.to_string(),
+            provider,
+            model,
+            updated_at: Local::now().to_rfc3339(),
+        }))
+    }
+
+    pub fn get_gateway_access_credentials(
+        &self,
+        app_type: &str,
+    ) -> Result<GatewayAccessCredentials, String> {
+        let route = self
+            .get_app_route_by_type(app_type)?
+            .ok_or_else(|| format!("{} 尚未配置路由", app_type))?;
+        let token = self.get_or_create_gateway_token(app_type)?;
+        Ok(GatewayAccessCredentials {
+            app_type: route.app_type,
+            base_url: self.gateway_base_url(),
+            api_key: token,
+            provider: route.provider,
+            model: route.model,
+        })
+    }
+
+    pub fn resolve_gateway_route_by_token(
+        &self,
+        token: &str,
+    ) -> Result<Option<GatewayResolvedRoute>, String> {
+        let token = token.trim();
+        if token.is_empty() {
+            return Ok(None);
+        }
+
+        for app_type in ["claude-code", "codex"] {
+            let expected = self.get_or_create_gateway_token(app_type)?;
+            if expected != token {
+                continue;
+            }
+
+            let Some(route) = self.get_app_route_by_type(app_type)? else {
+                return Ok(None);
+            };
+            let (upstream_api_key, upstream_base_url) =
+                self.resolve_route_provider_auth(&route.provider)?;
+            return Ok(Some(GatewayResolvedRoute {
+                app_type: route.app_type,
+                provider: route.provider,
+                model: route.model,
+                upstream_api_key,
+                upstream_base_url,
+            }));
+        }
+
+        Ok(None)
+    }
+
+    fn apply_claude_code_route(&self, _provider: &str, model: Option<&str>) -> Result<(), String> {
         let settings_path = self.resolve_claude_settings_path()?;
-        let (api_key, base_url) = self.resolve_route_provider_auth(provider)?;
+        let gateway_token = self.get_or_create_gateway_token("claude-code")?;
+        let gateway_base_url = self.gateway_base_url();
 
         let mut settings = if settings_path.exists() {
             let raw = std::fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
@@ -1543,15 +2195,25 @@ impl Vault {
 
         env.insert(
             "ANTHROPIC_AUTH_TOKEN".to_string(),
-            Value::String(api_key.clone()),
+            Value::String(gateway_token.clone()),
         );
-        env.insert("ANTHROPIC_API_KEY".to_string(), Value::String(api_key));
+        env.insert(
+            "ANTHROPIC_API_KEY".to_string(),
+            Value::String(gateway_token.clone()),
+        );
+        env.insert(
+            "MYKEY_GATEWAY_KEY".to_string(),
+            Value::String(gateway_token),
+        );
+        env.insert(
+            "MYKEY_GATEWAY_BASE_URL".to_string(),
+            Value::String(gateway_base_url.clone()),
+        );
 
-        if let Some(url) = base_url {
-            env.insert("ANTHROPIC_BASE_URL".to_string(), Value::String(url));
-        } else {
-            env.remove("ANTHROPIC_BASE_URL");
-        }
+        env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            Value::String(gateway_base_url),
+        );
 
         let model = model
             .map(|value| value.trim())
@@ -1586,6 +2248,54 @@ impl Vault {
         let payload = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
         std::fs::write(&settings_path, payload).map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    fn apply_codex_route(&self, model: Option<&str>) -> Result<(), String> {
+        let config_path = self.resolve_integration_config_path("codex", "config.toml")?;
+        let gateway_token = self.get_or_create_gateway_token("codex")?;
+        let gateway_base_url = self.gateway_base_url();
+
+        let mut config = Self::read_json_like_or_default(&config_path)?;
+        let root = config
+            .as_object_mut()
+            .ok_or_else(|| format!("Codex 配置根节点必须是对象: {}", config_path.display()))?;
+
+        let selected_model = model
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("gpt-5");
+
+        root.insert(
+            "model".to_string(),
+            Value::String(selected_model.to_string()),
+        );
+        root.insert(
+            "model_provider".to_string(),
+            Value::String("mykey".to_string()),
+        );
+
+        let model_providers = Self::ensure_object_field(root, "model_providers", &config_path)?;
+        let mut provider_obj = Map::new();
+        provider_obj.insert(
+            "name".to_string(),
+            Value::String("MyKey Gateway".to_string()),
+        );
+        provider_obj.insert("base_url".to_string(), Value::String(gateway_base_url));
+        provider_obj.insert(
+            "wire_api".to_string(),
+            Value::String("responses".to_string()),
+        );
+
+        let mut headers = Map::new();
+        headers.insert(
+            "Authorization".to_string(),
+            Value::String(format!("Bearer {}", gateway_token)),
+        );
+        headers.insert("x-api-key".to_string(), Value::String(gateway_token));
+        provider_obj.insert("http_headers".to_string(), Value::Object(headers));
+
+        model_providers.insert("mykey".to_string(), Value::Object(provider_obj));
+        Self::write_json_config(&config_path, &config)
     }
 
     fn apply_opencode_route(&self, provider: &str, model: Option<&str>) -> Result<(), String> {
@@ -1755,6 +2465,9 @@ impl Vault {
         }
         if app_type == "openclaw" {
             self.apply_openclaw_route(provider, model.as_deref())?;
+        }
+        if app_type == "codex" {
+            self.apply_codex_route(model.as_deref())?;
         }
 
         self.conn
@@ -2184,6 +2897,24 @@ impl Vault {
                 home.join(".codex").join("auth.json"),
             ],
             "gemini" => vec![home.join(".gemini").join("settings.json")],
+            "github" => vec![
+                home.join(".config").join("github-copilot"),
+                home.join(".copilot"),
+            ],
+            "antigravity" => vec![
+                home.join(".config").join("antigravity"),
+                home.join(".antigravity"),
+            ],
+            "z.ai" => vec![
+                home.join(".claude").join("settings.json"),
+                home.join(".claude.json"),
+                home.join(".zai"),
+            ],
+            "amp" => vec![home.join(".config").join("amp"), home.join(".amp")],
+            "aws" => vec![
+                home.join(".aws").join("config"),
+                home.join(".aws").join("credentials"),
+            ],
             "cursor" => vec![home.join(".cursor")],
             "opencode" => vec![
                 home.join(".config").join("opencode").join("opencode.json"),
@@ -2207,6 +2938,11 @@ impl Vault {
             "claude-code" => home.join(".claude.json"),
             "codex" => home.join(".codex").join("config.toml"),
             "gemini" => home.join(".gemini").join("settings.json"),
+            "github" => home.join(".config").join("github-copilot"),
+            "antigravity" => home.join(".config").join("antigravity"),
+            "z.ai" => home.join(".claude.json"),
+            "amp" => home.join(".config").join("amp"),
+            "aws" => home.join(".aws").join("config"),
             "cursor" => home.join(".cursor"),
             "opencode" => home.join(".config").join("opencode").join("opencode.json"),
             "openclaw" => home.join(".openclaw").join("openclaw.json"),

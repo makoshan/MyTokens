@@ -26,3 +26,24 @@ export interface GlobalSettingsPayload {
   logs_path: string
   last_backup_at?: string | null
 }
+
+export interface GatewayPolicySettings {
+  circuit_breaker_enabled: boolean
+  daily_budget_usd?: number | null
+  today_request_count: number
+  today_cost_usd: number
+}
+
+export interface GatewayRequestLog {
+  id: string
+  created_at: string
+  app_type: string
+  provider: string
+  model?: string | null
+  endpoint: string
+  status_code: number
+  latency_ms: number
+  blocked_reason?: string | null
+  error_code?: string | null
+  estimated_cost_usd?: number | null
+}
