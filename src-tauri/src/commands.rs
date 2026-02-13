@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::str::FromStr;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use walkdir::WalkDir;
@@ -221,6 +221,9 @@ struct WranglerScanResult {
 
 const QUICK_RESULT_EVENT: &str = "quick_result_updated";
 const QUICK_RESULT_WINDOW_LABEL: &str = "quick-result";
+const QUICK_TRANSLATE_ATTEMPTS_PER_PROVIDER: usize = 2;
+const QUICK_SELECTION_POLL_INTERVAL_MS: u64 = 60;
+const QUICK_SELECTION_MAX_POLLS: usize = 6;
 const TRANSLATION_PROVIDERS: &[&str] = &[
     "google-translate",
     "google-translate-free",
@@ -229,6 +232,18 @@ const TRANSLATION_PROVIDERS: &[&str] = &[
     "microsoft-translate",
 ];
 const OCR_PROVIDERS: &[&str] = &["apple-ocr", "ocr-space", "paddleocr"];
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QuickProviderOption {
+    pub provider: String,
+    pub label: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QuickProviderOptions {
+    pub translate: Vec<QuickProviderOption>,
+    pub ocr: Vec<QuickProviderOption>,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct QuickHotkeyDiagnostics {
@@ -328,6 +343,8 @@ fn build_quick_error_result(
     error_code: &str,
     error_message: String,
     latency_ms: i64,
+    translate_provider: Option<String>,
+    ocr_provider: Option<String>,
 ) -> QuickActionResult {
     QuickActionResult {
         action_type: action_type.to_string(),
@@ -335,6 +352,8 @@ fn build_quick_error_result(
         ocr_text,
         result_text: None,
         provider: provider.to_string(),
+        translate_provider,
+        ocr_provider,
         latency_ms,
         status: "error".to_string(),
         error_code: Some(error_code.to_string()),
@@ -396,6 +415,183 @@ fn optional_string_arg(args: &serde_json::Map<String, Value>, key: &str) -> Opti
         .map(|v| v.trim())
         .filter(|v| !v.is_empty())
         .map(|v| v.to_string())
+}
+
+fn optional_i64_arg(args: &serde_json::Map<String, Value>, key: &str) -> Result<Option<i64>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| format!("Arg {} must be integer", key)),
+    }
+}
+
+fn optional_usize_arg(
+    args: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<usize>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(|v| v as usize)
+            .map(Some)
+            .ok_or_else(|| format!("Arg {} must be number", key)),
+    }
+}
+
+fn optional_string_vec_arg(
+    args: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<Vec<String>>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let list = value
+                .as_array()
+                .ok_or_else(|| format!("Arg {} must be an array", key))?;
+            let mut out = Vec::new();
+            for item in list {
+                let next = item
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| format!("Arg {} entries must be non-empty strings", key))?;
+                out.push(next.to_string());
+            }
+            Ok(Some(out))
+        }
+    }
+}
+
+fn run_python_code_internal(
+    code: &str,
+    timeout_ms: Option<i64>,
+    max_output_chars: Option<usize>,
+    python_args: Option<Vec<String>>,
+) -> Result<Value, String> {
+    let code = code.trim();
+    if code.is_empty() {
+        return Err("Python code is empty".to_string());
+    }
+    if code.chars().count() > 20_000 {
+        return Err("Python code exceeds max size".to_string());
+    }
+
+    if let Some(args) = &python_args {
+        if args.len() > 12 {
+            return Err("Too many Python args".to_string());
+        }
+        if args.iter().any(|item| item.len() > 300) {
+            return Err("One Python arg exceeds max length".to_string());
+        }
+    }
+
+    let python = if command_exists("python3") {
+        "python3"
+    } else if command_exists("python") {
+        "python"
+    } else {
+        return Err("No Python runtime found in PATH".to_string());
+    };
+
+    let timeout = (timeout_ms.unwrap_or(30_000)).clamp(500, 120_000) as u64;
+    let max_output_chars = (max_output_chars.unwrap_or(8_000)).clamp(256, 200_000);
+
+    let temp_script = std::env::temp_dir().join(format!("mykey-python-{}.py", uuid::Uuid::new_v4()));
+    fs::write(&temp_script, code).map_err(|e| format!("Failed to write Python script: {}", e))?;
+
+    let mut cmd_args = Vec::with_capacity(1 + python_args.as_ref().map_or(0, Vec::len));
+    cmd_args.push(temp_script.to_string_lossy().to_string());
+    if let Some(args) = python_args {
+        cmd_args.extend(args);
+    }
+
+    let started = Instant::now();
+    let output = match run_command_with_timeout(python, &cmd_args, Duration::from_millis(timeout)) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = fs::remove_file(&temp_script);
+            return Err(error);
+        }
+    };
+    let _ = fs::remove_file(&temp_script);
+
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let stdout_raw = String::from_utf8_lossy(&output.stdout).to_string();
+    let structured_output = extract_structured_output(&stdout_raw);
+    let stderr_raw = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = truncate_text(&stdout_raw, max_output_chars);
+    let stderr = truncate_text(&stderr_raw, max_output_chars);
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    if !output.status.success() {
+        let detail = if stderr.is_empty() {
+            if stdout.is_empty() {
+                format!("Python execution failed with code {}", exit_code)
+            } else {
+                format!("Python execution failed with code {}\nSTDOUT:\n{}", exit_code, stdout)
+            }
+        } else {
+            format!("Python execution failed with code {}\nSTDERR:\n{}", exit_code, stderr)
+        };
+        return Err(detail);
+    }
+
+    let mut result = json!({
+        "ok": true,
+        "python": python,
+        "exit_code": exit_code,
+        "duration_ms": duration_ms,
+        "stdout": stdout,
+        "stderr": stderr,
+    });
+
+    if let Some(value) = structured_output {
+        result["structured_output"] = value;
+    }
+
+    Ok(result)
+}
+
+fn extract_structured_output(raw: &str) -> Option<Value> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(raw) {
+        return Some(value);
+    }
+
+    let code_block_re = Regex::new(r"(?is)```(?:json)?\s*([\s\S]*?)\s*```").ok()?;
+    if let Some(caps) = code_block_re.captures(raw) {
+        let block = caps.get(1).map(|m| m.as_str().trim());
+        if let Some(value_str) = block {
+            if let Ok(value) = serde_json::from_str::<Value>(value_str) {
+                return Some(value);
+            }
+        }
+    }
+
+    None
+}
+
+#[tauri::command]
+pub fn run_python_code(
+    code: String,
+    timeout_ms: Option<i64>,
+    max_output_chars: Option<usize>,
+    python_args: Option<Vec<String>>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    run_python_code_internal(&code, timeout_ms, max_output_chars, python_args)
 }
 
 #[tauri::command]
@@ -464,6 +660,7 @@ pub async fn trigger_quick_translate(
     text: Option<String>,
     master_password: String,
     app: tauri::AppHandle,
+    preferred_translate_provider: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<QuickActionResult, String> {
     {
@@ -472,7 +669,7 @@ pub async fn trigger_quick_translate(
             return Err("Invalid master password".to_string());
         }
     }
-    let result = run_quick_translate_pipeline(app, text).await;
+    let result = run_quick_translate_pipeline(app, text, preferred_translate_provider).await;
     Ok(result)
 }
 
@@ -480,6 +677,8 @@ pub async fn trigger_quick_translate(
 pub async fn trigger_quick_ocr(
     master_password: String,
     app: tauri::AppHandle,
+    preferred_ocr_provider: Option<String>,
+    preferred_translate_provider: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<QuickActionResult, String> {
     {
@@ -488,13 +687,20 @@ pub async fn trigger_quick_ocr(
             return Err("Invalid master password".to_string());
         }
     }
-    let result = run_quick_ocr_pipeline(app).await;
+    let result = run_quick_ocr_pipeline(
+        app,
+        preferred_ocr_provider,
+        preferred_translate_provider,
+    )
+    .await;
     Ok(result)
 }
 
 #[tauri::command]
 pub async fn retry_last_quick_action(
     app: tauri::AppHandle,
+    preferred_translate_provider: Option<String>,
+    preferred_ocr_provider: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<QuickActionResult, String> {
     let snapshot = {
@@ -503,26 +709,45 @@ pub async fn retry_last_quick_action(
             runtime.last_action_type.clone(),
             runtime.last_source_text.clone(),
             runtime.last_ocr_text.clone(),
+            runtime.last_translate_provider.clone(),
+            runtime.last_ocr_provider.clone(),
         )
     };
 
-    let (action_type, last_source_text, last_ocr_text) = snapshot;
+    let (
+        action_type,
+        last_source_text,
+        _last_ocr_text,
+        last_translate_provider,
+        last_ocr_provider,
+    ) = snapshot;
+    let selected_translate_provider = preferred_translate_provider
+        .or(last_translate_provider)
+        .filter(|item| !item.trim().is_empty());
+    let selected_ocr_provider = preferred_ocr_provider
+        .or(last_ocr_provider)
+        .filter(|item| !item.trim().is_empty());
+
     let result = match action_type.as_deref() {
         Some("ocr_translate") => {
-            if let Some(ocr_text) = last_ocr_text.clone().filter(|text| !text.trim().is_empty()) {
-                run_quick_translate_core(app.clone(), "ocr_translate", ocr_text, last_ocr_text).await
-            } else {
-                run_quick_ocr_pipeline(app.clone()).await
-            }
+            run_quick_ocr_pipeline(app.clone(), selected_ocr_provider, selected_translate_provider).await
         }
         Some("translate") => {
             if let Some(source_text) = last_source_text.clone().filter(|text| !text.trim().is_empty()) {
-                run_quick_translate_core(app.clone(), "translate", source_text, None).await
+                run_quick_translate_core(
+                    app.clone(),
+                    "translate",
+                    source_text,
+                    None,
+                    selected_translate_provider,
+                    None,
+                )
+                .await
             } else {
-                run_quick_translate_pipeline(app.clone(), None).await
+                run_quick_translate_pipeline(app.clone(), None, None).await
             }
         }
-        _ => run_quick_translate_pipeline(app.clone(), None).await,
+        _ => run_quick_translate_pipeline(app.clone(), None, None).await,
     };
     Ok(result)
 }
@@ -539,6 +764,17 @@ pub fn hide_quick_result_panel(app: tauri::AppHandle) -> Result<bool, String> {
 pub fn get_last_quick_action_result(state: State<'_, AppState>) -> Result<Option<QuickActionResult>, String> {
     let runtime = state.quick_runtime.lock().map_err(|e| e.to_string())?;
     Ok(runtime.last_result.clone())
+}
+
+#[tauri::command]
+pub fn get_quick_action_auto_close_seconds(state: State<'_, AppState>) -> Result<i64, String> {
+    let settings = {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        vault
+            .get_quick_action_settings()
+            .unwrap_or_else(|_| default_quick_settings())
+    };
+    Ok(settings.auto_close_seconds.clamp(3, 120))
 }
 
 #[tauri::command]
@@ -604,6 +840,70 @@ pub fn get_quick_hotkey_diagnostics(
         last_register_at,
         last_register_error,
     })
+}
+
+#[tauri::command]
+pub fn get_quick_provider_options(state: State<'_, AppState>) -> Result<QuickProviderOptions, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    let providers = vault.get_providers();
+    let mut translate = Vec::new();
+    let mut ocr = Vec::new();
+
+    for provider in providers.iter() {
+        if !provider.is_active {
+            continue;
+        }
+        if TRANSLATION_PROVIDERS.contains(&provider.provider.as_str()) {
+        if !translate.iter().any(|item: &QuickProviderOption| item.provider == provider.provider) {
+                translate.push(QuickProviderOption {
+                    provider: provider.provider.clone(),
+                    label: provider.label.clone(),
+                });
+            }
+            continue;
+        }
+        if OCR_PROVIDERS.contains(&provider.provider.as_str()) {
+        if !ocr.iter().any(|item: &QuickProviderOption| item.provider == provider.provider) {
+                ocr.push(QuickProviderOption {
+                    provider: provider.provider.clone(),
+                    label: provider.label.clone(),
+                });
+            }
+        }
+    }
+
+    for provider_id in TRANSLATION_PROVIDERS {
+        if translate.iter().any(|item| item.provider == *provider_id) {
+            continue;
+        }
+        if let Some(provider) = vault.get_provider_config(provider_id) {
+            if provider.is_active {
+                translate.push(QuickProviderOption {
+                    provider: provider.provider.clone(),
+                    label: provider.label.clone(),
+                });
+            }
+        }
+    }
+
+    for provider_id in OCR_PROVIDERS {
+        if ocr.iter().any(|item| item.provider == *provider_id) {
+            continue;
+        }
+        if let Some(provider) = vault.get_provider_config(provider_id) {
+            if provider.is_active {
+                ocr.push(QuickProviderOption {
+                    provider: provider.provider.clone(),
+                    label: provider.label.clone(),
+                });
+            }
+        }
+    }
+
+    translate.sort_by(|a, b| a.label.cmp(&b.label));
+    ocr.sort_by(|a, b| a.label.cmp(&b.label));
+
+    Ok(QuickProviderOptions { translate, ocr })
 }
 
 #[tauri::command]
@@ -692,11 +992,11 @@ pub fn dispatch_quick_shortcut(app: &tauri::AppHandle, shortcut: &Shortcut) {
 
     if shortcut.id() == translate.id() {
         tauri::async_runtime::spawn(async move {
-            let _ = run_quick_translate_pipeline(app_handle, None).await;
+            let _ = run_quick_translate_pipeline(app_handle, None, None).await;
         });
     } else if shortcut.id() == ocr.id() {
         tauri::async_runtime::spawn(async move {
-            let _ = run_quick_ocr_pipeline(app_handle).await;
+            let _ = run_quick_ocr_pipeline(app_handle, None, None).await;
         });
     }
 }
@@ -769,6 +1069,7 @@ fn resolve_quick_settings(state: &AppState) -> QuickActionSettings {
 async fn run_quick_translate_pipeline(
     app: tauri::AppHandle,
     text: Option<String>,
+    preferred_translate_provider: Option<String>,
 ) -> QuickActionResult {
     let started = std::time::Instant::now();
     let source_text = match text
@@ -787,6 +1088,8 @@ async fn run_quick_translate_pipeline(
                     "capture_failed",
                     error,
                     started.elapsed().as_millis() as i64,
+                    None,
+                    None,
                 );
                 persist_and_emit_quick_result(&app, &result);
                 return result;
@@ -795,7 +1098,15 @@ async fn run_quick_translate_pipeline(
     };
 
     let result =
-        run_quick_translate_core(app.clone(), "translate", source_text, None).await;
+        run_quick_translate_core(
+            app.clone(),
+            "translate",
+            source_text,
+            None,
+            preferred_translate_provider,
+            None,
+        )
+        .await;
     result
 }
 
@@ -804,12 +1115,40 @@ async fn run_quick_translate_core(
     action_type: &str,
     source_text: String,
     ocr_text: Option<String>,
+    preferred_translate_provider: Option<String>,
+    ocr_provider: Option<String>,
 ) -> QuickActionResult {
     let started = std::time::Instant::now();
     let state = app.state::<AppState>();
     let settings = resolve_quick_settings(state.inner());
+    let (source_text, ocr_text) = if action_type == "ocr_translate" {
+        let normalized_source = sanitize_ocr_text(&source_text);
+        let normalized_ocr = ocr_text
+            .as_ref()
+            .map(|text| sanitize_ocr_text(text))
+            .filter(|text| !text.trim().is_empty());
+        (normalized_source, normalized_ocr)
+    } else {
+        (source_text, ocr_text)
+    };
 
-    let (translate_provider, translate_api_key) = {
+    if action_type == "ocr_translate" && source_text.trim().is_empty() {
+        let result = build_quick_error_result(
+            "ocr_translate",
+            "ocr",
+            None,
+            None,
+            "ocr_empty",
+            "OCR did not detect any usable text".to_string(),
+            started.elapsed().as_millis() as i64,
+            None,
+            ocr_provider.clone(),
+        );
+        persist_and_emit_quick_result(&app, &result);
+        return result;
+    }
+
+    let (translate_provider, translate_api_key, translate_provider_id) = {
         let vault = match state.vault.lock() {
             Ok(value) => value,
             Err(error) => {
@@ -821,14 +1160,20 @@ async fn run_quick_translate_core(
                     "vault_lock_failed",
                     error.to_string(),
                     started.elapsed().as_millis() as i64,
+                    None,
+                    ocr_provider.clone(),
                 );
                 persist_and_emit_quick_result(&app, &result);
                 return result;
             }
         };
+        let request_translate_provider = preferred_translate_provider
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| settings.default_translate_provider.clone());
         let provider = match resolve_quick_provider(
             &vault,
-            &settings.default_translate_provider,
+            &request_translate_provider,
             TRANSLATION_PROVIDERS,
             "google-translate",
         ) {
@@ -842,52 +1187,84 @@ async fn run_quick_translate_core(
                     "provider_not_found",
                     error,
                     started.elapsed().as_millis() as i64,
+                    None,
+                    ocr_provider.clone(),
                 );
                 persist_and_emit_quick_result(&app, &result);
                 return result;
             }
         };
         let auth = resolve_provider_auth(&vault, &provider);
-        (provider, auth)
+        (provider.clone(), auth, provider.provider.clone())
     };
 
-    let provider_id = translate_provider.provider.clone();
-    let translated = translate_text_with_provider(
+    let translated = match translate_text_with_provider(
         &translate_provider,
         &translate_api_key,
         &settings,
         &source_text,
     )
-    .await;
+    .await
+    {
+        Ok(result_text) => Ok((translate_provider_id.clone(), result_text)),
+        Err(error) => {
+            let (fallback, fallback_errors) = try_translate_fallbacks(
+                state.inner(),
+                &settings,
+                &source_text,
+                &translate_provider_id,
+                &TRANSLATION_PROVIDERS,
+            )
+            .await;
+            match fallback {
+                Some((provider_id, translated)) => Ok((provider_id, translated)),
+                None => {
+                    let mut detail = error;
+                    if !fallback_errors.is_empty() {
+                        detail = format!("{}; {}", detail, fallback_errors.join(" ; "));
+                    }
+                    Err(build_quick_error_result(
+                        action_type,
+                        &translate_provider_id,
+                        Some(source_text),
+                        ocr_text,
+                        "translate_failed",
+                        detail,
+                        started.elapsed().as_millis() as i64,
+                        Some(translate_provider_id.clone()),
+                        ocr_provider,
+                    ))
+                }
+            }
+        }
+    };
 
     let result = match translated {
-        Ok(result_text) => QuickActionResult {
+        Ok((provider_id, result_text)) => QuickActionResult {
             action_type: action_type.to_string(),
             source_text: Some(source_text),
             ocr_text,
             result_text: Some(result_text),
-            provider: provider_id,
+            provider: provider_id.clone(),
+            translate_provider: Some(provider_id),
+            ocr_provider,
             latency_ms: started.elapsed().as_millis() as i64,
             status: "success".to_string(),
             error_code: None,
             error_message: None,
             created_at: quick_now(),
         },
-        Err(error) => build_quick_error_result(
-            action_type,
-            &provider_id,
-            Some(source_text),
-            ocr_text,
-            "translate_failed",
-            error,
-            started.elapsed().as_millis() as i64,
-        ),
+        Err(result) => result,
     };
     persist_and_emit_quick_result(&app, &result);
     result
 }
 
-async fn run_quick_ocr_pipeline(app: tauri::AppHandle) -> QuickActionResult {
+async fn run_quick_ocr_pipeline(
+    app: tauri::AppHandle,
+    preferred_ocr_provider: Option<String>,
+    preferred_translate_provider: Option<String>,
+) -> QuickActionResult {
     let started = std::time::Instant::now();
     let capture_path = match capture_interactive_screenshot() {
         Ok(path) => path,
@@ -900,6 +1277,8 @@ async fn run_quick_ocr_pipeline(app: tauri::AppHandle) -> QuickActionResult {
                 "capture_failed",
                 error,
                 started.elapsed().as_millis() as i64,
+                None,
+                None,
             );
             persist_and_emit_quick_result(&app, &result);
             return result;
@@ -908,6 +1287,10 @@ async fn run_quick_ocr_pipeline(app: tauri::AppHandle) -> QuickActionResult {
 
     let state = app.state::<AppState>();
     let settings = resolve_quick_settings(state.inner());
+    let request_ocr_provider = preferred_ocr_provider
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| settings.default_ocr_provider.clone());
     let (ocr_provider, ocr_api_key) = {
         let vault = match state.vault.lock() {
             Ok(value) => value,
@@ -920,6 +1303,8 @@ async fn run_quick_ocr_pipeline(app: tauri::AppHandle) -> QuickActionResult {
                     "vault_lock_failed",
                     error.to_string(),
                     started.elapsed().as_millis() as i64,
+                    None,
+                    None,
                 );
                 persist_and_emit_quick_result(&app, &result);
                 return result;
@@ -927,7 +1312,7 @@ async fn run_quick_ocr_pipeline(app: tauri::AppHandle) -> QuickActionResult {
         };
         let provider = match resolve_quick_provider(
             &vault,
-            &settings.default_ocr_provider,
+            &request_ocr_provider,
             OCR_PROVIDERS,
             "apple-ocr",
         ) {
@@ -941,6 +1326,8 @@ async fn run_quick_ocr_pipeline(app: tauri::AppHandle) -> QuickActionResult {
                     "provider_not_found",
                     error,
                     started.elapsed().as_millis() as i64,
+                    None,
+                    Some(request_ocr_provider),
                 );
                 persist_and_emit_quick_result(&app, &result);
                 return result;
@@ -950,93 +1337,37 @@ async fn run_quick_ocr_pipeline(app: tauri::AppHandle) -> QuickActionResult {
         (provider, auth)
     };
 
+    let fallback_provider_order = ["apple-ocr", "paddleocr", "ocr-space"];
     let mut ocr_provider_id = ocr_provider.provider.clone();
-    let ocr_text = match run_ocr_with_provider(&ocr_provider, &ocr_api_key, &capture_path).await {
-        Ok(text) => text.trim().to_string(),
+    let mut ocr_text = match run_ocr_with_provider(&ocr_provider, &ocr_api_key, &capture_path).await {
+        Ok(text) => sanitize_ocr_text(&text),
         Err(error) => {
-            if ocr_provider.provider == "apple-ocr"
-                && error.to_lowercase().contains("empty")
-            {
-                let fallback_candidates = {
-                    match state.vault.lock() {
-                        Ok(vault) => ["paddleocr", "ocr-space"]
-                            .iter()
-                            .filter_map(|provider_id| {
-                                vault.get_provider_config(provider_id).map(|provider| {
-                                    let key = resolve_provider_auth(&vault, &provider);
-                                    (provider, key)
-                                })
-                            })
-                            .collect::<Vec<(ProviderConfig, String)>>(),
-                        Err(_) => Vec::new(),
-                    }
-                };
-                if fallback_candidates.is_empty() {
-                    let result = build_quick_error_result(
-                        "ocr_translate",
-                        &ocr_provider_id,
-                        None,
-                        None,
-                        "ocr_failed",
-                        format!("{}（可尝试启用 paddleocr / ocr-space 作为兜底）", error),
-                        started.elapsed().as_millis() as i64,
-                    );
-                    persist_and_emit_quick_result(&app, &result);
-                    let _ = fs::remove_file(&capture_path);
-                    return result;
-                }
-
-                let mut fallback_errors: Vec<String> = Vec::new();
-                let mut fallback_text: Option<String> = None;
-                for (fallback_provider, fallback_key) in fallback_candidates {
-                    match run_ocr_with_provider(&fallback_provider, &fallback_key, &capture_path)
-                        .await
-                    {
-                        Ok(text) if !text.trim().is_empty() => {
-                            ocr_provider_id = fallback_provider.provider.clone();
-                            fallback_text = Some(text.trim().to_string());
-                            break;
-                        }
-                        Ok(_) => {
-                            fallback_errors.push(format!(
-                                "{} fallback empty result",
-                                fallback_provider.provider
-                            ));
-                        }
-                        Err(fallback_error) => {
-                            fallback_errors.push(format!(
-                                "{} fallback failed: {}",
-                                fallback_provider.provider, fallback_error
-                            ));
-                        }
-                    }
-                }
-
-                if let Some(text) = fallback_text {
-                    text
-                } else {
-                    let result = build_quick_error_result(
-                        "ocr_translate",
-                        &ocr_provider_id,
-                        None,
-                        None,
-                        "ocr_failed",
-                        format!("Apple OCR failed: {} ; {}", error, fallback_errors.join(" ; ")),
-                        started.elapsed().as_millis() as i64,
-                    );
-                    persist_and_emit_quick_result(&app, &result);
-                    let _ = fs::remove_file(&capture_path);
-                    return result;
-                }
+            let (fallback, fallback_errors) = try_ocr_fallbacks(
+                state.inner(),
+                &capture_path,
+                &ocr_provider_id,
+                &fallback_provider_order,
+            )
+            .await;
+            if let Some((provider_id, text)) = fallback {
+                ocr_provider_id = provider_id;
+                text
             } else {
+                let mut detail = format!("{} failed: {}", ocr_provider.provider, error);
+                if !fallback_errors.is_empty() {
+                    detail.push_str(" ; ");
+                    detail.push_str(&fallback_errors.join(" ; "));
+                }
                 let result = build_quick_error_result(
                     "ocr_translate",
                     &ocr_provider_id,
                     None,
                     None,
                     "ocr_failed",
-                    error,
+                    detail,
                     started.elapsed().as_millis() as i64,
+                    None,
+                    Some(ocr_provider_id.clone()),
                 );
                 persist_and_emit_quick_result(&app, &result);
                 let _ = fs::remove_file(&capture_path);
@@ -1044,27 +1375,51 @@ async fn run_quick_ocr_pipeline(app: tauri::AppHandle) -> QuickActionResult {
             }
         }
     };
-    let _ = fs::remove_file(&capture_path);
 
     if ocr_text.trim().is_empty() {
-        let result = build_quick_error_result(
-            "ocr_translate",
+        let (fallback, fallback_errors) = try_ocr_fallbacks(
+            state.inner(),
+            &capture_path,
             &ocr_provider_id,
-            None,
-            None,
-            "ocr_empty",
-            "OCR did not detect any text".to_string(),
-            started.elapsed().as_millis() as i64,
-        );
-        persist_and_emit_quick_result(&app, &result);
-        return result;
+            &fallback_provider_order,
+        )
+        .await;
+        if let Some((_provider_id, text)) = fallback {
+            ocr_text = text;
+        } else {
+            let detail = if fallback_errors.is_empty() {
+                "OCR did not detect any text".to_string()
+            } else {
+                format!(
+                    "OCR did not detect any text ; {}",
+                    fallback_errors.join(" ; ")
+                )
+            };
+            let result = build_quick_error_result(
+                "ocr_translate",
+                &ocr_provider_id,
+                None,
+                None,
+                "ocr_empty",
+                detail,
+                started.elapsed().as_millis() as i64,
+                None,
+                Some(ocr_provider_id.clone()),
+            );
+            persist_and_emit_quick_result(&app, &result);
+            let _ = fs::remove_file(&capture_path);
+            return result;
+        }
     }
+    let _ = fs::remove_file(&capture_path);
 
     run_quick_translate_core(
         app,
         "ocr_translate",
         ocr_text.clone(),
         Some(ocr_text),
+        preferred_translate_provider,
+        Some(ocr_provider_id),
     )
     .await
 }
@@ -1078,6 +1433,8 @@ fn persist_and_emit_quick_result(app: &tauri::AppHandle, result: &QuickActionRes
         runtime.last_action_type = Some(result.action_type.clone());
         runtime.last_source_text = result.source_text.clone();
         runtime.last_ocr_text = result.ocr_text.clone();
+        runtime.last_translate_provider = result.translate_provider.clone();
+        runtime.last_ocr_provider = result.ocr_provider.clone();
         runtime.last_result = Some(result.clone());
     }
     let _ = ensure_quick_result_window(app);
@@ -1880,6 +2237,13 @@ async fn ocr_with_ocr_space(
 }
 
 fn extract_paddleocr_texts(payload: &Value) -> Vec<String> {
+    let mut dedup = HashSet::new();
+    let mut push_line = |line: String, out: &mut Vec<String>| {
+        if !line.is_empty() && dedup.insert(line.clone()) {
+            out.push(line);
+        }
+    };
+
     if let Some(layout_items) = payload
         .get("result")
         .and_then(|value| value.get("layoutParsingResults"))
@@ -1892,10 +2256,15 @@ fn extract_paddleocr_texts(payload: &Value) -> Vec<String> {
                 .and_then(|value| value.get("text"))
                 .and_then(|value| value.as_str())
                 .unwrap_or("")
-                .trim()
                 .to_string();
+            let markdown_text = sanitize_ocr_text(&markdown_text);
             if !markdown_text.is_empty() {
-                lines.push(markdown_text);
+                push_line(markdown_text, &mut lines);
+            }
+
+            // Some Paddle layout responses put OCR text in prunedResult blocks instead of markdown.text.
+            for text in extract_texts_from_json(item) {
+                push_line(text, &mut lines);
             }
         }
         if !lines.is_empty() {
@@ -1918,22 +2287,274 @@ fn extract_paddleocr_texts(payload: &Value) -> Vec<String> {
             if let Some(rows) = item.as_array() {
                 for row in rows {
                     if let Some(text) = row.get("text").and_then(|value| value.as_str()) {
-                        let text = text.trim();
+                        let text = sanitize_ocr_text(text);
                         if !text.is_empty() {
-                            lines.push(text.to_string());
+                            push_line(text, &mut lines);
                         }
                     }
                 }
             } else if let Some(text) = item.get("text").and_then(|value| value.as_str()) {
-                let text = text.trim();
+                let text = sanitize_ocr_text(text);
                 if !text.is_empty() {
-                    lines.push(text.to_string());
+                    push_line(text, &mut lines);
                 }
+            }
+            for text in extract_texts_from_json(item) {
+                push_line(text, &mut lines);
             }
         }
     }
 
+    if lines.is_empty() {
+        for text in extract_texts_from_json(payload) {
+            push_line(text, &mut lines);
+        }
+    }
+
     lines
+}
+
+fn extract_texts_from_json(root: &Value) -> Vec<String> {
+    const TEXT_KEYS: &[&str] = &[
+        "text",
+        "content",
+        "ocrText",
+        "ocr_text",
+        "caption",
+        "title",
+        "paragraph",
+        "sentence",
+    ];
+    let mut out = Vec::new();
+    let mut stack: Vec<&Value> = vec![root];
+    while let Some(node) = stack.pop() {
+        match node {
+            Value::String(text) => {
+                let cleaned = sanitize_ocr_text(text);
+                if !cleaned.is_empty() {
+                    out.push(cleaned);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    stack.push(item);
+                }
+            }
+            Value::Object(map) => {
+                for (key, value) in map {
+                    if TEXT_KEYS.iter().any(|candidate| candidate.eq_ignore_ascii_case(key)) {
+                        match value {
+                            Value::String(text) => {
+                                let cleaned = sanitize_ocr_text(text);
+                                if !cleaned.is_empty() {
+                                    out.push(cleaned);
+                                }
+                            }
+                            _ => stack.push(value),
+                        }
+                    } else if matches!(value, Value::Array(_) | Value::Object(_)) {
+                        stack.push(value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn sanitize_ocr_text(input: &str) -> String {
+    let mut text = decode_html_entities(input).replace('\r', "\n");
+
+    let patterns = [
+        r"(?is)<img[^>]*>",
+        r"(?is)!\[[^\]]*\]\([^)]+\)",
+        r"(?is)</?div[^>]*>",
+    ];
+    for pattern in patterns {
+        if let Ok(regex) = Regex::new(pattern) {
+            text = regex.replace_all(&text, " ").into_owned();
+        }
+    }
+    if let Ok(html_tag_regex) = Regex::new(r"(?is)<[^>]+>") {
+        text = html_tag_regex.replace_all(&text, " ").into_owned();
+    }
+
+    let mut lines = Vec::new();
+    for raw_line in text.lines() {
+        let compact = raw_line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if compact.is_empty() {
+            continue;
+        }
+        if is_image_placeholder_line(&compact) {
+            continue;
+        }
+        if is_layout_artifact_line(&compact) {
+            continue;
+        }
+        lines.push(compact);
+    }
+
+    lines.join("\n").trim().to_string()
+}
+
+fn is_image_placeholder_line(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return true;
+    }
+    if lower == "image" || lower == "图像" {
+        return true;
+    }
+    lower.contains("img_in_image_box") || lower.starts_with("imgs/")
+}
+
+fn is_layout_artifact_line(line: &str) -> bool {
+    let token = line.trim().to_ascii_lowercase();
+    if token.is_empty() {
+        return true;
+    }
+    if token.contains(' ') {
+        return false;
+    }
+    if !token
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch == '_' || ch == '-')
+    {
+        return false;
+    }
+
+    let exact_labels = [
+        "aside_text",
+        "header",
+        "header_image",
+        "footer",
+        "footer_image",
+        "footnote",
+        "number",
+    ];
+    if exact_labels.iter().any(|label| *label == token) {
+        return true;
+    }
+
+    token.ends_with("_text") || token.ends_with("_image")
+}
+
+fn collect_ocr_fallback_candidates(
+    state: &AppState,
+    skip_provider: &str,
+    preferred_order: &[&str],
+) -> Vec<(ProviderConfig, String)> {
+    let vault = match state.vault.lock() {
+        Ok(vault) => vault,
+        Err(_) => return Vec::new(),
+    };
+
+    preferred_order
+        .iter()
+        .filter_map(|provider_id| {
+            if *provider_id == skip_provider {
+                return None;
+            }
+            vault.get_provider_config(provider_id).map(|provider| {
+                let key = resolve_provider_auth(&vault, &provider);
+                (provider, key)
+            })
+        })
+        .collect()
+}
+
+async fn try_ocr_fallbacks(
+    state: &AppState,
+    capture_path: &Path,
+    skip_provider: &str,
+    preferred_order: &[&str],
+) -> (Option<(String, String)>, Vec<String>) {
+    let candidates = collect_ocr_fallback_candidates(state, skip_provider, preferred_order);
+    let mut fallback_errors = Vec::new();
+
+    for (fallback_provider, fallback_key) in candidates {
+        match run_ocr_with_provider(&fallback_provider, &fallback_key, capture_path).await {
+            Ok(text) => {
+                let cleaned = sanitize_ocr_text(&text);
+                if !cleaned.is_empty() {
+                    return (
+                        Some((fallback_provider.provider.clone(), cleaned)),
+                        fallback_errors,
+                    );
+                }
+                fallback_errors.push(format!(
+                    "{} fallback returned no usable text",
+                    fallback_provider.provider
+                ));
+            }
+            Err(error) => {
+                fallback_errors.push(format!(
+                    "{} fallback failed: {}",
+                    fallback_provider.provider, error
+                ));
+            }
+        }
+    }
+
+    (None, fallback_errors)
+}
+
+fn collect_translate_fallback_candidates(
+    state: &AppState,
+    skip_provider: &str,
+    preferred_order: &[&str],
+) -> Vec<(ProviderConfig, String)> {
+    let vault = match state.vault.lock() {
+        Ok(vault) => vault,
+        Err(_) => return Vec::new(),
+    };
+
+    preferred_order
+        .iter()
+        .filter_map(|provider_id| {
+            if *provider_id == skip_provider {
+                return None;
+            }
+            vault.get_provider_config(provider_id).map(|provider| {
+                let key = resolve_provider_auth(&vault, &provider);
+                (provider, key)
+            })
+        })
+        .collect()
+}
+
+async fn try_translate_fallbacks(
+    state: &AppState,
+    settings: &QuickActionSettings,
+    text: &str,
+    skip_provider: &str,
+    preferred_order: &[&str],
+) -> (Option<(String, String)>, Vec<String>) {
+    let candidates = collect_translate_fallback_candidates(state, skip_provider, preferred_order);
+    let mut fallback_errors = Vec::new();
+
+    for (fallback_provider, fallback_key) in candidates {
+        match translate_text_with_provider(&fallback_provider, &fallback_key, settings, text).await {
+            Ok(text) => {
+                if !text.trim().is_empty() {
+                    return (Some((fallback_provider.provider.clone(), text)), fallback_errors);
+                }
+                fallback_errors.push(format!(
+                    "{} fallback returned no usable text",
+                    fallback_provider.provider
+                ));
+            }
+            Err(error) => {
+                fallback_errors.push(format!(
+                    "{} fallback failed: {}",
+                    fallback_provider.provider, error
+                ));
+            }
+        }
+    }
+
+    (None, fallback_errors)
 }
 
 async fn ocr_with_paddleocr(
@@ -1961,13 +2582,25 @@ async fn ocr_with_paddleocr(
 
     let image_bytes = fs::read(image_path).map_err(|e| e.to_string())?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(image_bytes);
-    let payload = json!({
-        "file": encoded,
-        "fileType": 1,
-        "useDocOrientationClassify": false,
-        "useDocUnwarping": false,
-        "useChartRecognition": false
-    });
+    let file_type = image_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .map(|ext| if ext == "pdf" { 0 } else { 1 })
+        .unwrap_or(1);
+    let payload_candidates = vec![
+        json!({
+            "file": encoded,
+            "fileType": file_type,
+            "useDocOrientationClassify": false,
+            "useDocUnwarping": false,
+            "useChartRecognition": false
+        }),
+        json!({
+            "file": encoded,
+            "fileType": file_type
+        }),
+    ];
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(45))
@@ -1976,45 +2609,47 @@ async fn ocr_with_paddleocr(
 
     let mut last_error = String::new();
     for url in candidates {
-        let response = client
-            .post(&url)
-            .header("Authorization", format!("token {}", api_key.trim()))
-            .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await;
+        for payload in &payload_candidates {
+            let response = client
+                .post(&url)
+                .header("Authorization", format!("token {}", api_key.trim()))
+                .header("Content-Type", "application/json")
+                .json(payload)
+                .send()
+                .await;
 
-        let response = match response {
-            Ok(value) => value,
-            Err(error) => {
-                last_error = format!("PaddleOCR request failed for {}: {}", url, error);
+            let response = match response {
+                Ok(value) => value,
+                Err(error) => {
+                    last_error = format!("PaddleOCR request failed for {}: {}", url, error);
+                    continue;
+                }
+            };
+
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            if !status.is_success() {
+                last_error = format!(
+                    "PaddleOCR HTTP {} at {}: {}",
+                    status.as_u16(),
+                    url,
+                    truncate_text(&body, 160)
+                );
                 continue;
             }
-        };
 
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        if !status.is_success() {
-            last_error = format!(
-                "PaddleOCR HTTP {} at {}: {}",
-                status.as_u16(),
-                url,
-                truncate_text(&body, 160)
-            );
-            continue;
+            let parsed = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+            let lines = extract_paddleocr_texts(&parsed);
+            if lines.is_empty() {
+                last_error = format!(
+                    "PaddleOCR returned empty results at {}: {}",
+                    url,
+                    truncate_text(&body, 160)
+                );
+                continue;
+            }
+            return Ok(lines.join("\n"));
         }
-
-        let parsed = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
-        let lines = extract_paddleocr_texts(&parsed);
-        if lines.is_empty() {
-            last_error = format!(
-                "PaddleOCR returned empty results at {}: {}",
-                url,
-                truncate_text(&body, 160)
-            );
-            continue;
-        }
-        return Ok(lines.join("\n"));
     }
 
     if last_error.is_empty() {
@@ -2040,6 +2675,18 @@ pub fn mykey_capabilities() -> Result<Vec<MykeyCapability>, String> {
             requires_master_password: false,
             mutating: false,
             params: vec![],
+        },
+        MykeyCapability {
+            id: "python.run".to_string(),
+            description: "Run a local Python snippet and return stdout/stderr".to_string(),
+            requires_master_password: true,
+            mutating: true,
+            params: vec![
+                "code:string".to_string(),
+                "timeout_ms:number|null".to_string(),
+                "max_output_chars:number|null".to_string(),
+                "python_args:string[]|null".to_string(),
+            ],
         },
         MykeyCapability {
             id: "gateway.status".to_string(),
@@ -2068,6 +2715,34 @@ pub fn mykey_capabilities() -> Result<Vec<MykeyCapability>, String> {
             requires_master_password: true,
             mutating: false,
             params: vec![],
+        },
+        MykeyCapability {
+            id: "gateway.models.list".to_string(),
+            description: "List resolved gateway app/provider/model catalog".to_string(),
+            requires_master_password: true,
+            mutating: false,
+            params: vec![],
+        },
+        MykeyCapability {
+            id: "gateway.traffic.metrics".to_string(),
+            description: "Read gateway traffic metrics including model-level ranking".to_string(),
+            requires_master_password: true,
+            mutating: false,
+            params: vec!["window_minutes:number".to_string()],
+        },
+        MykeyCapability {
+            id: "gateway.open_responses.get".to_string(),
+            description: "读取 Codex 对话是否启用 Open Responses 协议".to_string(),
+            requires_master_password: true,
+            mutating: false,
+            params: vec![],
+        },
+        MykeyCapability {
+            id: "gateway.open_responses.set".to_string(),
+            description: "设置 Codex 对话是否启用 Open Responses 协议".to_string(),
+            requires_master_password: true,
+            mutating: true,
+            params: vec!["enabled:boolean".to_string()],
         },
         MykeyCapability {
             id: "routes.set".to_string(),
@@ -2170,6 +2845,13 @@ pub fn mykey_command(
                 "traffic_60m": traffic,
             }))
         }
+        "python.run" => {
+            let code = required_string_arg(&args, "code")?;
+            let timeout_ms = optional_i64_arg(&args, "timeout_ms")?;
+            let max_output_chars = optional_usize_arg(&args, "max_output_chars")?;
+            let python_args = optional_string_vec_arg(&args, "python_args")?;
+            run_python_code_internal(&code, timeout_ms, max_output_chars, python_args)
+        }
         "gateway.circuit_breaker.set" => {
             let enabled = args
                 .get("enabled")
@@ -2191,6 +2873,18 @@ pub fn mykey_command(
             }
             vault.set_gateway_daily_budget(budget)?;
             Ok(json!({ "ok": true, "daily_budget_usd": budget }))
+        }
+        "gateway.open_responses.get" => {
+            let enabled = vault.gateway_open_responses_enabled()?;
+            Ok(json!({ "open_responses": enabled }))
+        }
+        "gateway.open_responses.set" => {
+            let enabled = args
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| "Missing required boolean arg: enabled".to_string())?;
+            vault.set_gateway_open_responses(enabled)?;
+            Ok(json!({ "ok": true, "open_responses": enabled }))
         }
         "routes.list" => {
             let routes = vault.get_app_routes()?;
@@ -2699,6 +3393,70 @@ pub fn upsert_provider(
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GatewayModelCatalogItem {
+    pub app_type: String,
+    pub provider: String,
+    pub model: String,
+}
+
+#[tauri::command]
+pub fn list_gateway_model_catalog(
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<GatewayModelCatalogItem>, String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+
+    let routes = vault.get_app_routes()?;
+    let mut seen = HashSet::new();
+    let mut catalog = Vec::new();
+
+    for route in routes {
+        let Some(provider) = vault.get_provider_config(&route.provider) else {
+            continue;
+        };
+
+        let mut models = Vec::new();
+        if let Some(model) = route.model.as_deref() {
+            models.push(model.trim().to_string());
+        }
+        models.extend(provider.models.iter().map(|model| model.trim().to_string()));
+        models.push(provider.details.main_model.clone());
+        models.push(provider.details.reasoning_model.clone());
+        models.push(provider.details.default_haiku_model.clone());
+        models.push(provider.details.default_sonnet_model.clone());
+        models.push(provider.details.default_opus_model.clone());
+
+        for model in models {
+            let model = model.trim().to_string();
+            if model.is_empty() {
+                continue;
+            }
+            let key = format!("{}:{}:{}", route.app_type, route.provider, model);
+            if !seen.insert(key) {
+                continue;
+            }
+            catalog.push(GatewayModelCatalogItem {
+                app_type: route.app_type.clone(),
+                provider: route.provider.clone(),
+                model,
+            });
+        }
+    }
+
+    catalog.sort_by(|a, b| {
+        a.app_type
+            .cmp(&b.app_type)
+            .then(a.provider.cmp(&b.provider))
+            .then(a.model.cmp(&b.model))
+    });
+
+    Ok(catalog)
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EndpointSpeedTestResult {
     pub requested_url: String,
     pub tested_url: Option<String>,
@@ -2885,15 +3643,52 @@ fn extract_codex_text(value: &Value) -> Option<String> {
     if let Some(output_items) = value.get("output").and_then(|item| item.as_array()) {
         let mut chunks: Vec<String> = Vec::new();
         for output_item in output_items {
-            let Some(contents) = output_item.get("content").and_then(|item| item.as_array()) else {
-                continue;
-            };
-            for content in contents {
-                if let Some(text) = content.get("text").and_then(|item| item.as_str()) {
-                    let text = text.trim();
-                    if !text.is_empty() {
-                        chunks.push(text.to_string());
+            if let Some(contents) = output_item.get("content").and_then(|item| item.as_array()) {
+                for content in contents {
+                    if let Some(text) = content.get("text").and_then(|item| item.as_str()) {
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            chunks.push(text.to_string());
+                        }
                     }
+                    if let Some(summary_items) = content.get("summary").and_then(|item| item.as_array()) {
+                        for summary in summary_items {
+                            if let Some(text) = summary.get("text").and_then(|item| item.as_str()) {
+                                let text = text.trim();
+                                if !text.is_empty() {
+                                    chunks.push(text.to_string());
+                                }
+                            }
+                        }
+                    }
+                    if let Some(summary) = content.get("summary").and_then(|item| item.as_str()) {
+                        let summary = summary.trim();
+                        if !summary.is_empty() {
+                            chunks.push(summary.to_string());
+                        }
+                    }
+                }
+            }
+            if let Some(summary_items) = output_item.get("summary").and_then(|item| item.as_array()) {
+                for summary in summary_items {
+                    if let Some(text) = summary.get("text").and_then(|item| item.as_str()) {
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            chunks.push(text.to_string());
+                        }
+                    }
+                }
+            }
+            if let Some(summary) = output_item.get("summary").and_then(|item| item.as_str()) {
+                let summary = summary.trim();
+                if !summary.is_empty() {
+                    chunks.push(summary.to_string());
+                }
+            }
+            if let Some(reasoning) = output_item.get("reasoning").and_then(|item| item.as_str()) {
+                let reasoning = reasoning.trim();
+                if !reasoning.is_empty() {
+                    chunks.push(reasoning.to_string());
                 }
             }
         }
@@ -2920,11 +3715,121 @@ fn extract_codex_text(value: &Value) -> Option<String> {
     None
 }
 
+fn extract_codex_stream_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.get("output_text").and_then(|item| item.as_str()) {
+        let text = text.trim();
+        if !text.is_empty() {
+            return Some(text.to_string());
+        }
+    }
+
+    if let Some(type_name) = value.get("type").and_then(|item| item.as_str()) {
+        let contains_delta = type_name.contains("delta");
+        let output_text = if contains_delta {
+            value
+                .get("delta")
+                .or_else(|| value.get("output_delta"))
+                .and_then(|item| item.get("text"))
+                .and_then(|item| item.as_str())
+        } else {
+            None
+        };
+        if let Some(text) = output_text {
+            let text = text.trim();
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+
+    if let Some(delta) = value.get("delta").and_then(|item| item.get("content")).and_then(|item| item.as_array()) {
+        let mut lines: Vec<String> = Vec::new();
+        for item in delta {
+            if let Some(text) = item
+                .get("text")
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            {
+                lines.push(text.to_string());
+            }
+        }
+        if !lines.is_empty() {
+            return Some(lines.join(""));
+        }
+    }
+
+    if let Some(summary_items) = value.get("summary").and_then(|item| item.as_array()) {
+        let mut lines: Vec<String> = Vec::new();
+        for item in summary_items {
+            if let Some(text) = item
+                .get("text")
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            {
+                lines.push(text.to_string());
+            }
+        }
+        if !lines.is_empty() {
+            return Some(lines.join(""));
+        }
+    }
+
+    if let Some(summary) = value.get("summary").and_then(|item| item.as_str()) {
+        let summary = summary.trim();
+        if !summary.is_empty() {
+            return Some(summary.to_string());
+        }
+    }
+
+    if let Some(reasoning) = value
+        .get("reasoning")
+        .and_then(|item| item.as_str())
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+    {
+        return Some(reasoning.to_string());
+    }
+
+    None
+}
+
+fn parse_streamed_responses(raw: &str) -> String {
+    let mut chunks: Vec<String> = Vec::new();
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("data:") {
+            continue;
+        }
+        let data = trimmed.trim_start_matches("data:").trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let parsed = match serde_json::from_str::<Value>(data) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(chunk) = extract_codex_stream_text(&parsed) {
+            chunks.push(chunk);
+        }
+    }
+
+    if chunks.is_empty() {
+        String::new()
+    } else {
+        chunks.join("")
+    }
+}
+
 #[tauri::command]
 pub async fn clippy_codex_chat(
     question: String,
     system_prompt: Option<String>,
     model: Option<String>,
+    open_responses: Option<bool>,
+    stream: Option<bool>,
     master_password: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -2946,7 +3851,8 @@ pub async fn clippy_codex_chat(
             .map(|item| item.enabled)
             .unwrap_or(true);
         let creds = vault.get_gateway_access_credentials("codex")?;
-        (enabled, creds.base_url, creds.api_key)
+        let open_responses = vault.gateway_open_responses_enabled()?;
+        (enabled, creds.base_url, creds.api_key, open_responses)
     };
 
     if !gateway_enabled {
@@ -2955,11 +3861,18 @@ pub async fn clippy_codex_chat(
 
     crate::gateway::sync_gateway_runtime(state.inner())?;
 
-    let gateway_endpoint = format!("{}/responses", gateway_base_url.trim_end_matches('/'));
+    let use_open_responses = open_responses.unwrap_or(gateway_open_responses);
+    let gateway_endpoint = if use_open_responses {
+        format!("{}/responses/compact", gateway_base_url.trim_end_matches('/'))
+    } else {
+        format!("{}/responses", gateway_base_url.trim_end_matches('/'))
+    };
     let model_name = model
         .map(|item| item.trim().to_string())
         .filter(|item| !item.is_empty())
         .unwrap_or_else(|| "gpt-5-codex".to_string());
+    let stream_mode = stream.unwrap_or(false);
+    let effective_stream = if use_open_responses { false } else { stream_mode };
     let system = system_prompt
         .map(|item| item.trim().to_string())
         .filter(|item| !item.is_empty())
@@ -2967,7 +3880,7 @@ pub async fn clippy_codex_chat(
 
     let payload = json!({
         "model": model_name,
-        "stream": false,
+        "stream": effective_stream,
         "instructions": system,
         "input": [
             {
@@ -2981,6 +3894,144 @@ pub async fn clippy_codex_chat(
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client
+        .post(&gateway_endpoint)
+        .bearer_auth(gateway_api_key)
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("无法连接 Gateway：{}", e))?;
+
+    let status = response.status();
+    let raw = response.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<Value>(&raw).ok();
+
+    if !status.is_success() {
+        let detail = parsed
+            .as_ref()
+            .and_then(extract_error_message)
+            .unwrap_or_else(|| truncate_text(&raw, 220));
+        return Err(format!(
+            "Codex 代理请求失败（HTTP {}）：{}",
+            status.as_u16(),
+            detail
+        ));
+    }
+
+    if effective_stream {
+        let stream_text = parse_streamed_responses(&raw);
+        if !stream_text.is_empty() {
+            return Ok(stream_text);
+        }
+    }
+
+    if let Some(parsed_value) = parsed.as_ref() {
+        if let Some(text) = extract_codex_text(parsed_value) {
+            return Ok(text);
+        }
+    }
+
+    let fallback = truncate_text(&raw, 400);
+    if fallback.is_empty() {
+        return Err("Codex 返回为空".to_string());
+    }
+
+    Ok(fallback)
+}
+
+#[tauri::command]
+pub async fn quick_clippy_assist(
+    translated_text: String,
+    source_text: Option<String>,
+    action_type: Option<String>,
+    system_prompt: Option<String>,
+    model: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let translated_text = translated_text.trim().to_string();
+    if translated_text.is_empty() {
+        return Err("No text to analyze".to_string());
+    }
+
+    let source = source_text
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    let action = action_type
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "ocr_translate".to_string());
+
+    let request_prompt = if source.is_empty() {
+        format!(
+            "以下是快速翻译结果：\n{}\n\n请给出 1-3 条可直接执行的中文优化建议，重点关注语法准确性、词汇自然度与可读性。每条建议尽量简洁，最长不超过 20 个字。",
+            translated_text
+        )
+    } else {
+        format!(
+            "动作类型：{}\n原文：{}\n译文：{}\n\n请给出 1-3 条可直接执行的中文优化建议，重点检查：\n1) 是否准确保留原意；2) 是否流畅自然；3) 是否更符合中文表达习惯。\n请只给建议，不要输出额外解释。",
+            action,
+            source,
+            translated_text
+        )
+    };
+
+    let (gateway_enabled, gateway_base_url, gateway_api_key, gateway_open_responses) = {
+        let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+        let settings = vault.get_global_settings()?;
+        let enabled = settings
+            .services
+            .iter()
+            .find(|item| item.service_name == "gateway")
+            .map(|item| item.enabled)
+            .unwrap_or(true);
+        let creds = vault.get_gateway_access_credentials("codex")?;
+        let gateway_open_responses = vault.gateway_open_responses_enabled()?;
+        (enabled, creds.base_url, creds.api_key, gateway_open_responses)
+    };
+
+    if !gateway_enabled {
+        return Err("Gateway 服务未启用，请在全局设置中启用".to_string());
+    }
+
+    crate::gateway::sync_gateway_runtime(state.inner())?;
+
+    let gateway_endpoint = if gateway_open_responses {
+        format!("{}/responses/compact", gateway_base_url.trim_end_matches('/'))
+    } else {
+        format!("{}/responses", gateway_base_url.trim_end_matches('/'))
+    };
+    let model_name = model
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .unwrap_or_else(|| "gpt-5-codex".to_string());
+    let system = system_prompt
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .unwrap_or_else(|| {
+            "你是译文优化助手，只输出中文建议，保持简洁且可执行。".to_string()
+        });
+
+    let payload = json!({
+        "model": model_name,
+        "stream": false,
+        "instructions": system,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": request_prompt }
+                ]
+            }
+        ]
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| e.to_string())?;
 
