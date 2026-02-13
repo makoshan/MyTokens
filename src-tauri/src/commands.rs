@@ -3838,7 +3838,7 @@ pub async fn clippy_codex_chat(
         return Err("Question is empty".to_string());
     }
 
-    let (gateway_enabled, gateway_base_url, gateway_api_key) = {
+    let (gateway_enabled, gateway_base_url, gateway_api_key, gateway_open_responses) = {
         let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
         if !vault.authenticate(&master_password) {
             return Err("Invalid master password".to_string());

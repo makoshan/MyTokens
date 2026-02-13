@@ -6,6 +6,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use std::collections::HashSet;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -141,6 +142,35 @@ struct ModelItem {
     owned_by: String,
 }
 
+fn model_created_at() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |value| value.as_secs() as i64)
+}
+
+fn add_model_item(
+    items: &mut Vec<ModelItem>,
+    seen: &mut HashSet<String>,
+    provider: &str,
+    model_id: &str,
+    created: i64,
+) {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return;
+    }
+    let key = format!("{provider}:{model_id}");
+    if !seen.insert(key) {
+        return;
+    }
+    items.push(ModelItem {
+        id: model_id.to_string(),
+        object: "model".to_string(),
+        created,
+        owned_by: provider.to_string(),
+    });
+}
+
 pub fn sync_gateway_runtime(state: &AppState) -> Result<(), String> {
     let (enabled, port) = {
         let vault = state.vault.lock().map_err(|e| e.to_string())?;
@@ -270,36 +300,91 @@ async fn health() -> impl IntoResponse {
     }))
 }
 
-async fn models() -> impl IntoResponse {
+async fn models(
+    State(context): State<GatewayContext>,
+    headers: HeaderMap,
+) -> Response {
+    let route = match resolve_route_from_headers(&context, &headers) {
+        Ok(route) => route,
+        Err(response) => return response,
+    };
+
+    let vault = match context.vault.lock() {
+        Ok(vault) => vault,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Gateway route resolution failed",
+                "route_resolution_failed",
+            );
+        }
+    };
+    let provider = match vault.get_provider_config(&route.provider) {
+        Some(provider) => provider,
+        None => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Provider config not found: {}", route.provider),
+                "provider_not_found",
+            );
+        }
+    };
+
+    let created = model_created_at();
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(model) = route.model.as_deref() {
+        add_model_item(&mut models, &mut seen, &route.provider, model, created);
+    }
+
+    for model in provider.models.iter() {
+        add_model_item(&mut models, &mut seen, &route.provider, model, created);
+    }
+
+    let details = provider.details;
+    add_model_item(
+        &mut models,
+        &mut seen,
+        &route.provider,
+        &details.main_model,
+        created,
+    );
+    add_model_item(
+        &mut models,
+        &mut seen,
+        &route.provider,
+        &details.reasoning_model,
+        created,
+    );
+    add_model_item(
+        &mut models,
+        &mut seen,
+        &route.provider,
+        &details.default_haiku_model,
+        created,
+    );
+    add_model_item(
+        &mut models,
+        &mut seen,
+        &route.provider,
+        &details.default_sonnet_model,
+        created,
+    );
+    add_model_item(
+        &mut models,
+        &mut seen,
+        &route.provider,
+        &details.default_opus_model,
+        created,
+    );
+
+    models.sort_by(|a, b| a.id.cmp(&b.id));
     Json(ModelList {
         object: "list".to_string(),
-        data: vec![
-            ModelItem {
-                id: "gpt-5-codex".to_string(),
-                object: "model".to_string(),
-                created: 0,
-                owned_by: "openai".to_string(),
-            },
-            ModelItem {
-                id: "gpt-5".to_string(),
-                object: "model".to_string(),
-                created: 0,
-                owned_by: "openai".to_string(),
-            },
-            ModelItem {
-                id: "gpt-4.1".to_string(),
-                object: "model".to_string(),
-                created: 0,
-                owned_by: "openai".to_string(),
-            },
-            ModelItem {
-                id: "claude-sonnet-4-20250514".to_string(),
-                object: "model".to_string(),
-                created: 0,
-                owned_by: "anthropic".to_string(),
-            },
-        ],
+        data: models,
     })
+    .into_response()
 }
 
 fn extract_gateway_token(headers: &HeaderMap) -> Option<String> {
