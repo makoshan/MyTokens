@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
-use tauri::WebviewWindowBuilder;
 use tauri::WebviewUrl;
+use tauri::WebviewWindowBuilder;
 use tauri_plugin_global_shortcut::ShortcutState;
 
 mod commands;
@@ -12,6 +12,7 @@ mod provider_defaults;
 mod secret_store;
 mod usage;
 mod vault;
+mod voice_input;
 
 use vault::Vault;
 
@@ -20,6 +21,7 @@ pub struct AppState {
     usage: Arc<Mutex<usage::UsageState>>,
     gateway: Arc<Mutex<gateway::GatewayRuntime>>,
     quick_runtime: Arc<Mutex<QuickRuntimeState>>,
+    voice_runtime: Arc<voice_input::VoiceInputRuntime>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,21 +86,21 @@ impl Default for QuickActionSettings {
     }
 }
 
-    #[derive(Debug, Serialize, Deserialize, Clone)]
-    pub struct QuickActionResult {
-        pub action_type: String,
-        pub source_text: Option<String>,
-        pub ocr_text: Option<String>,
-        pub result_text: Option<String>,
-        pub provider: String,
-        pub translate_provider: Option<String>,
-        pub ocr_provider: Option<String>,
-        pub latency_ms: i64,
-        pub status: String,
-        pub error_code: Option<String>,
-        pub error_message: Option<String>,
-        pub created_at: String,
-    }
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QuickActionResult {
+    pub action_type: String,
+    pub source_text: Option<String>,
+    pub ocr_text: Option<String>,
+    pub result_text: Option<String>,
+    pub provider: String,
+    pub translate_provider: Option<String>,
+    pub ocr_provider: Option<String>,
+    pub latency_ms: i64,
+    pub status: String,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct QuickActionHistoryRecord {
@@ -374,6 +376,7 @@ pub struct GatewayRequestLog {
     pub blocked_reason: Option<String>,
     pub error_code: Option<String>,
     pub estimated_cost_usd: Option<f64>,
+    pub user_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -417,6 +420,7 @@ pub struct GatewayTrafficMetrics {
     pub by_app: Vec<GatewayTrafficGroup>,
     pub by_provider: Vec<GatewayTrafficGroup>,
     pub by_model: Vec<GatewayTrafficGroup>,
+    pub by_user: Vec<GatewayTrafficGroup>,
     pub top_errors: Vec<GatewayErrorSummary>,
     pub timeline: Vec<GatewayTrafficPoint>,
 }
@@ -439,6 +443,7 @@ pub fn run() {
         usage: Arc::new(Mutex::new(usage::UsageState::default())),
         gateway: Arc::new(Mutex::new(gateway::GatewayRuntime::default())),
         quick_runtime: Arc::new(Mutex::new(QuickRuntimeState::default())),
+        voice_runtime: Arc::new(voice_input::VoiceInputRuntime::default()),
     };
 
     tauri::Builder::default()
@@ -463,6 +468,8 @@ pub fn run() {
                     .build(),
             )?;
             ensure_quick_result_window(app)?;
+            // Voice overlay window is a small always-on-top indicator for voice input recording/transcription.
+            let _ = voice_input::ensure_voice_overlay_window(app.handle());
             let _ = commands::register_quick_hotkeys_on_startup(app.handle());
             Ok(())
         })
@@ -542,6 +549,13 @@ pub fn run() {
             commands::open_macos_accessibility_settings,
             commands::open_macos_automation_settings,
             commands::open_macos_screen_capture_settings,
+            commands::open_macos_input_monitoring_settings,
+            commands::open_macos_keyboard_settings,
+            commands::get_voice_input_settings,
+            commands::set_voice_input_settings,
+            commands::initialize_voice_input_listener,
+            commands::voice_input_transcribe,
+            commands::get_voice_input_diagnostics,
             commands::add_project,
             commands::get_projects,
             commands::delete_project,

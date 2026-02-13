@@ -1,14 +1,14 @@
 use crate::{
     provider_defaults, secret_store::config::SecretStoreProviderConfig, secret_store::Secret,
     secret_store::SecretManager, secret_store::SecretMetadata, secret_store::SecretStoreConfig,
-    usage::CostUsage, usage::UsageQuota, usage::UsageSnapshot, AppIntegration, AppRoute,
-    Credential, ExternalLibraryMcp, ExternalLibrarySkill, GatewayAccessCredentials,
-    GatewayErrorSummary, GatewayPolicySettings, GatewayRequestLog, GatewayTrafficGroup,
-    GatewayTrafficMetrics, GatewayTrafficPoint, GlobalSettingsPayload, IntegrationConfigSnapshot,
-    OpencodeConfigSnapshot, PromptTemplate, ProviderAppBinding, ProviderAppBindingInput,
-    ProviderConfig, ProviderDetails, ProviderEndpoint, ProviderEndpointInput, ProviderEnvVar,
-    ProviderEnvVarInput, ProviderModel, QuickActionHistoryRecord, QuickActionResult,
-    QuickActionSettings, ServiceConfig,
+    usage::CostUsage, usage::UsageQuota, usage::UsageSnapshot, voice_input::VoiceInputSettings,
+    AppIntegration, AppRoute, Credential, ExternalLibraryMcp, ExternalLibrarySkill,
+    GatewayAccessCredentials, GatewayErrorSummary, GatewayPolicySettings, GatewayRequestLog,
+    GatewayTrafficGroup, GatewayTrafficMetrics, GatewayTrafficPoint, GlobalSettingsPayload,
+    IntegrationConfigSnapshot, OpencodeConfigSnapshot, PromptTemplate, ProviderAppBinding,
+    ProviderAppBindingInput, ProviderConfig, ProviderDetails, ProviderEndpoint,
+    ProviderEndpointInput, ProviderEnvVar, ProviderEnvVarInput, ProviderModel,
+    QuickActionHistoryRecord, QuickActionResult, QuickActionSettings, ServiceConfig,
 };
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -69,6 +69,7 @@ pub struct GatewayRequestLogInput {
     pub app_type: String,
     pub provider: String,
     pub model: Option<String>,
+    pub user_key: Option<String>,
     pub endpoint: String,
     pub status_code: i64,
     pub latency_ms: i64,
@@ -111,6 +112,7 @@ impl Vault {
         vault.ensure_global_settings_defaults();
         vault.ensure_app_routes_defaults();
         vault.ensure_quick_action_defaults();
+        vault.ensure_voice_input_defaults();
         vault.refresh_app_integration_detection();
         vault.migrate_legacy_secrets();
         vault.ensure_unified_relations_defaults();
@@ -1158,7 +1160,7 @@ impl Vault {
                     "service".to_string(),
                     toml::Value::String("com.mykey.desktop".to_string()),
                 );
-                return Ok(SecretStoreConfig {
+            return Ok(SecretStoreConfig {
                     primary: "keychain".to_string(),
                     providers: vec![
                         SecretStoreProviderConfig {
@@ -1328,6 +1330,7 @@ impl Vault {
                 app_type TEXT NOT NULL,
                 provider TEXT NOT NULL,
                 model TEXT,
+                user_key TEXT,
                 endpoint TEXT NOT NULL,
                 status_code INTEGER NOT NULL,
                 latency_ms INTEGER NOT NULL,
@@ -1431,6 +1434,12 @@ impl Vault {
             "providers",
             "details_json",
             "TEXT NOT NULL DEFAULT '{}'",
+        )?;
+        Self::ensure_column(
+            conn,
+            "gateway_request_logs",
+            "user_key",
+            "TEXT",
         )?;
         conn.execute(
             "UPDATE providers SET details_json = '{}' WHERE details_json IS NULL OR TRIM(details_json) = ''",
@@ -1825,6 +1834,69 @@ impl Vault {
         if let Ok(serialized) = serde_json::to_string(&defaults) {
             let _ = self.meta_set("quick_action_settings", &serialized);
         }
+    }
+
+    fn ensure_voice_input_defaults(&mut self) {
+        if self
+            .meta_get("voice_input_settings")
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return;
+        }
+        let mut defaults = VoiceInputSettings::default();
+        defaults.updated_at = Local::now().to_rfc3339();
+        if let Ok(serialized) = serde_json::to_string(&defaults) {
+            let _ = self.meta_set("voice_input_settings", &serialized);
+        }
+    }
+
+    pub fn get_voice_input_settings(&self) -> Result<VoiceInputSettings, String> {
+        let raw = self.meta_get("voice_input_settings")?;
+        if let Some(serialized) = raw {
+            if let Ok(parsed) = serde_json::from_str::<VoiceInputSettings>(&serialized) {
+                // Normalize with current defaults if missing.
+                let mut next = parsed;
+                if next.voice_trigger_mode.trim().is_empty() {
+                    next.voice_trigger_mode = "fn_hold".to_string();
+                }
+                if next.voice_hold_ms <= 0 {
+                    next.voice_hold_ms = 200;
+                }
+                if next.voice_min_record_ms <= 0 {
+                    next.voice_min_record_ms = 300;
+                }
+                if next.voice_stt_provider.trim().is_empty() {
+                    next.voice_stt_provider = "openai".to_string();
+                }
+                if next.voice_stt_model.trim().is_empty() {
+                    next.voice_stt_model = "whisper-1".to_string();
+                }
+                if next.voice_language.trim().is_empty() {
+                    next.voice_language = "auto".to_string();
+                }
+                if next.voice_paste_delay_ms < 0 {
+                    next.voice_paste_delay_ms = 0;
+                }
+                return Ok(next);
+            }
+        }
+
+        let mut defaults = VoiceInputSettings::default();
+        defaults.updated_at = Local::now().to_rfc3339();
+        Ok(defaults)
+    }
+
+    pub fn set_voice_input_settings(
+        &mut self,
+        settings: VoiceInputSettings,
+    ) -> Result<VoiceInputSettings, String> {
+        let now = Local::now().to_rfc3339();
+        let next = settings.normalized(now);
+        let serialized = serde_json::to_string(&next).map_err(|e| e.to_string())?;
+        self.meta_set("voice_input_settings", &serialized)?;
+        Ok(next)
     }
 
     pub fn get_quick_action_settings(&self) -> Result<QuickActionSettings, String> {
@@ -2618,8 +2690,8 @@ impl Vault {
             .execute(
                 "INSERT INTO gateway_request_logs (
                     id, created_at, app_type, provider, model, endpoint,
-                    status_code, latency_ms, blocked_reason, error_code, estimated_cost_usd
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    user_key, status_code, latency_ms, blocked_reason, error_code, estimated_cost_usd
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     Uuid::new_v4().to_string(),
                     now,
@@ -2627,6 +2699,7 @@ impl Vault {
                     item.provider,
                     item.model,
                     item.endpoint,
+                    item.user_key,
                     item.status_code,
                     item.latency_ms,
                     item.blocked_reason,
@@ -2643,7 +2716,7 @@ impl Vault {
             .conn
             .prepare(
                 "SELECT id, created_at, app_type, provider, model, endpoint,
-                        status_code, latency_ms, blocked_reason, error_code, estimated_cost_usd
+                        status_code, latency_ms, blocked_reason, error_code, estimated_cost_usd, user_key
                  FROM gateway_request_logs
                  ORDER BY created_at DESC
                  LIMIT ?1",
@@ -2663,6 +2736,7 @@ impl Vault {
                     blocked_reason: row.get(8)?,
                     error_code: row.get(9)?,
                     estimated_cost_usd: row.get(10)?,
+                    user_key: row.get(11)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -2720,6 +2794,7 @@ impl Vault {
         let by_app = self.gateway_group_metrics(window, "app_type")?;
         let by_provider = self.gateway_group_metrics(window, "provider")?;
         let by_model = self.gateway_group_metrics(window, "model")?;
+        let by_user = self.gateway_group_metrics(window, "user_key")?;
         let top_errors = self.gateway_top_errors(window)?;
         let timeline = self.gateway_timeline(window)?;
 
@@ -2737,6 +2812,7 @@ impl Vault {
             by_app,
             by_provider,
             by_model,
+            by_user,
             top_errors,
             timeline,
         })
@@ -2748,7 +2824,7 @@ impl Vault {
         group_by: &str,
     ) -> Result<Vec<GatewayTrafficGroup>, String> {
         let group_column = match group_by {
-            "app_type" | "provider" | "model" => group_by,
+            "app_type" | "provider" | "model" | "user_key" => group_by,
             _ => return Err(format!("Unsupported gateway group column: {}", group_by)),
         };
         let sql = format!(
@@ -2862,6 +2938,26 @@ impl Vault {
                          FROM gateway_request_logs
                          WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
                            AND model = ?2
+                         ORDER BY latency_ms ASC",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map(params![window_minutes, value], |row| row.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())?;
+                let mut values = Vec::new();
+                for row in rows {
+                    values.push(row.map_err(|e| e.to_string())?);
+                }
+                values
+            }
+            Some(("user_key", value)) => {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT latency_ms
+                         FROM gateway_request_logs
+                         WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
+                           AND COALESCE(NULLIF(TRIM(user_key), ''), 'unknown') = ?2
                          ORDER BY latency_ms ASC",
                     )
                     .map_err(|e| e.to_string())?;

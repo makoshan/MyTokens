@@ -6,10 +6,10 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use std::collections::HashSet;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::net::{Ipv4Addr, TcpListener};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -300,10 +300,7 @@ async fn health() -> impl IntoResponse {
     }))
 }
 
-async fn models(
-    State(context): State<GatewayContext>,
-    headers: HeaderMap,
-) -> Response {
+async fn models(State(context): State<GatewayContext>, headers: HeaderMap) -> Response {
     let route = match resolve_route_from_headers(&context, &headers) {
         Ok(route) => route,
         Err(response) => return response,
@@ -529,6 +526,7 @@ async fn relay_responses(
         append_gateway_log(
             &ctx,
             Some(&route),
+            &headers,
             "/v1/responses",
             response.status(),
             started.elapsed().as_millis() as i64,
@@ -542,6 +540,7 @@ async fn relay_responses(
         append_gateway_log(
             &ctx,
             Some(&route),
+            &headers,
             "/v1/responses",
             response.status(),
             started.elapsed().as_millis() as i64,
@@ -550,7 +549,7 @@ async fn relay_responses(
         );
         return response;
     }
-    let response = relay_to_codex(ctx.clone(), headers, body, false, route.model.as_deref()).await;
+    let response = relay_to_codex(ctx.clone(), &headers, body, false, route.model.as_deref()).await;
     let status = response.status();
     let code = if status.is_success() {
         None
@@ -560,6 +559,7 @@ async fn relay_responses(
     append_gateway_log(
         &ctx,
         Some(&route),
+        &headers,
         "/v1/responses",
         status,
         started.elapsed().as_millis() as i64,
@@ -588,6 +588,7 @@ async fn relay_responses_compact(
         append_gateway_log(
             &ctx,
             Some(&route),
+            &headers,
             "/v1/responses/compact",
             response.status(),
             started.elapsed().as_millis() as i64,
@@ -601,6 +602,7 @@ async fn relay_responses_compact(
         append_gateway_log(
             &ctx,
             Some(&route),
+            &headers,
             "/v1/responses/compact",
             response.status(),
             started.elapsed().as_millis() as i64,
@@ -609,7 +611,7 @@ async fn relay_responses_compact(
         );
         return response;
     }
-    let response = relay_to_codex(ctx.clone(), headers, body, true, route.model.as_deref()).await;
+    let response = relay_to_codex(ctx.clone(), &headers, body, true, route.model.as_deref()).await;
     let status = response.status();
     let code = if status.is_success() {
         None
@@ -619,6 +621,7 @@ async fn relay_responses_compact(
     append_gateway_log(
         &ctx,
         Some(&route),
+        &headers,
         "/v1/responses/compact",
         status,
         started.elapsed().as_millis() as i64,
@@ -647,6 +650,7 @@ async fn relay_to_codex_chat_completions(
         append_gateway_log(
             &ctx,
             Some(&route),
+            &headers,
             "/v1/chat/completions",
             response.status(),
             started.elapsed().as_millis() as i64,
@@ -660,6 +664,7 @@ async fn relay_to_codex_chat_completions(
         append_gateway_log(
             &ctx,
             Some(&route),
+            &headers,
             "/v1/chat/completions",
             response.status(),
             started.elapsed().as_millis() as i64,
@@ -668,7 +673,7 @@ async fn relay_to_codex_chat_completions(
         );
         return response;
     }
-    let response = relay_to_codex(ctx.clone(), headers, body, false, route.model.as_deref()).await;
+    let response = relay_to_codex(ctx.clone(), &headers, body, false, route.model.as_deref()).await;
     let status = response.status();
     let code = if status.is_success() {
         None
@@ -678,6 +683,7 @@ async fn relay_to_codex_chat_completions(
     append_gateway_log(
         &ctx,
         Some(&route),
+        &headers,
         "/v1/chat/completions",
         status,
         started.elapsed().as_millis() as i64,
@@ -706,6 +712,7 @@ async fn relay_claude_messages(
         append_gateway_log(
             &ctx,
             Some(&route),
+            &headers,
             "/v1/messages",
             response.status(),
             started.elapsed().as_millis() as i64,
@@ -719,6 +726,7 @@ async fn relay_claude_messages(
         append_gateway_log(
             &ctx,
             Some(&route),
+            &headers,
             "/v1/messages",
             response.status(),
             started.elapsed().as_millis() as i64,
@@ -739,6 +747,7 @@ async fn relay_claude_messages(
             append_gateway_log(
                 &ctx,
                 Some(&route),
+                &headers,
                 "/v1/messages",
                 response.status(),
                 started.elapsed().as_millis() as i64,
@@ -780,6 +789,7 @@ async fn relay_claude_messages(
             append_gateway_log(
                 &ctx,
                 Some(&route),
+                &headers,
                 "/v1/messages",
                 response.status(),
                 started.elapsed().as_millis() as i64,
@@ -880,6 +890,7 @@ async fn relay_claude_messages(
                 append_gateway_log(
                     &ctx,
                     Some(&route),
+                    &headers,
                     "/v1/messages",
                     response.status(),
                     started.elapsed().as_millis() as i64,
@@ -911,6 +922,7 @@ async fn relay_claude_messages(
         append_gateway_log(
             &ctx,
             Some(&route),
+            &headers,
             "/v1/messages",
             response.status(),
             started.elapsed().as_millis() as i64,
@@ -936,6 +948,7 @@ async fn relay_claude_messages(
     append_gateway_log(
         &ctx,
         Some(&route),
+        &headers,
         "/v1/messages",
         response.status(),
         started.elapsed().as_millis() as i64,
@@ -973,6 +986,7 @@ fn policy_blocked_response(reason: &str) -> Response {
 fn append_gateway_log(
     context: &GatewayContext,
     route: Option<&GatewayResolvedRoute>,
+    headers: &HeaderMap,
     endpoint: &str,
     status: StatusCode,
     latency_ms: i64,
@@ -986,12 +1000,15 @@ fn append_gateway_log(
         .map(|value| value.provider.clone())
         .unwrap_or_else(|| "unknown".to_string());
     let model = route.and_then(|value| value.model.clone());
+    let user_key =
+        resolve_gateway_user_key(headers).or_else(|| route.map(|value| value.app_type.clone()));
 
     if let Ok(vault) = context.vault.lock() {
         let _ = vault.append_gateway_request_log(GatewayRequestLogInput {
             app_type,
             provider,
             model,
+            user_key,
             endpoint: endpoint.to_string(),
             status_code: i64::from(status.as_u16()),
             latency_ms,
@@ -1004,7 +1021,7 @@ fn append_gateway_log(
 
 async fn relay_to_codex(
     context: GatewayContext,
-    headers: HeaderMap,
+    headers: &HeaderMap,
     body: Bytes,
     compact: bool,
     route_model: Option<&str>,
@@ -1612,6 +1629,16 @@ fn header_value(headers: &HeaderMap, key: &str) -> Option<String> {
         .get(key)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string())
+}
+
+fn resolve_gateway_user_key(headers: &HeaderMap) -> Option<String> {
+    header_value(headers, "x-mykey-user")
+        .or_else(|| header_value(headers, "x-user-id"))
+        .or_else(|| header_value(headers, "mykey-user"))
+        .or_else(|| header_value(headers, "user-id"))
+        .or_else(|| header_value(headers, "user"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn read_codex_auth_context() -> Result<CodexAuthContext, String> {

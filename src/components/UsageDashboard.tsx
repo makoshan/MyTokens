@@ -53,6 +53,7 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
   const [gatewayWindow, setGatewayWindow] = useState<number>(60)
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null)
+  const [selectedUser, setSelectedUser] = useState<string | null>(null)
 
   const fetchData = async () => {
     if (!masterPassword) return
@@ -77,6 +78,9 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
       if (selectedProvider && !traffic.by_provider.some((item) => item.key === selectedProvider)) {
         setSelectedProvider(null)
       }
+      if (selectedUser && !traffic.by_user.some((item) => item.key === selectedUser)) {
+        setSelectedUser(null)
+      }
     } catch (error) {
       console.error('Failed to load gateway analytics:', error)
       onError('网关分析加载失败')
@@ -91,18 +95,22 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
     fetchData()
   }, [masterPassword, gatewayWindow])
 
-  const filteredLogs = selectedModel
-    ? gatewayLogs.filter(
-        (item) => (item.model || '').trim().toLowerCase() === selectedModel.toLowerCase()
-      )
-    : gatewayLogs
+  const selectedModelLower = selectedModel?.trim().toLowerCase()
+  const selectedProviderLower = selectedProvider?.trim().toLowerCase()
+  const selectedUserLower = selectedUser?.trim().toLowerCase()
 
-  const filteredLogsByModelProvider = selectedProvider
-    ? filteredLogs.filter(
-        (item) =>
-          (item.provider || '').trim().toLowerCase() === selectedProvider.toLowerCase()
-      )
-    : filteredLogs
+  const filteredLogs = gatewayLogs.filter((item) => {
+    if (selectedModelLower && (item.model || '').trim().toLowerCase() !== selectedModelLower) {
+      return false
+    }
+    if (selectedProviderLower && item.provider.toLowerCase() !== selectedProviderLower) {
+      return false
+    }
+    if (selectedUserLower && (item.user_key || '').trim().toLowerCase() !== selectedUserLower) {
+      return false
+    }
+    return true
+  })
 
   const successRate = gatewayTraffic
     ? (gatewayTraffic.success_requests / Math.max(1, gatewayTraffic.total_requests)) * 100
@@ -322,6 +330,60 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
             </div>
 
             <div className="usage-mini-panel">
+              <div className="usage-mini-panel-header">
+                <h3>按用户排行</h3>
+                {selectedUser ? <span>当前: {selectedUser}</span> : null}
+                {selectedUser ? (
+                  <button
+                    type="button"
+                    className="usage-text-btn"
+                    onClick={() => setSelectedUser(null)}
+                  >
+                    清空筛选
+                  </button>
+                ) : null}
+              </div>
+              <table className="gateway-traffic-table">
+                <thead>
+                  <tr>
+                    <th>用户</th>
+                    <th>请求</th>
+                    <th>成功</th>
+                    <th>P95</th>
+                    <th>成本</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {gatewayTraffic.by_user.slice(0, 6).map((item) => {
+                    const isSelected = selectedUser === item.key
+                    return (
+                      <tr
+                        key={`user-${item.key}`}
+                        className={isSelected ? 'is-selected' : undefined}
+                        onClick={() => setSelectedUser(isSelected ? null : item.key)}
+                        role="button"
+                        tabIndex={0}
+                      >
+                        <td>{item.key}</td>
+                        <td>{item.requests}</td>
+                        <td>{item.success_requests}</td>
+                        <td>{item.p95_latency_ms ? `${item.p95_latency_ms}ms` : '--'}</td>
+                        <td>{formatCost(item.estimated_cost_usd)}</td>
+                      </tr>
+                    )
+                  })}
+                  {gatewayTraffic.by_user.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="gateway-log-empty">
+                        暂无用户级流量
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="usage-mini-panel">
               <h3>时间序列（近 {gatewayWindow} 分钟）</h3>
               <div className="gateway-timeline-mini">
                 {gatewayTraffic.timeline.slice(-12).map((point) => (
@@ -343,6 +405,7 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
             <h3>
               网关请求明细（最近）{selectedModel ? ` - ${selectedModel}` : ''}
               {selectedProvider ? ` / ${selectedProvider}` : ''}
+              {selectedUser ? ` / ${selectedUser}` : ''}
             </h3>
             <table className="gateway-traffic-table">
               <thead>
@@ -351,6 +414,7 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                   <th>应用</th>
                   <th>供应商</th>
                   <th>模型</th>
+                  <th>用户</th>
                   <th>端点</th>
                   <th>状态</th>
                   <th>耗时</th>
@@ -358,12 +422,13 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                 </tr>
               </thead>
               <tbody>
-                {filteredLogsByModelProvider.slice(0, 20).map((item) => (
+                {filteredLogs.slice(0, 20).map((item) => (
                   <tr key={item.id}>
                     <td>{new Date(item.created_at).toLocaleTimeString()}</td>
                     <td>{integrationLabels[item.app_type] || item.app_type}</td>
                     <td>{item.provider}</td>
                     <td>{item.model || '-'}</td>
+                    <td>{item.user_key || '-'}</td>
                     <td>
                       <code>{item.endpoint}</code>
                     </td>
@@ -372,10 +437,12 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                     <td>{item.blocked_reason || item.error_code || '-'}</td>
                   </tr>
                 ))}
-                {filteredLogsByModelProvider.length === 0 ? (
+                {filteredLogs.length === 0 ? (
                   <tr>
                     <td colSpan={8} className="gateway-log-empty">
-                      {selectedModel ? '该模型暂无最近请求' : '暂无网关请求记录'}
+                      {selectedModel || selectedProvider || selectedUser
+                        ? '该筛选条件暂无最近请求'
+                        : '暂无网关请求记录'}
                     </td>
                   </tr>
                 ) : null}
