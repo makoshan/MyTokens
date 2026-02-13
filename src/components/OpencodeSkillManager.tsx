@@ -205,6 +205,9 @@ export default function OpencodeSkillManager({ masterPassword }: { masterPasswor
   const [editing, setEditing] = useState<EditState | null>(null)
   const [saving, setSaving] = useState(false)
   const [capabilities, setCapabilities] = useState<MykeyCapability[]>([])
+  const [showCapabilities, setShowCapabilities] = useState(false)
+  const [showTemplates, setShowTemplates] = useState(false)
+  const [templateAppType, setTemplateAppType] = useState('opencode')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const loadData = async () => {
@@ -289,6 +292,9 @@ export default function OpencodeSkillManager({ masterPassword }: { masterPasswor
       }
 
       setIntegrations(visible)
+      if (visible.length > 0 && !visible.some((item) => item.app_type === templateAppType)) {
+        setTemplateAppType(visible[0].app_type)
+      }
       setSnapshotsByApp(nextByApp)
       setItems(nextItems)
     } catch (err) {
@@ -355,7 +361,7 @@ export default function OpencodeSkillManager({ masterPassword }: { masterPasswor
         continue
       }
 
-      const parsed = parseJsonObject(incoming.name, JSON.stringify(incoming.content))
+      const parsed = normalizeExportObject(incoming.content, `${incoming.appType}:${incoming.name}`)
       const meta = extractSkillMeta(parsed)
       const nextItem: SkillItem = {
         id: randomId(),
@@ -438,6 +444,23 @@ export default function OpencodeSkillManager({ masterPassword }: { masterPasswor
       }),
     })
   }
+
+  const copyText = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setNotice('已复制到剪贴板')
+    } catch (err) {
+      console.error('copy failed', err)
+      alert('复制失败，请手动复制')
+    }
+  }
+
+  const commandSignature = (capability: MykeyCapability) => {
+    const params = capability.params.length ? capability.params.join(', ') : '无参数'
+    return `${capability.id}(${params})`
+  }
+
+  const templateCount = integrations.length > 0 ? `${integrations.length} 个可用应用` : '0 个可用应用'
 
   const filteredItems = useMemo(() => {
     const query = searchQuery.trim().toLowerCase()
@@ -583,6 +606,18 @@ export default function OpencodeSkillManager({ masterPassword }: { masterPasswor
           <a className="btn btn-secondary" href="https://opencode.ai/docs/skills/" target="_blank" rel="noreferrer">
             Skills 文档
           </a>
+          <button className="btn btn-secondary" onClick={triggerImport}>
+            导入技能
+          </button>
+          <button className="btn btn-secondary" onClick={handleExportSkills}>
+            导出技能
+          </button>
+          <button className="btn btn-secondary" onClick={() => setShowTemplates((value) => !value)}>
+            模板库
+          </button>
+          <button className="btn btn-secondary" onClick={() => setShowCapabilities((value) => !value)}>
+            命令提示
+          </button>
           <button className="btn btn-secondary" onClick={loadData}>
             刷新
           </button>
@@ -602,6 +637,106 @@ export default function OpencodeSkillManager({ masterPassword }: { masterPasswor
         </div>
       </div>
 
+      {showTemplates ? (
+        <section className="tool-panel">
+          <div className="tool-panel-header">
+            <h3>技能模板库（导入式）</h3>
+            <div className="tool-panel-tools">
+              <span className="tool-inline-label">应用到：</span>
+              <select
+                value={templateAppType}
+                onChange={(event) => setTemplateAppType(event.target.value)}
+                disabled={integrations.length === 0}
+              >
+                {integrations.map((integration) => (
+                  <option key={integration.app_type} value={integration.app_type}>
+                    {appLabel(integration.app_type)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <p className="tool-panel-subtitle">{templateCount}，点击模板会打开编辑器，可直接保存。</p>
+          <div className="tool-template-grid">
+            {DEFAULT_SKILL_TEMPLATES.map((template) => {
+              const snippet = JSON.stringify({ description: template.description, ...template.content }, null, 2)
+              return (
+                <article key={template.name} className="tool-card">
+                  <h4>{template.name}</h4>
+                  <p className="tool-card-desc">{template.description}</p>
+                  <div className="tool-modal-actions">
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => applyTemplate(template, templateAppType)}
+                      disabled={integrations.length === 0}
+                    >
+                      应用到编辑器
+                    </button>
+                    <button className="btn btn-secondary" onClick={() => copyText(snippet)}>
+                      复制内容
+                    </button>
+                  </div>
+                </article>
+              )
+            })}
+          </div>
+        </section>
+      ) : null}
+
+      {showCapabilities ? (
+        <section className="tool-panel">
+          <div className="tool-panel-header">
+            <h3>命令提示面板</h3>
+            <span className="tool-panel-subtitle">来自 mykey_capabilities，可配合 `$ mykey_command` 使用</span>
+          </div>
+          {capabilities.length === 0 ? (
+            <div className="tool-empty">当前未获取到命令清单</div>
+          ) : (
+            <div className="tool-template-grid">
+              {capabilities.map((capability) => (
+                <article key={capability.id} className="tool-card">
+                  <h4>{capability.id}</h4>
+                  <p className="tool-card-desc">{capability.description}</p>
+                  <p className="tool-badge" style={{ width: 'fit-content' }}>
+                    {capability.requires_master_password ? '需要 Master Password' : '无需 Master Password'} /
+                    {capability.mutating ? '可变更' : '只读'}
+                  </p>
+                  <div className="tool-card-badges" style={{ marginTop: 8 }}>
+                    <code className="tool-inline-code">{commandSignature(capability)}</code>
+                  </div>
+                  {capability.params.length > 0 ? (
+                    <ul className="tool-param-list">
+                      {capability.params.map((item) => (
+                        <li key={`${capability.id}:${item}`}>{item}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  <div className="tool-modal-actions">
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() =>
+                        copyText(
+                          JSON.stringify(
+                            {
+                              command: capability.id,
+                              args: {},
+                            },
+                            null,
+                            2,
+                          ),
+                        )
+                      }
+                    >
+                      复制调用示例
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      ) : null}
+
       {notice ? <div className="opencode-tools-notice">{notice}</div> : null}
 
       <div className="tool-toolbar">
@@ -617,6 +752,14 @@ export default function OpencodeSkillManager({ masterPassword }: { masterPasswor
           {items.length} skill{items.length === 1 ? '' : 's'}
         </div>
       </div>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="application/json"
+        onChange={handleImportFile}
+        style={{ display: 'none' }}
+      />
 
       {filteredItems.length === 0 ? (
         <div className="tool-empty">没有匹配的 Skill 条目</div>
