@@ -54,6 +54,7 @@ export interface GatewayTrafficGroup {
   success_requests: number
   error_requests: number
   blocked_requests: number
+  estimated_cost_usd?: number
   avg_latency_ms?: number | null
   p95_latency_ms?: number | null
 }
@@ -83,6 +84,7 @@ export interface GatewayTrafficMetrics {
   estimated_cost_usd: number
   by_app: GatewayTrafficGroup[]
   by_provider: GatewayTrafficGroup[]
+  by_model: GatewayTrafficGroup[]
   top_errors: GatewayErrorSummary[]
   timeline: GatewayTrafficPoint[]
 }
@@ -96,6 +98,31 @@ export interface QuickActionSettings {
   target_lang: string
   auto_close_seconds: number
   updated_at: string
+}
+
+export interface QuickProviderOption {
+  provider: string
+  label: string
+}
+
+export interface QuickProviderOptions {
+  translate: QuickProviderOption[]
+  ocr: QuickProviderOption[]
+}
+
+export interface QuickActionResult {
+  action_type: string
+  source_text?: string | null
+  ocr_text?: string | null
+  result_text?: string | null
+  provider: string
+  translate_provider?: string | null
+  ocr_provider?: string | null
+  latency_ms: number
+  status: string
+  error_code?: string | null
+  error_message?: string | null
+  created_at: string
 }
 
 export interface QuickActionHistoryRecord {

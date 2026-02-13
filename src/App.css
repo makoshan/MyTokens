@@ -276,6 +276,26 @@ button.detail-chip {
   word-break: break-all;
 }
 
+.detail-item-subtle {
+  color: var(--muted);
+}
+
+.detail-model-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.detail-model-tag {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 10px;
+}
+
 .detail-link-btn {
   align-self: flex-start;
 }

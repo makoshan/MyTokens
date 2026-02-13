@@ -46,21 +46,24 @@ interface AppEntryDraft {
   content: string
 }
 
+interface GatewayModelCatalogItem {
+  app_type: string
+  provider: string
+  model: string
+}
+
 type AppConfigTab = 'model' | 'mcp' | 'skill' | 'other'
 
 const MANAGED_CONFIG_APPS = new Set(['opencode', 'openclaw', 'codex', 'claude-code'])
 const QUICK_ROUTE_APPS = new Set(['opencode', 'openclaw'])
 
 const APP_MODEL_HINTS: Record<string, string[]> = {
-  opencode: ['gpt-5', 'gpt-4.1', 'claude-sonnet-4-20250514', 'kimi-k2-0905-preview'],
-  openclaw: ['gpt-5', 'gpt-4.1', 'claude-sonnet-4-20250514', 'kimi-k2-0905-preview'],
-  codex: ['gpt-5', 'gpt-4.1'],
-  'claude-code': ['claude-sonnet-4-20250514', 'claude-3-5-sonnet'],
+  'claude-code': ['claude-sonnet-4-5', 'claude-opus-4-6', 'claude-haiku-4-5'],
 }
 
 const APP_QUICK_PROVIDER_PRESETS: Record<string, QuickProviderPreset[]> = {
   'claude-code': [
-    { provider: 'anthropic', label: 'Claude Official', model: 'claude-sonnet-4-20250514' },
+    { provider: 'anthropic', label: 'Claude Official', model: 'claude-sonnet-4-5' },
     { provider: 'deepseek', label: 'DeepSeek', model: 'deepseek-chat' },
     { provider: 'glm', label: 'Zhipu GLM', model: 'glm-4.7' },
     { provider: 'kimi-for-coding', label: 'Kimi for Coding', model: 'kimi-for-coding' },
@@ -230,6 +233,9 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
   const [appSkillKeys, setAppSkillKeys] = useState<Record<string, 'skill' | 'skills'>>({})
   const [appTabByType, setAppTabByType] = useState<Record<string, AppConfigTab>>({})
   const [gatewayAccessByApp, setGatewayAccessByApp] = useState<Record<string, GatewayAccessCredentials>>({})
+  const [gatewayModelCatalog, setGatewayModelCatalog] = useState<
+    Record<string, Record<string, string[]>>
+  >({})
 
   const providerSelectGroups = useMemo(() => buildProviderSelectGroups(providers), [providers])
   const providerValueSet = useMemo(() => new Set(providers.map((item) => item.provider)), [providers])
@@ -315,9 +321,10 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
     setLoading(true)
     setError(null)
     try {
-      const [settings, appRoutes] = await Promise.all([
+      const [settings, appRoutes, gatewayCatalog] = await Promise.all([
         invoke<{ integrations: AppIntegration[] }>('get_global_settings', { masterPassword }),
         invoke<AppRoute[]>('get_app_routes', { masterPassword }),
+        invoke<GatewayModelCatalogItem[]>('list_gateway_model_catalog', { masterPassword }),
       ])
 
       const visibleIntegrations = settings.integrations
@@ -329,6 +336,21 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
 
       setIntegrations(visibleIntegrations)
       setRoutes(visibleRoutes)
+      const catalogByAppProvider: Record<string, Record<string, string[]>> = {}
+      gatewayCatalog.forEach((item) => {
+        if (!isAppVisible(item.app_type)) return
+        if (!catalogByAppProvider[item.app_type]) {
+          catalogByAppProvider[item.app_type] = {}
+        }
+        const providerModels = catalogByAppProvider[item.app_type]!
+        const next = providerModels[item.provider] || []
+        if (!next.includes(item.model)) {
+          next.push(item.model)
+        }
+        next.sort((a, b) => a.localeCompare(b))
+        providerModels[item.provider] = next
+      })
+      setGatewayModelCatalog(catalogByAppProvider)
 
       setDrafts((previous) => {
         const next = { ...previous }
@@ -663,10 +685,13 @@ export default function ApplicationManager({ masterPassword, providers }: Applic
             }
             const currentRoute = routeByApp.get(appType)
             const selectedProvider = providers.find((provider) => provider.provider === draft.provider) || null
-            const modelOptions = selectedProvider?.models || []
-            const quickModelOptions = uniqueNonEmpty([
-              ...modelOptions.slice(0, 10),
+            const modelOptions = uniqueNonEmpty([
+              ...((gatewayModelCatalog[appType] && gatewayModelCatalog[appType][draft.provider]) || []),
+              ...(selectedProvider?.models || []),
               ...(APP_MODEL_HINTS[appType] || []),
+            ])
+            const quickModelOptions = uniqueNonEmpty([
+              ...modelOptions,
               draft.model,
               currentRoute?.model || '',
             ]).slice(0, 10)

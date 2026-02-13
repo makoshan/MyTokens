@@ -520,11 +520,24 @@ fn run_python_code_internal(
 
     let duration_ms = started.elapsed().as_millis() as u64;
     let stdout_raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let structured_output = extract_structured_output(&stdout_raw);
     let stderr_raw = String::from_utf8_lossy(&output.stderr).to_string();
+    let structured_output = extract_structured_output(&stdout_raw).or_else(|| extract_structured_output(&stderr_raw));
     let stdout = truncate_text(&stdout_raw, max_output_chars);
     let stderr = truncate_text(&stderr_raw, max_output_chars);
     let exit_code = output.status.code().unwrap_or(-1);
+
+    let mut result = json!({
+        "ok": output.status.success(),
+        "python": python,
+        "exit_code": exit_code,
+        "duration_ms": duration_ms,
+        "stdout": stdout,
+        "stderr": stderr,
+    });
+
+    if let Some(value) = structured_output {
+        result["structured_output"] = value;
+    }
 
     if !output.status.success() {
         let detail = if stderr.is_empty() {
@@ -536,20 +549,8 @@ fn run_python_code_internal(
         } else {
             format!("Python execution failed with code {}\nSTDERR:\n{}", exit_code, stderr)
         };
-        return Err(detail);
-    }
-
-    let mut result = json!({
-        "ok": true,
-        "python": python,
-        "exit_code": exit_code,
-        "duration_ms": duration_ms,
-        "stdout": stdout,
-        "stderr": stderr,
-    });
-
-    if let Some(value) = structured_output {
-        result["structured_output"] = value;
+        result["error"] = json!(detail);
+        return Ok(result);
     }
 
     Ok(result)
@@ -1226,13 +1227,13 @@ async fn run_quick_translate_core(
                     Err(build_quick_error_result(
                         action_type,
                         &translate_provider_id,
-                        Some(source_text),
-                        ocr_text,
+                        Some(source_text.clone()),
+                        ocr_text.clone(),
                         "translate_failed",
                         detail,
                         started.elapsed().as_millis() as i64,
                         Some(translate_provider_id.clone()),
-                        ocr_provider,
+                        ocr_provider.clone(),
                     ))
                 }
             }

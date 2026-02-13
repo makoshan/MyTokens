@@ -1,9 +1,16 @@
 import type { ProviderConfig } from '../types/provider'
 
-export type ProviderCategory = 'model' | 'translation' | 'search' | 'ocr' | 'other'
+export type ProviderCategory =
+  | 'model'
+  | 'speech_to_text'
+  | 'translation'
+  | 'search'
+  | 'ocr'
+  | 'other'
 
 const PROVIDER_CATEGORY_LABELS: Record<ProviderCategory, string> = {
   model: '模型供应商',
+  speech_to_text: 'Speech-to-Text 供应商',
   translation: '翻译供应商',
   search: '搜索供应商',
   ocr: 'OCR 供应商',
@@ -36,6 +43,12 @@ const PROVIDER_CATEGORIES: Record<string, ProviderCategory> = {
   opencode: 'model',
   openclaw: 'model',
   amp: 'model',
+  deepgram: 'speech_to_text',
+  assemblyai: 'speech_to_text',
+  speechmatics: 'speech_to_text',
+  elevenlabs: 'speech_to_text',
+  fireworks: 'speech_to_text',
+  deepinfra: 'speech_to_text',
   deepl: 'translation',
   'google-translate': 'translation',
   'google-translate-free': 'translation',
@@ -89,6 +102,12 @@ const PROVIDER_LABELS: Record<string, string> = {
   opencode: 'OpenCode',
   openclaw: 'OpenClaw',
   amp: 'Amp',
+  deepgram: 'Deepgram',
+  assemblyai: 'AssemblyAI',
+  speechmatics: 'Speechmatics',
+  elevenlabs: 'ElevenLabs',
+  fireworks: 'Fireworks AI',
+  deepinfra: 'DeepInfra',
   other: 'Other',
 }
 
@@ -130,6 +149,12 @@ const PROVIDER_COLORS: Record<string, string> = {
   opencode: '#0f766e',
   openclaw: '#b45309',
   amp: '#f34e3f',
+  deepgram: '#0ea5e9',
+  assemblyai: '#2563eb',
+  speechmatics: '#7c3aed',
+  elevenlabs: '#db2777',
+  fireworks: '#f97316',
+  deepinfra: '#9333ea',
   other: '#6b7280',
 }
 
@@ -165,7 +190,14 @@ export function buildProviderSelectGroups(providers: ProviderConfig[]): Array<{
   label: string
   options: Array<{ value: string; label: string }>
 }> {
-  const order: ProviderCategory[] = ['model', 'translation', 'search', 'ocr', 'other']
+  const order: ProviderCategory[] = [
+    'model',
+    'speech_to_text',
+    'translation',
+    'search',
+    'ocr',
+    'other',
+  ]
   const grouped = new Map<ProviderCategory, Array<{ value: string; label: string }>>()
 
   providers.forEach((provider) => {

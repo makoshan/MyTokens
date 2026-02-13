@@ -7,9 +7,7 @@ import {
   GatewayPolicySettings,
   GatewayRequestLog,
   GlobalSettingsPayload,
-  MacosPermissionStatus,
   QuickActionSettings,
-  QuickHotkeyDiagnostics,
   ServiceConfig,
 } from '../types/settings'
 import type { ProviderConfig } from '../types/provider'
@@ -108,8 +106,6 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
   )
   const [quickSettings, setQuickSettings] = useState<QuickActionSettings | null>(null)
   const [quickProviders, setQuickProviders] = useState<ProviderConfig[]>([])
-  const [quickDiagnostics, setQuickDiagnostics] = useState<QuickHotkeyDiagnostics | null>(null)
-  const [permissionStatus, setPermissionStatus] = useState<MacosPermissionStatus | null>(null)
   const [quickSaveMessage, setQuickSaveMessage] = useState<string>('')
 
   const services = settings?.services ?? []
@@ -123,7 +119,7 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
       if (showLoading) {
         setLoading(true)
       }
-      const [payload, policy, logs, traffic, quick, providers, diagnostics, perms] = await Promise.all([
+      const [payload, policy, logs, traffic, quick, providers] = await Promise.all([
         invoke<GlobalSettingsPayload>('get_global_settings', {
           masterPassword,
         }),
@@ -142,10 +138,6 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
           masterPassword,
         }),
         invoke<ProviderConfig[]>('get_providers', { masterPassword }),
-        invoke<QuickHotkeyDiagnostics>('get_quick_hotkey_diagnostics', {
-          masterPassword,
-        }),
-        invoke<MacosPermissionStatus>('get_macos_permission_status'),
       ])
       setSettings(payload)
       setGatewayPolicy(policy)
@@ -153,8 +145,6 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
       setGatewayTraffic(traffic)
       setQuickSettings(quick)
       setQuickProviders(providers)
-      setQuickDiagnostics(diagnostics)
-      setPermissionStatus(perms)
       setBudgetDraft(policy.daily_budget_usd ? policy.daily_budget_usd.toFixed(2) : '')
       setError(null)
     } catch (err) {
@@ -590,48 +580,10 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
         masterPassword,
       })
       setQuickSettings(saved)
-      const diagnostics = await invoke<QuickHotkeyDiagnostics>('get_quick_hotkey_diagnostics', {
-        masterPassword,
-      })
-      setQuickDiagnostics(diagnostics)
       setQuickSaveMessage('快捷翻译设置已保存并重新注册热键')
     } catch (err) {
       console.error(err)
       setQuickSaveMessage(`保存失败: ${String(err)}`)
-    } finally {
-      setBusyKey(null)
-    }
-  }
-
-  const refreshQuickDiagnostics = async () => {
-    setBusyKey('quick-diagnostics')
-    try {
-      const [diagnostics, perms] = await Promise.all([
-        invoke<QuickHotkeyDiagnostics>('get_quick_hotkey_diagnostics', {
-          masterPassword,
-        }),
-        invoke<MacosPermissionStatus>('get_macos_permission_status'),
-      ])
-      setQuickDiagnostics(diagnostics)
-      setPermissionStatus(perms)
-    } catch (err) {
-      console.error(err)
-      setQuickSaveMessage(`读取热键诊断失败: ${String(err)}`)
-    } finally {
-      setBusyKey(null)
-    }
-  }
-
-  const openPermissionSettings = async (
-    key: string,
-    command: 'open_macos_accessibility_settings' | 'open_macos_automation_settings' | 'open_macos_screen_capture_settings'
-  ) => {
-    setBusyKey(key)
-    try {
-      await invoke(command)
-    } catch (err) {
-      console.error(err)
-      setQuickSaveMessage(`打开系统设置失败: ${String(err)}`)
     } finally {
       setBusyKey(null)
     }
@@ -680,15 +632,14 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
 
       <section className="panel settings-section">
         <div className="panel-header">
-          <h2>快捷翻译（Bob 风格）</h2>
-          <span className="panel-count">MVP</span>
+          <h2>快捷翻译</h2>
         </div>
         {quickSettings ? (
           <div className="settings-list">
             <div className="settings-item">
               <div className="settings-item-header">
                 <div>
-                  <div className="settings-item-title">划词与截图热键</div>
+                  <div className="settings-item-title">快捷翻译</div>
                   <div className="settings-item-subtitle">
                     推荐使用 Option+D（划词）与 Option+S（截图）。
                   </div>
@@ -783,6 +734,26 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
                     placeholder="zh-Hans"
                   />
                 </label>
+                <label className="shipkey-field">
+                  <span>自动关闭（秒）</span>
+                  <input
+                    type="number"
+                    min={3}
+                    max={120}
+                    value={quickSettings.auto_close_seconds}
+                    onChange={(event) => {
+                      const value = Number.parseInt(event.target.value, 10)
+                      setQuickSettings((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              auto_close_seconds: Number.isNaN(value) ? 15 : value,
+                            }
+                          : prev
+                      )
+                    }}
+                  />
+                </label>
               </div>
               <div className="settings-item-controls">
                 <button
@@ -792,66 +763,7 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
                 >
                   {busyKey === 'quick-settings' ? '保存中...' : '保存并注册热键'}
                 </button>
-                <button
-                  className="btn btn-secondary"
-                  disabled={busyKey === 'quick-diagnostics'}
-                  onClick={refreshQuickDiagnostics}
-                >
-                  {busyKey === 'quick-diagnostics' ? '诊断中...' : '热键诊断'}
-                </button>
               </div>
-              {quickDiagnostics ? (
-                <div className="settings-item-subtitle">
-                  <div>translate: {quickDiagnostics.translate_hotkey} / {quickDiagnostics.translate_registered ? '已注册' : '未注册'}</div>
-                  <div>ocr: {quickDiagnostics.ocr_hotkey} / {quickDiagnostics.ocr_registered ? '已注册' : '未注册'}</div>
-                  <div>最近触发: {quickDiagnostics.last_trigger_shortcut || '-'} {quickDiagnostics.last_trigger_at ? `@ ${new Date(quickDiagnostics.last_trigger_at).toLocaleString()}` : ''}</div>
-                  <div>最近注册: {quickDiagnostics.last_register_at ? new Date(quickDiagnostics.last_register_at).toLocaleString() : '-'}</div>
-                  <div>注册错误: {quickDiagnostics.last_register_error || '无'}</div>
-                  {(quickDiagnostics.translate_parse_error || quickDiagnostics.ocr_parse_error) ? (
-                    <div>
-                      解析错误: {quickDiagnostics.translate_parse_error || quickDiagnostics.ocr_parse_error}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              {permissionStatus ? (
-                <div className="settings-item-subtitle">
-                  <div>辅助功能: {permissionStatus.accessibility_granted ? '已授权' : '未授权'}</div>
-                  <div>自动化(System Events): {permissionStatus.automation_granted ? '已授权' : '未授权'}</div>
-                  <div>划词能力: {permissionStatus.selection_capture_ready ? '就绪' : '未就绪'}</div>
-                  <div>{permissionStatus.guidance}</div>
-                  {permissionStatus.automation_error ? <div>自动化错误: {permissionStatus.automation_error}</div> : null}
-                  <div className="settings-item-controls">
-                    <button
-                      className="btn btn-secondary"
-                      disabled={busyKey === 'open-perm-accessibility'}
-                      onClick={() =>
-                        openPermissionSettings('open-perm-accessibility', 'open_macos_accessibility_settings')
-                      }
-                    >
-                      打开辅助功能
-                    </button>
-                    <button
-                      className="btn btn-secondary"
-                      disabled={busyKey === 'open-perm-automation'}
-                      onClick={() =>
-                        openPermissionSettings('open-perm-automation', 'open_macos_automation_settings')
-                      }
-                    >
-                      打开自动化
-                    </button>
-                    <button
-                      className="btn btn-secondary"
-                      disabled={busyKey === 'open-perm-screen'}
-                      onClick={() =>
-                        openPermissionSettings('open-perm-screen', 'open_macos_screen_capture_settings')
-                      }
-                    >
-                      打开屏幕录制
-                    </button>
-                  </div>
-                </div>
-              ) : null}
               {quickSaveMessage ? <div className="settings-item-subtitle">{quickSaveMessage}</div> : null}
             </div>
           </div>

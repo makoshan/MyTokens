@@ -41,9 +41,31 @@ interface ProviderManagerProps {
   loading?: boolean
 }
 
-const CATEGORY_ORDER: ProviderCategory[] = ['model', 'translation', 'search', 'ocr', 'other']
+const CATEGORY_ORDER: ProviderCategory[] = [
+  'model',
+  'speech_to_text',
+  'translation',
+  'search',
+  'ocr',
+  'other',
+]
 const createLocalId = () =>
   `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+const SPEECH_TO_TEXT_REFERENCE_URL = 'https://artificialanalysis.ai/speech-to-text'
+const SPEECH_TO_TEXT_MODEL_PRESETS: Record<string, string[]> = {
+  openai: ['gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1'],
+  groq: ['whisper-large-v3', 'whisper-large-v3-turbo'],
+  mistral: ['voxtral-small', 'voxtral-mini'],
+  gemini: ['gemini-2.5-pro', 'gemini-2.5-flash', 'chirp-3'],
+  'google-ai': ['gemini-2.5-pro', 'gemini-2.5-flash', 'chirp-3'],
+  deepgram: ['nova-3', 'nova-2'],
+  assemblyai: ['universal', 'slam-1'],
+  speechmatics: ['speechmatics-enhanced', 'speechmatics-standard'],
+  elevenlabs: ['scribe-v2'],
+  'amazon-bedrock': ['amazon-transcribe', 'nova-2-omni', 'nova-2-pro'],
+  fireworks: ['whisper-large-v3', 'whisper-large-v3-turbo'],
+  deepinfra: ['whisper-large-v3', 'voxtral-small', 'voxtral-mini'],
+}
 
 type EditableEndpoint = Required<ProviderEndpointInput>
 type EditableEnvVar = Required<ProviderEnvVarInput>
@@ -137,11 +159,17 @@ export default function ProviderManager({
 
   const activeProvider = selectedProvider
   const activeCategory = activeProvider ? getProviderCategory(activeProvider.provider) : null
+  const speechToTextPresetModels = useMemo(() => {
+    const providerId = activeProvider?.provider?.trim().toLowerCase()
+    if (!providerId) return []
+    return SPEECH_TO_TEXT_MODEL_PRESETS[providerId] || []
+  }, [activeProvider])
   const endpoints = editableEndpoints
   const envVars = editableEnvVars
   const appBindings = editableAppBindings
   const formProfile = useMemo(() => getFormProfile(activeCategory), [activeCategory])
-  const showEmptyAdvancedCards = activeCategory === 'model'
+  const showEmptyAdvancedCards =
+    activeCategory === 'model' || activeCategory === 'speech_to_text'
   const visibleAdvancedCards = useMemo(() => {
     return [
       { id: 'endpoints', title: '端点', count: endpoints.length },
@@ -193,7 +221,10 @@ export default function ProviderManager({
       setNewModel('')
       setShowKey(false)
       setStatus('idle')
-      setShowAdvanced(getProviderCategory(activeProvider.provider) === 'model')
+      setShowAdvanced(
+        getProviderCategory(activeProvider.provider) === 'model' ||
+          getProviderCategory(activeProvider.provider) === 'speech_to_text'
+      )
       setTestingEndpointId(null)
       setTestingBaseUrl(false)
       setTestResults({})
@@ -806,7 +837,33 @@ export default function ProviderManager({
 
             {formProfile.showModels ? (
               <div className="form-group">
-                <label>{formProfile.modelLabel}</label>
+                <div className="section-header">
+                  <label>{formProfile.modelLabel}</label>
+                  <div className="provider-json-actions">
+                    <button
+                      type="button"
+                      className="btn btn-link provider-mini-link"
+                      onClick={() => window.open(SPEECH_TO_TEXT_REFERENCE_URL, '_blank', 'noopener,noreferrer')}
+                    >
+                      STT 榜单参考
+                    </button>
+                    {speechToTextPresetModels.length > 0 ? (
+                      <button
+                        type="button"
+                        className="btn btn-link provider-mini-link"
+                        onClick={() =>
+                          setModels((prev) => {
+                            const merged = new Set(prev)
+                            speechToTextPresetModels.forEach((model) => merged.add(model))
+                            return Array.from(merged)
+                          })
+                        }
+                      >
+                        导入 STT 预设
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
                 <div className="model-input-row">
                   <input
                     type="text"
@@ -1453,6 +1510,9 @@ const getBasePlaceholder = (provider: string, category: ProviderCategory | null)
   if (category === 'ocr') {
     return '可选：OCR API 地址'
   }
+  if (category === 'speech_to_text') {
+    return '可选：Speech-to-Text API 地址'
+  }
   return 'https://'
 }
 
@@ -1494,6 +1554,19 @@ function getFormProfile(category: ProviderCategory | null) {
       showModels: false,
       modelLabel: '',
       modelPlaceholder: '',
+    }
+  }
+  if (category === 'speech_to_text') {
+    return {
+      title: 'Speech-to-Text 服务',
+      description: '用于语音识别（ASR/STT），支持维护模型列表并可一键导入常见模型。',
+      apiKeyLabel: 'API Key',
+      showBaseUrl: true,
+      baseUrlLabel: '接口地址',
+      baseUrlTip: '填写 STT 服务 API 端点地址，不要以斜杠结尾。',
+      showModels: true,
+      modelLabel: '识别模型',
+      modelPlaceholder: '输入模型名称，例如 whisper-1',
     }
   }
   if (category === 'other') {

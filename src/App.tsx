@@ -23,7 +23,7 @@ import {
 } from './types/provider'
 import type { Project } from './types/project'
 import { normalizeProjectLabel } from './utils/project'
-import { getProviderDisplayName } from './utils/provider'
+import { getProviderCategory, getProviderCategoryLabel, getProviderDisplayName } from './utils/provider'
 import { getQuotaStatus, type QuotaStatus } from './utils/usage'
 import {
   UNMATCHED_PROJECT_NAME,
@@ -166,6 +166,28 @@ function resolveProjectLabel(
 
 function providerLabel(providerId: string) {
   return getProviderDisplayName(providerId)
+}
+
+function collectProviderModelNames(provider: ProviderConfig | null): string[] {
+  if (!provider) return []
+  const candidates = [
+    ...(provider.models || []),
+    provider.details?.main_model || '',
+    provider.details?.reasoning_model || '',
+    provider.details?.default_haiku_model || '',
+    provider.details?.default_sonnet_model || '',
+    provider.details?.default_opus_model || '',
+    provider.details?.test_model || '',
+  ]
+  const seen = new Set<string>()
+  const models: string[] = []
+  candidates.forEach((value) => {
+    const trimmed = value.trim()
+    if (!trimmed || seen.has(trimmed)) return
+    seen.add(trimmed)
+    models.push(trimmed)
+  })
+  return models
 }
 
 function loadStatusState(): Record<string, { status: QuotaStatus; lastNotifiedAt: number }> {
@@ -410,6 +432,18 @@ function App() {
   const providerContextById = useMemo(
     () => buildProviderContextMap(credentials, projectLabelsByCredential, projects),
     [credentials, projectLabelsByCredential, projects]
+  )
+  const selectedKeyProvider = useMemo(() => {
+    if (!selectedKey) return null
+    return providers.find((item) => item.provider === selectedKey.provider) || null
+  }, [providers, selectedKey])
+  const selectedKeyProviderCategory = useMemo(() => {
+    if (!selectedKey) return null
+    return getProviderCategory(selectedKey.provider)
+  }, [selectedKey])
+  const selectedKeyProviderModels = useMemo(
+    () => collectProviderModelNames(selectedKeyProvider),
+    [selectedKeyProvider]
   )
 
   useEffect(() => {
@@ -905,6 +939,7 @@ function App() {
           {view === 'dashboard' ? (
             <UsageDashboard
               providerContextById={providerContextById}
+              masterPassword={masterPassword}
               quickStats={[
                 { key: 'keys', label: '密钥', value: dashboardOverview.keys, view: 'keys' },
                 { key: 'projects', label: '项目', value: dashboardOverview.projects, view: 'projects' },
@@ -1024,6 +1059,42 @@ function App() {
                           <label>创建时间</label>
                           <p>{new Date(selectedKey.created_at).toLocaleString()}</p>
                         </div>
+                      </div>
+                    </div>
+
+                    <div className="detail-section">
+                      <div className="detail-section-title">服务商配置</div>
+                      <div className="detail-item-grid">
+                        <div className="detail-item">
+                          <label>服务类型</label>
+                          <p>
+                            {selectedKeyProviderCategory
+                              ? getProviderCategoryLabel(selectedKeyProviderCategory)
+                              : '未知'}
+                          </p>
+                        </div>
+                        <div className="detail-item">
+                          <label>模型数量</label>
+                          <p>{selectedKeyProviderModels.length}</p>
+                        </div>
+                      </div>
+                      <div className="detail-item">
+                        <label>模型列表</label>
+                        {selectedKeyProviderModels.length > 0 ? (
+                          <div className="detail-model-tags">
+                            {selectedKeyProviderModels.map((model) => (
+                              <span key={model} className="detail-model-tag">
+                                {model}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="detail-item-subtle">
+                            {selectedKeyProviderCategory === 'translation' || selectedKeyProviderCategory === 'ocr'
+                              ? '当前服务商未配置模型（翻译/OCR 通常可直接按接口调用）。'
+                              : '当前服务商未配置模型。'}
+                          </p>
+                        )}
                       </div>
                     </div>
 

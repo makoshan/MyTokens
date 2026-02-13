@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import type { AppIntegration } from '../types/settings'
 import './OpencodeToolsManager.css'
@@ -7,6 +7,14 @@ interface IntegrationConfigSnapshot {
   app_type: string
   config_path: string
   config: unknown
+}
+
+interface MykeyCapability {
+  id: string
+  description: string
+  requires_master_password: boolean
+  mutating: boolean
+  params: string[]
 }
 
 interface SkillItem {
@@ -20,6 +28,52 @@ interface SkillItem {
   tags: string[]
   description: string
 }
+
+interface SkillTemplate {
+  name: string
+  description: string
+  content: Record<string, unknown>
+}
+
+interface SkillExportItem {
+  appType: string
+  skillKey: 'skill' | 'skills'
+  name: string
+  content: Record<string, unknown>
+}
+
+interface SkillExportBundle {
+  version: number
+  exportedAt: string
+  items: SkillExportItem[]
+}
+
+const DEFAULT_SKILL_TEMPLATES: SkillTemplate[] = [
+  {
+    name: 'code-review',
+    description: '通用代码审查，输出高置信度风险清单和修复建议',
+    content: {
+      description: '请对给定代码进行高优先级问题识别：安全、性能、可维护性，并按优先级给出可执行修复步骤。',
+      tags: ['review', 'quality', 'security'],
+    },
+  },
+  {
+    name: 'bug-surgeon',
+    description: '定位错误日志中的根因并给出修复步骤',
+    content: {
+      description: '请聚焦日志片段，先给出可能根因，再给出最小改动修复方案和验证命令。',
+      tags: ['debug', 'bug', 'triage'],
+    },
+  },
+  {
+    name: 'release-notes',
+    description: '将变更自动整理为发布说明',
+    content: {
+      description: '请将输入变更提炼为功能点、风险点、回归建议，输出标准发布说明格式。',
+      tags: ['documentation', 'release', 'summary'],
+    },
+  },
+]
 
 interface EditState {
   mode: 'create' | 'edit'
@@ -55,6 +109,13 @@ function parseJsonObject(label: string, source: string): Record<string, unknown>
     throw new Error(`${label} 必须是 JSON 对象`)
   }
   return parsed as Record<string, unknown>
+}
+
+function normalizeExportObject(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${label} 需要 JSON 对象`)
+  }
+  return value as Record<string, unknown>
 }
 
 function appLabel(appType: string): string {
@@ -96,6 +157,43 @@ function extractSkillMeta(value: Record<string, unknown>): { tags: string[]; des
   return { tags, description }
 }
 
+function parseSkillExportBundle(raw: string): SkillExportBundle {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    throw new Error(`导入文件不是有效 JSON：${String(error)}`)
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('导入内容不是对象')
+  }
+  const payload = parsed as { [key: string]: unknown }
+  const itemsRaw = Array.isArray(payload.items) ? payload.items : []
+  const normalizedItems: SkillExportItem[] = []
+
+  for (const item of itemsRaw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const candidate = item as Record<string, unknown>
+    const appType = typeof candidate.appType === 'string' ? candidate.appType.trim() : ''
+    const name = typeof candidate.name === 'string' ? candidate.name.trim() : ''
+    const skillKey = candidate.skillKey === 'skill' || candidate.skillKey === 'skills' ? candidate.skillKey : 'skills'
+    const content = normalizeExportObject(candidate.content, `${appType}:${name}`)
+    if (!appType || !name) continue
+    normalizedItems.push({
+      appType,
+      skillKey,
+      name,
+      content,
+    })
+  }
+
+  return {
+    version: typeof payload.version === 'number' ? payload.version : 1,
+    exportedAt: typeof payload.exportedAt === 'string' ? payload.exportedAt : new Date().toISOString(),
+    items: normalizedItems,
+  }
+}
+
 export default function OpencodeSkillManager({ masterPassword }: { masterPassword: string }) {
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
@@ -106,6 +204,8 @@ export default function OpencodeSkillManager({ masterPassword }: { masterPasswor
   const [items, setItems] = useState<SkillItem[]>([])
   const [editing, setEditing] = useState<EditState | null>(null)
   const [saving, setSaving] = useState(false)
+  const [capabilities, setCapabilities] = useState<MykeyCapability[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const loadData = async () => {
     if (!masterPassword) return
@@ -180,6 +280,14 @@ export default function OpencodeSkillManager({ masterPassword }: { masterPasswor
         console.error('load tool manager skills failed', err)
       }
 
+      try {
+        const capabilitiesResult = await invoke<MykeyCapability[]>('mykey_capabilities')
+        setCapabilities(capabilitiesResult)
+      } catch (err) {
+        console.error('load mykey capabilities failed', err)
+        setCapabilities([])
+      }
+
       setIntegrations(visible)
       setSnapshotsByApp(nextByApp)
       setItems(nextItems)
@@ -196,6 +304,140 @@ export default function OpencodeSkillManager({ masterPassword }: { masterPasswor
   useEffect(() => {
     loadData()
   }, [masterPassword])
+
+  const generateExportBundle = (nextItems: SkillItem[]): SkillExportBundle => {
+    const integrationItems = nextItems
+      .filter((item) => item.source === 'integration')
+      .map((item) => {
+        let content: Record<string, unknown>
+        try {
+          content = parseJsonObject(item.name, item.content)
+        } catch (error) {
+          throw new Error(`导出项 ${item.appType}/${item.name} 不是合法 JSON: ${String(error)}`)
+        }
+
+        return {
+          appType: item.appType,
+          skillKey: item.skillKey,
+          name: item.name,
+          content,
+        }
+      })
+
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      items: integrationItems,
+    }
+  }
+
+  const handleExportSkills = () => {
+    const bundle = generateExportBundle(items)
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+      type: 'application/json; charset=utf-8',
+    })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `mykey-skills-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const applyImportedSkills = async (bundle: SkillExportBundle) => {
+    const sourceItems = items.filter((item) => item.source === 'integration')
+    const appUpdates: Record<string, SkillItem[]> = {}
+    const insertedNames = new Set<string>()
+
+    for (const incoming of bundle.items) {
+      const snapshot = snapshotsByApp[incoming.appType]
+      if (!snapshot) {
+        continue
+      }
+
+      const parsed = parseJsonObject(incoming.name, JSON.stringify(incoming.content))
+      const meta = extractSkillMeta(parsed)
+      const nextItem: SkillItem = {
+        id: randomId(),
+        appType: incoming.appType,
+        configPath: snapshot.config_path,
+        source: 'integration',
+        skillKey: incoming.skillKey,
+        name: incoming.name,
+        content: formatJson(parsed),
+        tags: meta.tags,
+        description: meta.description,
+      }
+
+      appUpdates[incoming.appType] = appUpdates[incoming.appType]
+        ? [...appUpdates[incoming.appType], nextItem]
+        : [nextItem]
+      insertedNames.add(`${incoming.appType}::${incoming.name}`)
+    }
+
+    const updatedItems: SkillItem[] = [...items.filter((item) => item.source === 'tool-manager')]
+    const appTypes = new Set<string>([
+      ...Object.keys(snapshotsByApp),
+      ...Object.keys(appUpdates),
+    ])
+
+    for (const appType of appTypes) {
+      const snapshot = snapshotsByApp[appType]
+      if (!snapshot) {
+        continue
+      }
+      const existing = sourceItems.filter((item) => item.appType === appType)
+      const merged = new Map(existing.map((item) => [item.name, item] as [string, SkillItem]))
+      const imported = appUpdates[appType] || []
+      imported.forEach((item) => {
+        merged.set(item.name, item)
+      })
+      const nextItems = [...merged.values()]
+      await persistApp(appType, nextItems)
+      updatedItems.push(...nextItems.filter((item) => item.appType === appType))
+    }
+
+    setItems(updatedItems)
+    setNotice(`已导入 ${insertedNames.size} 个 Skill`)
+  }
+
+  const handleImportFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    try {
+      const raw = await file.text()
+      const bundle = parseSkillExportBundle(raw)
+      if (!bundle.items.length) {
+        alert('导入文件中没有可用 Skill')
+        return
+      }
+      await applyImportedSkills(bundle)
+    } catch (error) {
+      alert(`导入失败: ${String(error)}`)
+    } finally {
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+    }
+  }
+
+  const triggerImport = () => {
+    if (!fileInputRef.current) return
+    fileInputRef.current.click()
+  }
+
+  const applyTemplate = (template: SkillTemplate, appType: string) => {
+    setEditing({
+      mode: 'create',
+      appType,
+      name: template.name,
+      content: formatJson({
+        description: template.description,
+        ...template.content,
+      }),
+    })
+  }
 
   const filteredItems = useMemo(() => {
     const query = searchQuery.trim().toLowerCase()

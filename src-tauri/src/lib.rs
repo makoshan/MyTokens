@@ -30,6 +30,8 @@ pub struct QuickRuntimeState {
     pub last_source_text: Option<String>,
     pub last_ocr_text: Option<String>,
     pub last_result: Option<QuickActionResult>,
+    pub last_translate_provider: Option<String>,
+    pub last_ocr_provider: Option<String>,
     pub last_trigger_shortcut: Option<String>,
     pub last_trigger_at: Option<String>,
     pub last_register_at: Option<String>,
@@ -45,6 +47,8 @@ impl Default for QuickRuntimeState {
             last_source_text: None,
             last_ocr_text: None,
             last_result: None,
+            last_translate_provider: None,
+            last_ocr_provider: None,
             last_trigger_shortcut: None,
             last_trigger_at: None,
             last_register_at: None,
@@ -80,19 +84,21 @@ impl Default for QuickActionSettings {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct QuickActionResult {
-    pub action_type: String,
-    pub source_text: Option<String>,
-    pub ocr_text: Option<String>,
-    pub result_text: Option<String>,
-    pub provider: String,
-    pub latency_ms: i64,
-    pub status: String,
-    pub error_code: Option<String>,
-    pub error_message: Option<String>,
-    pub created_at: String,
-}
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    pub struct QuickActionResult {
+        pub action_type: String,
+        pub source_text: Option<String>,
+        pub ocr_text: Option<String>,
+        pub result_text: Option<String>,
+        pub provider: String,
+        pub translate_provider: Option<String>,
+        pub ocr_provider: Option<String>,
+        pub latency_ms: i64,
+        pub status: String,
+        pub error_code: Option<String>,
+        pub error_message: Option<String>,
+        pub created_at: String,
+    }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct QuickActionHistoryRecord {
@@ -377,6 +383,7 @@ pub struct GatewayTrafficGroup {
     pub success_requests: i64,
     pub error_requests: i64,
     pub blocked_requests: i64,
+    pub estimated_cost_usd: f64,
     pub avg_latency_ms: Option<f64>,
     pub p95_latency_ms: Option<i64>,
 }
@@ -409,6 +416,7 @@ pub struct GatewayTrafficMetrics {
     pub estimated_cost_usd: f64,
     pub by_app: Vec<GatewayTrafficGroup>,
     pub by_provider: Vec<GatewayTrafficGroup>,
+    pub by_model: Vec<GatewayTrafficGroup>,
     pub top_errors: Vec<GatewayErrorSummary>,
     pub timeline: Vec<GatewayTrafficPoint>,
 }
@@ -500,6 +508,7 @@ pub fn run() {
             commands::set_gateway_daily_budget,
             commands::get_gateway_request_logs,
             commands::get_gateway_traffic_metrics,
+            commands::list_gateway_model_catalog,
             commands::get_app_routes,
             commands::set_app_route,
             commands::detect_app_route_from_live_config,
@@ -510,6 +519,7 @@ pub fn run() {
             commands::get_claude_tool_manager_mcps,
             commands::get_claude_tool_manager_skills,
             commands::get_gateway_access_credentials,
+            commands::run_python_code,
             commands::clippy_codex_chat,
             commands::backup_now,
             commands::restore_backup,
@@ -521,8 +531,11 @@ pub fn run() {
             commands::trigger_quick_translate,
             commands::trigger_quick_ocr,
             commands::retry_last_quick_action,
+            commands::get_quick_provider_options,
+            commands::quick_clippy_assist,
             commands::hide_quick_result_panel,
             commands::get_last_quick_action_result,
+            commands::get_quick_action_auto_close_seconds,
             commands::get_quick_action_history,
             commands::get_quick_hotkey_diagnostics,
             commands::get_macos_permission_status,

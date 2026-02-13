@@ -30,8 +30,8 @@ const MODEL_SUGGESTIONS = [
   'default',
   'gpt-4o-mini',
   'gpt-4.1',
-  'claude-3.5-sonnet',
-  'claude-3.5-haiku',
+  'claude-sonnet-4-5',
+  'claude-haiku-4-5',
   'gemini-1.5-pro',
 ]
 

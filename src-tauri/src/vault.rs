@@ -439,6 +439,61 @@ impl Vault {
         items.into_iter().next()
     }
 
+    fn credential_sort_key(credential: &Credential) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(&credential.created_at)
+            .map(|dt| dt.timestamp())
+            .unwrap_or(0)
+    }
+
+    fn credential_name_contains_any(name: &str, keywords: &[&str]) -> bool {
+        let upper = name.to_ascii_uppercase();
+        keywords.iter().any(|keyword| upper.contains(keyword))
+    }
+
+    fn credential_is_api_key_candidate(credential: &Credential) -> bool {
+        let name = credential.name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        let positive = [
+            "API_KEY",
+            "AUTH_TOKEN",
+            "ACCESS_TOKEN",
+            "BEARER_TOKEN",
+            "SECRET_KEY",
+            "TOKEN",
+            "KEY",
+        ];
+        let negative = [
+            "MODEL",
+            "BASE_URL",
+            "URL",
+            "ENDPOINT",
+            "HOST",
+            "PATH",
+            "MAX_TOKENS",
+            "MAX_TOOL_TURNS",
+            "ALLOWED_TOOLS",
+            "CLI_PATH",
+            "MODEL_PREF",
+        ];
+        Self::credential_name_contains_any(name, &positive)
+            && !Self::credential_name_contains_any(name, &negative)
+    }
+
+    pub fn get_latest_api_credential_for_provider(&self, provider: &str) -> Option<Credential> {
+        let mut items: Vec<Credential> = self
+            .credentials
+            .values()
+            .filter(|cred| cred.provider == provider)
+            .map(|cred| self.resolve_credential(cred))
+            .filter(|cred| Self::credential_is_api_key_candidate(cred))
+            .collect();
+
+        items.sort_by(|a, b| Self::credential_sort_key(b).cmp(&Self::credential_sort_key(a)));
+        items.into_iter().next()
+    }
+
     fn resolve_credential(&self, credential: &Credential) -> Credential {
         let mut resolved = credential.clone();
         if let Ok(secret) = self.secret_manager.get(&credential.id) {
@@ -1813,10 +1868,8 @@ impl Vault {
         let mut next = settings;
         next.translate_hotkey = normalize_hotkey(&next.translate_hotkey, "Option+D");
         next.ocr_hotkey = normalize_hotkey(&next.ocr_hotkey, "Option+S");
-        next.default_translate_provider = normalize_non_empty(
-            &next.default_translate_provider,
-            "google-translate",
-        );
+        next.default_translate_provider =
+            normalize_non_empty(&next.default_translate_provider, "google-translate");
         next.default_ocr_provider = normalize_non_empty(&next.default_ocr_provider, "apple-ocr");
         next.source_lang = normalize_non_empty(&next.source_lang, "auto");
         next.target_lang = normalize_non_empty(&next.target_lang, "zh-Hans");
@@ -2281,6 +2334,22 @@ impl Vault {
         matches!(provider, "kimi" | "kimi-for-coding")
     }
 
+    fn normalize_claude_model_id(model: &str) -> String {
+        let value = model.trim();
+        if value.eq_ignore_ascii_case("claude-sonnet-4-20250514")
+            || value.eq_ignore_ascii_case("claude-sonnet-4-20250514[1m]")
+            || value.eq_ignore_ascii_case("claude-sonnet-4.5")
+        {
+            "claude-sonnet-4-5".to_string()
+        } else if value.eq_ignore_ascii_case("claude-haiku-4.5") {
+            "claude-haiku-4-5".to_string()
+        } else if value.eq_ignore_ascii_case("claude-opus-4.6") {
+            "claude-opus-4-6".to_string()
+        } else {
+            value.to_string()
+        }
+    }
+
     fn non_empty_owned(value: &str) -> Option<String> {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -2303,6 +2372,9 @@ impl Vault {
             {
                 return Some("kimi-for-coding".to_string());
             }
+            if matches!(app_type, "claude" | "claude-code") {
+                return Some(Self::normalize_claude_model_id(&explicit));
+            }
             return Some(explicit);
         }
         let details = &provider.details;
@@ -2316,7 +2388,7 @@ impl Vault {
             .iter()
             .find_map(|value| Self::non_empty_owned(value));
 
-        match app_type {
+        let resolved = match app_type {
             "claude" | "claude-code" => {
                 if Self::is_kimi_provider(provider.provider.as_str()) {
                     main_model
@@ -2337,6 +2409,12 @@ impl Vault {
             }
             "codex" => reasoning_model.or(main_model).or(first_model),
             _ => main_model.or(reasoning_model).or(first_model),
+        };
+
+        if matches!(app_type, "claude" | "claude-code") {
+            resolved.map(|value| Self::normalize_claude_model_id(&value))
+        } else {
+            resolved
         }
     }
 
@@ -2346,13 +2424,13 @@ impl Vault {
             .ok_or_else(|| format!("Provider not found: {}", provider))?;
 
         let api_key = if config.api_key.trim().is_empty() {
-            self.get_latest_credential_for_provider(provider)
+            self.get_latest_api_credential_for_provider(provider)
                 .map(|cred| cred.key.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| {
                     format!(
-                        "Provider '{}' 缺少 API Key，请先在提供商设置或密钥库中配置。",
-                        provider
+                        "Provider '{}' 缺少 API Key。请在提供商设置里填写，或在密钥库添加 *_API_KEY/*_AUTH_TOKEN 类型凭证。",
+                        provider,
                     )
                 })?
         } else {
@@ -2516,6 +2594,24 @@ impl Vault {
         Ok(None)
     }
 
+    pub fn gateway_open_responses_enabled(&self) -> Result<bool, String> {
+        let raw = self
+            .meta_get("gateway_open_responses")?
+            .unwrap_or_else(|| "false".to_string());
+        let normalized = raw.trim().to_lowercase();
+        Ok(matches!(
+            normalized.as_str(),
+            "1" | "true" | "on" | "yes" | "enabled" | "open"
+        ))
+    }
+
+    pub fn set_gateway_open_responses(&mut self, enabled: bool) -> Result<(), String> {
+        self.meta_set(
+            "gateway_open_responses",
+            if enabled { "true" } else { "false" },
+        )
+    }
+
     pub fn append_gateway_request_log(&self, item: GatewayRequestLogInput) -> Result<(), String> {
         let now = Local::now().to_rfc3339();
         self.conn
@@ -2623,6 +2719,7 @@ impl Vault {
         let p95_latency_ms = self.gateway_p95_latency(window, None)?;
         let by_app = self.gateway_group_metrics(window, "app_type")?;
         let by_provider = self.gateway_group_metrics(window, "provider")?;
+        let by_model = self.gateway_group_metrics(window, "model")?;
         let top_errors = self.gateway_top_errors(window)?;
         let timeline = self.gateway_timeline(window)?;
 
@@ -2639,6 +2736,7 @@ impl Vault {
             estimated_cost_usd,
             by_app,
             by_provider,
+            by_model,
             top_errors,
             timeline,
         })
@@ -2650,17 +2748,18 @@ impl Vault {
         group_by: &str,
     ) -> Result<Vec<GatewayTrafficGroup>, String> {
         let group_column = match group_by {
-            "app_type" | "provider" => group_by,
+            "app_type" | "provider" | "model" => group_by,
             _ => return Err(format!("Unsupported gateway group column: {}", group_by)),
         };
         let sql = format!(
             "SELECT
-                {group_column} AS group_key,
+                COALESCE(NULLIF(TRIM({group_column}), ''), 'unknown') AS group_key,
                 COUNT(*) AS requests,
                 COALESCE(SUM(CASE WHEN status_code BETWEEN 200 AND 399 THEN 1 ELSE 0 END), 0) AS success_requests,
                 COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_requests,
                 COALESCE(SUM(CASE WHEN blocked_reason IS NOT NULL AND TRIM(blocked_reason) != '' THEN 1 ELSE 0 END), 0) AS blocked_requests,
-                AVG(latency_ms) AS avg_latency_ms
+                AVG(latency_ms) AS avg_latency_ms,
+                COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS estimated_cost_usd
              FROM gateway_request_logs
              WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
              GROUP BY group_key
@@ -2677,14 +2776,22 @@ impl Vault {
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, Option<f64>>(5)?,
+                    row.get::<_, f64>(6)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
 
         let mut result = Vec::new();
         for row in rows {
-            let (key, requests, success_requests, error_requests, blocked_requests, avg_latency_ms) =
-                row.map_err(|e| e.to_string())?;
+            let (
+                key,
+                requests,
+                success_requests,
+                error_requests,
+                blocked_requests,
+                avg_latency_ms,
+                estimated_cost_usd,
+            ) = row.map_err(|e| e.to_string())?;
             let p95_latency_ms =
                 self.gateway_p95_latency(window_minutes, Some((group_column, &key)))?;
             result.push(GatewayTrafficGroup {
@@ -2693,6 +2800,7 @@ impl Vault {
                 success_requests,
                 error_requests,
                 blocked_requests,
+                estimated_cost_usd,
                 avg_latency_ms,
                 p95_latency_ms,
             });
@@ -2734,6 +2842,26 @@ impl Vault {
                          FROM gateway_request_logs
                          WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
                            AND provider = ?2
+                         ORDER BY latency_ms ASC",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map(params![window_minutes, value], |row| row.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())?;
+                let mut values = Vec::new();
+                for row in rows {
+                    values.push(row.map_err(|e| e.to_string())?);
+                }
+                values
+            }
+            Some(("model", value)) => {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT latency_ms
+                         FROM gateway_request_logs
+                         WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
+                           AND model = ?2
                          ORDER BY latency_ms ASC",
                     )
                     .map_err(|e| e.to_string())?;
@@ -3344,6 +3472,7 @@ impl Vault {
             );
             // Keep only one auth variable to avoid Claude Code auth conflict warnings.
             env.remove("ANTHROPIC_AUTH_TOKEN");
+            env.remove("CLAUDE_CODE_OAUTH_TOKEN");
             env.insert(
                 "MYKEY_GATEWAY_KEY".to_string(),
                 Value::String(gateway_token),
@@ -4809,18 +4938,25 @@ impl Vault {
         template: &provider_defaults::ProviderTemplate,
     ) {
         if let Some(config) = self.providers.get_mut(provider) {
-            if config.models.is_empty() && !template.models.is_empty() {
-                config.models = template
-                    .models
-                    .iter()
-                    .map(|model| (*model).to_string())
-                    .collect();
-                let models_json =
-                    serde_json::to_string(&config.models).unwrap_or_else(|_| "[]".to_string());
-                let _ = self.conn.execute(
-                    "UPDATE providers SET models = ?1 WHERE provider = ?2",
-                    params![models_json, provider],
-                );
+            if !template.models.is_empty() {
+                let mut merged = config.models.clone();
+                let mut changed = false;
+                for model in &template.models {
+                    let candidate = (*model).to_string();
+                    if !merged.iter().any(|item| item == &candidate) {
+                        merged.push(candidate);
+                        changed = true;
+                    }
+                }
+                if changed {
+                    config.models = merged;
+                    let models_json =
+                        serde_json::to_string(&config.models).unwrap_or_else(|_| "[]".to_string());
+                    let _ = self.conn.execute(
+                        "UPDATE providers SET models = ?1 WHERE provider = ?2",
+                        params![models_json, provider],
+                    );
+                }
             }
         }
 

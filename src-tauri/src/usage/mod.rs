@@ -22,12 +22,15 @@ pub async fn refresh_all_providers(
     let (
         openai_config,
         anthropic_config,
+        gemini_config,
         opencode_config,
         openclaw_config,
         openai_key,
         anthropic_key,
+        gemini_key,
         opencode_key,
         openclaw_key,
+        claude_oauth_token,
         claude_cli_path,
         amp_cli_path,
         gemini_cli_path,
@@ -41,6 +44,10 @@ pub async fn refresh_all_providers(
         let anthropic_key = vault
             .get_latest_credential_for_provider("anthropic")
             .map(|cred| cred.key);
+        let gemini_key = vault
+            .get_latest_credential_for_provider("gemini")
+            .map(|cred| cred.key)
+            .or_else(|| find_credential_value(&credentials, "GEMINI_API_KEY"));
         let opencode_key = vault
             .get_latest_credential_for_provider("opencode")
             .map(|cred| cred.key)
@@ -49,6 +56,9 @@ pub async fn refresh_all_providers(
             .get_latest_credential_for_provider("openclaw")
             .map(|cred| cred.key)
             .or_else(|| find_credential_value(&credentials, "OPENCLAW_API_KEY"));
+        let claude_oauth_token = find_credential_value(&credentials, "CLAUDE_OAUTH_ACCESS_TOKEN")
+            .or_else(|| find_credential_value(&credentials, "CLAUDE_AUTH_TOKEN"))
+            .or_else(|| find_credential_value(&credentials, "ANTHROPIC_AUTH_TOKEN"));
         let claude_cli_path =
             find_credential_value(&credentials, "CLAUDE_CLI_PATH").or_else(|| {
                 std::env::var("CLAUDE_CLI_PATH")
@@ -76,12 +86,15 @@ pub async fn refresh_all_providers(
         (
             vault.get_provider_config("openai"),
             vault.get_provider_config("anthropic"),
+            vault.get_provider_config("gemini"),
             vault.get_provider_config("opencode"),
             vault.get_provider_config("openclaw"),
             openai_key,
             anthropic_key,
+            gemini_key,
             opencode_key,
             openclaw_key,
+            claude_oauth_token,
             claude_cli_path,
             amp_cli_path,
             gemini_cli_path,
@@ -107,6 +120,7 @@ pub async fn refresh_all_providers(
         let (config, key_override) = match provider {
             "openai" => (openai_config.as_ref(), openai_key.as_deref()),
             "anthropic" => (anthropic_config.as_ref(), anthropic_key.as_deref()),
+            "gemini" => (gemini_config.as_ref(), gemini_key.as_deref()),
             "opencode" => (
                 opencode_config.as_ref(),
                 opencode_key.as_deref().or(openai_key.as_deref()),
@@ -125,7 +139,20 @@ pub async fn refresh_all_providers(
             _ => claude_cli_path.as_deref(),
         };
 
-        match probe(provider, config, key_override, cli_path_override).await {
+        let claude_oauth_token_override = match provider {
+            "anthropic" => claude_oauth_token.as_deref(),
+            _ => None,
+        };
+
+        match probe(
+            provider,
+            config,
+            key_override,
+            cli_path_override,
+            claude_oauth_token_override,
+        )
+        .await
+        {
             Ok(mut snapshot) => {
                 snapshot.provider_id = provider.to_string();
                 {
@@ -240,15 +267,24 @@ pub async fn probe(
     config: Option<&ProviderConfig>,
     api_key_override: Option<&str>,
     claude_cli_path_override: Option<&str>,
+    claude_oauth_token_override: Option<&str>,
 ) -> Result<UsageSnapshot, String> {
     match provider_id {
-        "anthropic" => probe_anthropic(config, api_key_override, claude_cli_path_override).await,
+        "anthropic" => {
+            probe_anthropic(
+                config,
+                api_key_override,
+                claude_cli_path_override,
+                claude_oauth_token_override,
+            )
+            .await
+        }
         "claude-code" => cli::probe_claude_cli("claude-code", claude_cli_path_override),
         "anthropic-cli" => cli::probe_claude_cli("anthropic-cli", claude_cli_path_override),
         "openai" => probe_openai(config, api_key_override).await,
         "opencode" => probe_openai_api(config, api_key_override, "OpenCode").await,
         "openclaw" => probe_openai_api(config, api_key_override, "OpenClaw").await,
-        "gemini" => cli::probe_gemini_cli("gemini", claude_cli_path_override),
+        "gemini" => cli::probe_gemini_cli("gemini", api_key_override, claude_cli_path_override),
         "kimi" => cli::probe_kimi_cli("kimi", claude_cli_path_override),
         "antigravity" => probe_antigravity().await,
         "amp" => cli::probe_amp_cli("amp", claude_cli_path_override),
@@ -397,22 +433,46 @@ async fn probe_anthropic(
     config: Option<&ProviderConfig>,
     api_key_override: Option<&str>,
     claude_cli_path_override: Option<&str>,
+    claude_oauth_token_override: Option<&str>,
 ) -> Result<UsageSnapshot, String> {
-    let oauth_err = match probe_claude_oauth().await {
-        Ok(snapshot) => return Ok(snapshot),
-        Err(err) => err,
-    };
+    let mut oauth_cost_only: Option<UsageSnapshot> = None;
+
+    if let Some(raw_token) = claude_oauth_token_override {
+        let token = raw_token.trim();
+        if !token.is_empty() {
+            match probe_claude_oauth_with_access_token(token).await {
+                Ok(snapshot) if !snapshot.quotas.is_empty() => return Ok(snapshot),
+                Ok(snapshot) => oauth_cost_only = Some(snapshot),
+                Err(_) => {}
+            }
+        }
+    }
 
     let cli_err = match cli::probe_claude_cli("anthropic", claude_cli_path_override) {
         Ok(snapshot) => return Ok(snapshot),
         Err(err) => err,
     };
 
+    let oauth_err = match probe_claude_oauth().await {
+        Ok(snapshot) => {
+            if !snapshot.quotas.is_empty() {
+                return Ok(snapshot);
+            }
+            oauth_cost_only = Some(snapshot);
+            "Claude OAuth returned cost-only data".to_string()
+        }
+        Err(err) => err,
+    };
+
+    if let Some(snapshot) = oauth_cost_only {
+        return Ok(snapshot);
+    }
+
     match probe_anthropic_api(config, api_key_override).await {
         Ok(snapshot) => Ok(snapshot),
         Err(api_err) => Err(format!(
-            "Claude OAuth probe failed: {}; Claude CLI probe failed: {}; Anthropic Admin API probe failed: {}",
-            oauth_err, cli_err, api_err
+            "Claude CLI probe failed: {}; Claude OAuth probe failed: {}; Anthropic Admin API probe failed: {}",
+            cli_err, oauth_err, api_err
         )),
     }
 }
@@ -1075,11 +1135,27 @@ async fn probe_claude_oauth() -> Result<UsageSnapshot, String> {
     }
 
     let data = fetch_claude_usage(&credentials.oauth.access_token).await?;
+    snapshot_from_claude_usage_data(&data, credentials.oauth.subscription_type.clone())
+}
+
+async fn probe_claude_oauth_with_access_token(access_token: &str) -> Result<UsageSnapshot, String> {
+    let token = access_token.trim();
+    if token.is_empty() {
+        return Err("Claude OAuth access token is empty".to_string());
+    }
+    let data = fetch_claude_usage(token).await?;
+    snapshot_from_claude_usage_data(&data, Some("vault_token".to_string()))
+}
+
+fn snapshot_from_claude_usage_data(
+    data: &Value,
+    account_tier: Option<String>,
+) -> Result<UsageSnapshot, String> {
     let mut quotas = Vec::new();
     let mut seen = HashSet::new();
 
     let roots = [
-        Some(&data),
+        Some(data),
         data.get("quotas"),
         data.get("rate_limits"),
         data.get("rateLimits"),
@@ -1177,7 +1253,7 @@ async fn probe_claude_oauth() -> Result<UsageSnapshot, String> {
         captured_at: Utc::now().to_rfc3339(),
         quotas,
         cost_usage,
-        account_tier: credentials.oauth.subscription_type.clone(),
+        account_tier,
         account_email: None,
     };
     Ok(snapshot)
@@ -1363,6 +1439,18 @@ async fn probe_codex_oauth() -> Result<UsageSnapshot, String> {
 
     let mut quotas = Vec::new();
 
+    let parse_window_reset = |window: &str| -> (Option<String>, Option<String>) {
+        let reset_dt = body
+            .get("rate_limit")
+            .and_then(|v| v.get(window))
+            .and_then(|v| v.get("reset_at"))
+            .and_then(|v| v.as_i64())
+            .and_then(|s| DateTime::<Utc>::from_timestamp(s, 0));
+        let reset_at = reset_dt.map(|dt| dt.to_rfc3339());
+        let reset_text = format_reset_text(reset_dt);
+        (reset_at, reset_text)
+    };
+
     let session_used = header_percent(&headers, "x-codex-primary-used-percent").or_else(|| {
         body.get("rate_limit")?
             .get("primary_window")?
@@ -1378,40 +1466,24 @@ async fn probe_codex_oauth() -> Result<UsageSnapshot, String> {
     });
 
     if let Some(used) = session_used {
+        let (reset_at, reset_text) = parse_window_reset("primary_window");
         quotas.push(UsageQuota {
             quota_type: "session".to_string(),
             label: "Session".to_string(),
             percent_remaining: 100.0 - used,
-            reset_at: body
-                .get("rate_limit")
-                .and_then(|v| v.get("primary_window"))
-                .and_then(|v| v.get("reset_at"))
-                .and_then(|v| v.as_i64())
-                .map(|s| {
-                    DateTime::<Utc>::from_timestamp(s, 0)
-                        .unwrap_or_else(Utc::now)
-                        .to_rfc3339()
-                }),
-            reset_text: None,
+            reset_at,
+            reset_text,
         });
     }
 
     if let Some(used) = weekly_used {
+        let (reset_at, reset_text) = parse_window_reset("secondary_window");
         quotas.push(UsageQuota {
             quota_type: "weekly".to_string(),
             label: "Weekly".to_string(),
             percent_remaining: 100.0 - used,
-            reset_at: body
-                .get("rate_limit")
-                .and_then(|v| v.get("secondary_window"))
-                .and_then(|v| v.get("reset_at"))
-                .and_then(|v| v.as_i64())
-                .map(|s| {
-                    DateTime::<Utc>::from_timestamp(s, 0)
-                        .unwrap_or_else(Utc::now)
-                        .to_rfc3339()
-                }),
-            reset_text: None,
+            reset_at,
+            reset_text,
         });
     }
 

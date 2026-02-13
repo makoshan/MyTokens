@@ -7,9 +7,9 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::thread;
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 
 pub fn probe_claude_cli(
     provider_id: &str,
@@ -17,34 +17,40 @@ pub fn probe_claude_cli(
 ) -> Result<UsageSnapshot, String> {
     let binary_path = resolve_claude_binary(cli_path_override)?;
 
-    // Try /usage first
-    match run_claude_command(&binary_path, "/usage") {
-        Ok(output) => {
-            // Check if it's the "subscription required" error (API Usage Billing) or similar fallback triggers
-            // Note: "available for subscription plans", "API Usage Billing", etc.
-            if output.contains("for subscription plans") || output.contains("API Usage Billing") {
-                // Fallback to /cost
-                parse_claude_cost(&run_claude_command(&binary_path, "/cost")?, provider_id)
-            } else {
-                match parse_claude_usage(&output, provider_id) {
-                    Ok(snapshot) => Ok(snapshot),
-                    Err(parse_err) => {
-                        let cost_out = run_claude_command(&binary_path, "/cost")
-                            .map_err(|cost_err| format!("{}; {}", parse_err, cost_err))?;
-                        parse_claude_cost(&cost_out, provider_id)
-                    }
-                }
-            }
+    let mut parse_errors = Vec::new();
+
+    let first_output = run_claude_command(&binary_path, "/usage");
+    if let Ok(output) = first_output {
+        let lower = output.to_ascii_lowercase();
+        if lower.contains("for subscription plans") || lower.contains("api usage billing") {
+            return parse_claude_cost(&run_claude_command(&binary_path, "/cost")?, provider_id);
         }
-        Err(e) => {
-            // If /usage failed hard (e.g. "Missing OpenAI API key" or other fatal), try /cost
-            if let Ok(cost_out) = run_claude_command(&binary_path, "/cost") {
-                parse_claude_cost(&cost_out, provider_id)
-            } else {
-                Err(e) // Return original error if both fail
-            }
+        match parse_claude_usage(&output, provider_id) {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(parse_err) => parse_errors.push(parse_err),
         }
+    } else if let Err(err) = first_output {
+        parse_errors.push(err);
     }
+
+    let second_output = run_claude_interactive_command(&binary_path, "/usage\n/quit\n", 15);
+    if let Ok(output) = second_output {
+        let lower = output.to_ascii_lowercase();
+        if lower.contains("for subscription plans") || lower.contains("api usage billing") {
+            return parse_claude_cost(&run_claude_command(&binary_path, "/cost")?, provider_id);
+        }
+        match parse_claude_usage(&output, provider_id) {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(parse_err) => parse_errors.push(parse_err),
+        }
+    } else if let Err(err) = second_output {
+        parse_errors.push(err);
+    }
+
+    Err(format!(
+        "Claude CLI probe failed: {}",
+        parse_errors.join("; ")
+    ))
 }
 
 pub fn probe_amp_cli(
@@ -58,10 +64,19 @@ pub fn probe_amp_cli(
 
 pub fn probe_gemini_cli(
     provider_id: &str,
+    api_key_override: Option<&str>,
     cli_path_override: Option<&str>,
 ) -> Result<UsageSnapshot, String> {
     let binary_path = resolve_gemini_binary(cli_path_override)?;
-    let output = run_interactive_command(&binary_path, &[], "/stats\n/quit\n", 10)?;
+    let mut extra_env: Vec<(&str, &str)> = Vec::new();
+    if let Some(key) = api_key_override {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            extra_env.push(("GEMINI_API_KEY", trimmed));
+        }
+    }
+    let output =
+        run_interactive_command_with_env(&binary_path, &[], "/stats\n/quit\n", 10, &extra_env)?;
     parse_gemini_usage(&output, provider_id)
 }
 
@@ -101,41 +116,72 @@ pub fn probe_kimi_cli(
 }
 
 fn run_claude_command(binary_path: &str, command_arg: &str) -> Result<String, String> {
-    // Use system temp dir to avoid project-specific config interference
-    let temp_dir = std::env::temp_dir();
+    let working_dir = claude_probe_working_dir();
 
     let mut child = Command::new(binary_path)
         .args(&[command_arg, "--allowed-tools", ""])
-        .current_dir(&temp_dir)
+        .current_dir(&working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to spawn '{} {}': {}", binary_path, command_arg, e))?;
 
-    // Pipe "1" to stdin to handle potential Trust Prompt
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = writeln!(stdin, "1");
+        let _ = write!(stdin, "\n1\n\n");
     }
 
-    // Wait a bit for output (since TUI keeps running interactively)
-    // 5 seconds should be enough for "Brewing..." and output
-    thread::sleep(StdDuration::from_secs(5));
-
-    // Kill the process securely
-    let _ = child.kill();
-
-    // Collect output
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to read output: {}", e))?;
+    let output = wait_child_with_timeout(child, StdDuration::from_secs(20), binary_path)?;
 
     // Combine stdout and stderr
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     let raw = format!("{}\n{}", stdout, stderr);
-    Ok(strip_ansi(&raw))
+    Ok(normalize_terminal_output(&raw))
+}
+
+fn run_claude_interactive_command(
+    binary_path: &str,
+    input: &str,
+    wait_secs: u64,
+) -> Result<String, String> {
+    let working_dir = claude_probe_working_dir();
+    let mut child = Command::new(binary_path)
+        .current_dir(&working_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn '{}': {}", binary_path, e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let mut seed = String::from("\n1\n\n");
+        seed.push_str(input);
+        let _ = stdin.write_all(seed.as_bytes());
+    }
+
+    let output = wait_child_with_timeout(child, StdDuration::from_secs(wait_secs), binary_path)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Ok(normalize_terminal_output(&format!(
+        "{}\n{}",
+        stdout, stderr
+    )))
+}
+
+fn claude_probe_working_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("CLAUDE_PROBE_DIR") {
+        let expanded = expand_user_home(path.trim());
+        let dir = PathBuf::from(expanded);
+        if dir.is_dir() {
+            return dir;
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        return home;
+    }
+    std::env::temp_dir()
 }
 
 fn resolve_claude_binary(cli_path_override: Option<&str>) -> Result<String, String> {
@@ -234,19 +280,32 @@ fn run_amp_command(binary_path: &str) -> Result<String, String> {
 }
 
 fn run_non_interactive_command(binary_path: &str, args: &[&str]) -> Result<String, String> {
+    run_non_interactive_command_with_env(binary_path, args, &[])
+}
+
+fn run_non_interactive_command_with_env(
+    binary_path: &str,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+) -> Result<String, String> {
     let temp_dir = std::env::temp_dir();
-    let output = Command::new(binary_path)
+    let mut command = Command::new(binary_path);
+    command
         .args(args)
         .current_dir(&temp_dir)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let output = command
         .output()
         .map_err(|e| format!("Failed to run '{}': {}", binary_path, e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let merged = format!("{}\n{}", stdout, stderr);
-    let cleaned = strip_ansi(&merged);
+    let cleaned = normalize_terminal_output(&merged);
 
     if !output.status.success() {
         let message = cleaned.trim();
@@ -265,13 +324,28 @@ fn run_interactive_command(
     input: &str,
     wait_secs: u64,
 ) -> Result<String, String> {
+    run_interactive_command_with_env(binary_path, args, input, wait_secs, &[])
+}
+
+fn run_interactive_command_with_env(
+    binary_path: &str,
+    args: &[&str],
+    input: &str,
+    wait_secs: u64,
+    extra_env: &[(&str, &str)],
+) -> Result<String, String> {
     let temp_dir = std::env::temp_dir();
-    let mut child = Command::new(binary_path)
+    let mut command = Command::new(binary_path);
+    command
         .args(args)
         .current_dir(&temp_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to spawn '{}': {}", binary_path, e))?;
 
@@ -279,15 +353,47 @@ fn run_interactive_command(
         let _ = write!(stdin, "{}", input);
     }
 
-    thread::sleep(StdDuration::from_secs(wait_secs));
-    let _ = child.kill();
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to read output: {}", e))?;
+    let output = wait_child_with_timeout(child, StdDuration::from_secs(wait_secs), binary_path)?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    Ok(strip_ansi(&format!("{}\n{}", stdout, stderr)))
+    Ok(normalize_terminal_output(&format!(
+        "{}\n{}",
+        stdout, stderr
+    )))
+}
+
+fn wait_child_with_timeout(
+    mut child: Child,
+    timeout: StdDuration,
+    binary_path: &str,
+) -> Result<Output, String> {
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|e| format!("Failed to read output: {}", e));
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    return child.wait_with_output().map_err(|e| {
+                        format!(
+                            "Failed to read output after timeout for '{}': {}",
+                            binary_path, e
+                        )
+                    });
+                }
+                thread::sleep(StdDuration::from_millis(120));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(format!("Failed while waiting '{}': {}", binary_path, e));
+            }
+        }
+    }
 }
 
 fn find_binary(candidate: &str) -> Option<String> {
@@ -413,6 +519,50 @@ fn strip_ansi(s: &str) -> String {
     re.replace_all(s, "").to_string()
 }
 
+fn normalize_terminal_output(raw: &str) -> String {
+    let stripped = strip_ansi(raw);
+    let mut output = String::new();
+    let mut line = String::new();
+    let mut cursor = 0usize;
+
+    for ch in stripped.chars() {
+        match ch {
+            '\r' => cursor = 0,
+            '\n' => {
+                output.push_str(line.trim_end());
+                output.push('\n');
+                line.clear();
+                cursor = 0;
+            }
+            '\u{8}' => {
+                if cursor > 0 {
+                    cursor -= 1;
+                }
+            }
+            c if c.is_control() => {}
+            c => {
+                if cursor >= line.len() {
+                    line.push(c);
+                } else {
+                    line.replace_range(cursor..cursor + 1, &c.to_string());
+                }
+                cursor += 1;
+            }
+        }
+    }
+
+    if !line.trim().is_empty() {
+        output.push_str(line.trim_end());
+    }
+
+    output
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn infer_quota_type(label: &str) -> String {
     let lower = label.to_ascii_lowercase();
     if lower.contains("session") || lower.contains("5h") || lower.contains("five") {
@@ -488,6 +638,12 @@ fn parse_claude_usage(stdout: &str, provider_id: &str) -> Result<UsageSnapshot, 
     {
         return Err("Claude CLI not logged in".to_string());
     }
+    if lower_out.contains("ready to code here")
+        || lower_out.contains("yes, i trust this folder")
+        || lower_out.contains("press enter to continue")
+    {
+        return Err("Claude CLI requires folder trust confirmation".to_string());
+    }
 
     let line_re = Regex::new(
         r"(?i)^(?P<label>[A-Za-z][A-Za-z0-9 .()/_-]{1,80}?)\s*[:\-]?\s*(?P<pct>\d{1,3}(?:\.\d+)?)\s*%\s*(?P<mode>left|remaining|used)?",
@@ -497,6 +653,8 @@ fn parse_claude_usage(stdout: &str, provider_id: &str) -> Result<UsageSnapshot, 
         r"(?i)(?:currently|session|weekly|sonnet|opus)[^0-9]*(?P<pct>\d{1,3}(?:\.\d+)?)\s*%",
     )
     .unwrap();
+    let section_pct_re =
+        Regex::new(r"(?i)(?P<pct>\d{1,3}(?:\.\d+)?)\s*%\s*(?P<mode>left|remaining|used)?").unwrap();
     let mut seen = HashSet::new();
 
     let lines: Vec<String> = clean_out
@@ -551,6 +709,75 @@ fn parse_claude_usage(stdout: &str, provider_id: &str) -> Result<UsageSnapshot, 
             reset_text,
         });
         seen.insert(dedup_key);
+    }
+
+    if quotas.is_empty() {
+        let section_specs = [
+            ("current session", "session", "Session"),
+            ("current week (all models)", "weekly", "Weekly"),
+            ("current week (sonnet only)", "seven_day_sonnet", "Sonnet"),
+            ("current week (sonnet)", "seven_day_sonnet", "Sonnet"),
+            ("current week (opus)", "seven_day_opus", "Opus"),
+        ];
+
+        for (label_probe, quota_type, default_label) in section_specs {
+            let section_index = lines
+                .iter()
+                .position(|line| line.to_ascii_lowercase().contains(label_probe));
+            let Some(section_index) = section_index else {
+                continue;
+            };
+
+            let mut found_percent = None;
+            for follow in lines.iter().skip(section_index + 1).take(6) {
+                if let Some(caps) = section_pct_re.captures(follow) {
+                    let pct = caps
+                        .name("pct")
+                        .and_then(|m| m.as_str().parse::<f64>().ok())
+                        .map(|v| v.clamp(0.0, 100.0));
+                    if let Some(pct) = pct {
+                        let mode = caps
+                            .name("mode")
+                            .map(|m| m.as_str().to_ascii_lowercase())
+                            .unwrap_or_default();
+                        let is_used =
+                            mode == "used" || follow.to_ascii_lowercase().contains(" used");
+                        let percent_remaining = if is_used { 100.0 - pct } else { pct };
+                        found_percent = Some(percent_remaining.clamp(0.0, 100.0));
+                        break;
+                    }
+                }
+            }
+
+            let Some(percent_remaining) = found_percent else {
+                continue;
+            };
+
+            let dedup_key = format!("{}:{}", quota_type, default_label.to_ascii_lowercase());
+            if seen.contains(&dedup_key) {
+                continue;
+            }
+
+            let mut reset_text = None;
+            let mut reset_at = None;
+            for follow in lines.iter().skip(section_index + 1).take(8) {
+                let parsed = parse_reset_from_line(follow);
+                if parsed.0.is_some() {
+                    reset_text = parsed.0;
+                    reset_at = parsed.1;
+                    break;
+                }
+            }
+
+            quotas.push(UsageQuota {
+                quota_type: quota_type.to_string(),
+                label: default_label.to_string(),
+                percent_remaining,
+                reset_at,
+                reset_text,
+            });
+            seen.insert(dedup_key);
+        }
     }
 
     if quotas.is_empty() {
@@ -903,5 +1130,22 @@ mod tests {
     fn test_strip_ansi() {
         let input = "\u{1b}[31mRed\u{1b}[0m";
         assert_eq!(strip_ansi(input), "Red");
+    }
+
+    #[test]
+    fn test_normalize_terminal_output_handles_carriage_return_overwrite() {
+        let input = "Current session\rCurrent week\n85% used\n";
+        let normalized = normalize_terminal_output(input);
+        assert!(normalized.contains("Current week"));
+        assert!(!normalized.contains("Current session"));
+    }
+
+    #[test]
+    fn test_normalize_terminal_output_keeps_quota_lines() {
+        let input = "Current session\n5% used\nResets in 2h 10m\n";
+        let normalized = normalize_terminal_output(input);
+        assert!(normalized.contains("Current session"));
+        assert!(normalized.contains("5% used"));
+        assert!(normalized.contains("Resets in 2h 10m"));
     }
 }

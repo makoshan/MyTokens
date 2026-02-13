@@ -4,8 +4,10 @@ import { ProviderUsageStatus } from '../types/usage';
 import UsageCard from './UsageCard';
 import './UsageDashboard.css';
 import type { ProviderLinkageContext } from '../utils/linkage';
+import { GatewayRequestLog, GatewayTrafficMetrics } from '../types/settings';
 
 interface UsageDashboardProps {
+  masterPassword: string
   providerContextById?: Record<string, ProviderLinkageContext>
   quickStats?: Array<{
     key: string
@@ -16,7 +18,378 @@ interface UsageDashboardProps {
   onNavigate?: (view: 'providers' | 'keys' | 'projects' | 'mcp' | 'skills' | 'apps') => void
 }
 
+const integrationLabels: Record<string, string> = {
+  claude: 'Claude Code',
+  'claude-code': 'Claude Code',
+  codex: 'Codex',
+  gemini: 'Gemini',
+  github: 'GitHub Copilot',
+  antigravity: 'Antigravity',
+  'z.ai': 'Z.ai',
+  amp: 'Amp',
+  aws: 'AWS Bedrock',
+  cursor: 'Cursor',
+  opencode: 'OpenCode',
+  openclaw: 'OpenClaw',
+  'openai-compatible': 'OpenAI Compatible',
+}
+
+const GATEWAY_WINDOWS = [
+  { label: '15 分钟', value: 15 },
+  { label: '1 小时', value: 60 },
+  { label: '6 小时', value: 360 },
+  { label: '24 小时', value: 1440 },
+]
+
+interface GatewayOverviewProps {
+  masterPassword: string
+  onError: (msg: string) => void
+}
+
+function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewProps) {
+  const [gatewayTraffic, setGatewayTraffic] = useState<GatewayTrafficMetrics | null>(null)
+  const [gatewayLogs, setGatewayLogs] = useState<GatewayRequestLog[]>([])
+  const [gatewayLoading, setGatewayLoading] = useState(false)
+  const [gatewayWindow, setGatewayWindow] = useState<number>(60)
+  const [selectedModel, setSelectedModel] = useState<string | null>(null)
+  const [selectedProvider, setSelectedProvider] = useState<string | null>(null)
+
+  const fetchData = async () => {
+    if (!masterPassword) return
+    try {
+      setGatewayLoading(true)
+      const [traffic, logs] = await Promise.all([
+        invoke<GatewayTrafficMetrics>('get_gateway_traffic_metrics', {
+          windowMinutes: gatewayWindow,
+          masterPassword,
+        }),
+        invoke<GatewayRequestLog[]>('get_gateway_request_logs', {
+          limit: 180,
+          masterPassword,
+        }),
+      ])
+      setGatewayTraffic(traffic)
+      setGatewayLogs(logs)
+      onError('')
+      if (selectedModel && !traffic.by_model.some((item) => item.key === selectedModel)) {
+        setSelectedModel(null)
+      }
+      if (selectedProvider && !traffic.by_provider.some((item) => item.key === selectedProvider)) {
+        setSelectedProvider(null)
+      }
+    } catch (error) {
+      console.error('Failed to load gateway analytics:', error)
+      onError('网关分析加载失败')
+      setGatewayTraffic(null)
+      setGatewayLogs([])
+    } finally {
+      setGatewayLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchData()
+  }, [masterPassword, gatewayWindow])
+
+  const filteredLogs = selectedModel
+    ? gatewayLogs.filter(
+        (item) => (item.model || '').trim().toLowerCase() === selectedModel.toLowerCase()
+      )
+    : gatewayLogs
+
+  const filteredLogsByModelProvider = selectedProvider
+    ? filteredLogs.filter(
+        (item) =>
+          (item.provider || '').trim().toLowerCase() === selectedProvider.toLowerCase()
+      )
+    : filteredLogs
+
+  const successRate = gatewayTraffic
+    ? (gatewayTraffic.success_requests / Math.max(1, gatewayTraffic.total_requests)) * 100
+    : 0
+  const errorRate = gatewayTraffic
+    ? ((gatewayTraffic.client_error_requests + gatewayTraffic.server_error_requests) /
+      Math.max(1, gatewayTraffic.total_requests)) *
+      100
+    : 0
+  const formatCost = (value: number | undefined) =>
+    typeof value === 'number' ? `$${value.toFixed(4)}` : '--'
+
+  return (
+    <section className="usage-gateway-analytics panel">
+      <div className="usage-section-header">
+        <div className="usage-section-copy">
+          <h2>Gateway 分析面板</h2>
+          <p>按窗口聚合应用 / 模型流量、趋势与异常 Top，支持按模型筛选明细。</p>
+        </div>
+        <div className="usage-gateway-controls">
+          <label className="usage-inline-field">
+            <span>监控窗口</span>
+            <select
+              value={gatewayWindow}
+              onChange={(event) => setGatewayWindow(Number(event.target.value))}
+            >
+              {GATEWAY_WINDOWS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className={`usage-refresh-btn ${gatewayLoading ? 'is-loading' : ''}`}
+            onClick={fetchData}
+            disabled={gatewayLoading}
+          >
+            <span className="usage-symbol usage-refresh-icon" aria-hidden>↻</span>
+            刷新网关分析
+          </button>
+        </div>
+      </div>
+
+      {!gatewayTraffic ? (
+        <div className="usage-gateway-empty">
+          <p>还没有网关流量数据，先调用一次网关接口后会自动出现。</p>
+        </div>
+      ) : (
+        <>
+          <div className="usage-kpi-row usage-kpi-row-sm">
+            <article className="usage-kpi-card">
+              <p>总请求</p>
+              <strong>{gatewayTraffic.total_requests}</strong>
+              <small>{gatewayTraffic.requests_per_minute.toFixed(2)} req/min</small>
+            </article>
+            <article className="usage-kpi-card">
+              <p>成功率 / 错误率</p>
+              <strong>{successRate.toFixed(1)}%</strong>
+              <small>错误 {errorRate.toFixed(1)}%</small>
+            </article>
+            <article className="usage-kpi-card">
+              <p>平均耗时 / P95</p>
+              <strong>
+                {gatewayTraffic.avg_latency_ms ? `${Math.round(gatewayTraffic.avg_latency_ms)}ms` : '--'}
+              </strong>
+              <small>{gatewayTraffic.p95_latency_ms ? `${gatewayTraffic.p95_latency_ms}ms` : '--'}</small>
+            </article>
+            <article className="usage-kpi-card">
+              <p>拦截 / 成本</p>
+              <strong>{gatewayTraffic.blocked_requests}</strong>
+              <small>${gatewayTraffic.estimated_cost_usd.toFixed(4)}</small>
+            </article>
+          </div>
+
+          <div className="usage-gateway-grid">
+            <div className="usage-mini-panel">
+              <div className="usage-mini-panel-header">
+                <h3>按模型排行</h3>
+                {selectedModel ? <span>当前: {selectedModel}</span> : null}
+                {selectedModel ? (
+                  <button
+                    type="button"
+                    className="usage-text-btn"
+                    onClick={() => setSelectedModel(null)}
+                  >
+                    清空筛选
+                  </button>
+                ) : null}
+              </div>
+              <table className="gateway-traffic-table">
+                <thead>
+                  <tr>
+                    <th>模型</th>
+                    <th>请求</th>
+                    <th>成功</th>
+                    <th>P95</th>
+                    <th>成本</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {gatewayTraffic.by_model.slice(0, 8).map((item) => {
+                    const isSelected = selectedModel === item.key
+                    return (
+                      <tr
+                        key={`model-${item.key}`}
+                        className={isSelected ? 'is-selected' : undefined}
+                        onClick={() => setSelectedModel(isSelected ? null : item.key)}
+                        role="button"
+                        tabIndex={0}
+                      >
+                        <td>{item.key}</td>
+                        <td>{item.requests}</td>
+                        <td>{item.success_requests}</td>
+                        <td>{item.p95_latency_ms ? `${item.p95_latency_ms}ms` : '--'}</td>
+                        <td>{formatCost(item.estimated_cost_usd)}</td>
+                      </tr>
+                    )
+                  })}
+                  {gatewayTraffic.by_model.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="gateway-log-empty">
+                        暂无模型级流量
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="usage-mini-panel">
+              <div className="usage-mini-panel-header">
+                <h3>按提供商排行</h3>
+                {selectedProvider ? <span>当前: {selectedProvider}</span> : null}
+                {selectedProvider ? (
+                  <button
+                    type="button"
+                    className="usage-text-btn"
+                    onClick={() => setSelectedProvider(null)}
+                  >
+                    清空筛选
+                  </button>
+                ) : null}
+              </div>
+              <table className="gateway-traffic-table">
+                <thead>
+                  <tr>
+                    <th>提供商</th>
+                    <th>请求</th>
+                    <th>成功</th>
+                    <th>P95</th>
+                    <th>成本</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {gatewayTraffic.by_provider.slice(0, 6).map((item) => {
+                    const isSelected = selectedProvider === item.key
+                    return (
+                      <tr
+                        key={`provider-${item.key}`}
+                        className={isSelected ? 'is-selected' : undefined}
+                        onClick={() => setSelectedProvider(isSelected ? null : item.key)}
+                        role="button"
+                        tabIndex={0}
+                      >
+                        <td>{item.key}</td>
+                        <td>{item.requests}</td>
+                        <td>{item.success_requests}</td>
+                        <td>{item.p95_latency_ms ? `${item.p95_latency_ms}ms` : '--'}</td>
+                        <td>{formatCost(item.estimated_cost_usd)}</td>
+                      </tr>
+                    )
+                  })}
+                  {gatewayTraffic.by_provider.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="gateway-log-empty">
+                        暂无提供商流量
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="usage-mini-panel">
+              <h3>按应用排行</h3>
+              <table className="gateway-traffic-table">
+                <thead>
+                  <tr>
+                    <th>应用</th>
+                    <th>请求</th>
+                    <th>成功</th>
+                    <th>P95</th>
+                    <th>成本</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {gatewayTraffic.by_app.slice(0, 6).map((item) => (
+                    <tr key={`app-${item.key}`}>
+                      <td>{integrationLabels[item.key] || item.key}</td>
+                      <td>{item.requests}</td>
+                      <td>{item.success_requests}</td>
+                      <td>{item.p95_latency_ms ? `${item.p95_latency_ms}ms` : '--'}</td>
+                      <td>{formatCost(item.estimated_cost_usd)}</td>
+                    </tr>
+                  ))}
+                  {gatewayTraffic.by_app.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="gateway-log-empty">
+                        暂无应用流量
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="usage-mini-panel">
+              <h3>时间序列（近 {gatewayWindow} 分钟）</h3>
+              <div className="gateway-timeline-mini">
+                {gatewayTraffic.timeline.slice(-12).map((point) => (
+                  <div key={point.minute} className="gateway-timeline-row">
+                    <span>{point.minute.slice(11)}</span>
+                    <span>{point.requests} req</span>
+                    <span>{point.error_requests} err</span>
+                    <span>{point.avg_latency_ms ? `${Math.round(point.avg_latency_ms)}ms` : '--'}</span>
+                  </div>
+                ))}
+                {gatewayTraffic.timeline.length === 0 ? (
+                  <div className="gateway-log-empty">暂无时间线数据</div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+
+          <div className="usage-mini-panel usage-mini-log-panel">
+            <h3>
+              网关请求明细（最近）{selectedModel ? ` - ${selectedModel}` : ''}
+              {selectedProvider ? ` / ${selectedProvider}` : ''}
+            </h3>
+            <table className="gateway-traffic-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>应用</th>
+                  <th>供应商</th>
+                  <th>模型</th>
+                  <th>端点</th>
+                  <th>状态</th>
+                  <th>耗时</th>
+                  <th>原因</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredLogsByModelProvider.slice(0, 20).map((item) => (
+                  <tr key={item.id}>
+                    <td>{new Date(item.created_at).toLocaleTimeString()}</td>
+                    <td>{integrationLabels[item.app_type] || item.app_type}</td>
+                    <td>{item.provider}</td>
+                    <td>{item.model || '-'}</td>
+                    <td>
+                      <code>{item.endpoint}</code>
+                    </td>
+                    <td>{item.status_code}</td>
+                    <td>{item.latency_ms}ms</td>
+                    <td>{item.blocked_reason || item.error_code || '-'}</td>
+                  </tr>
+                ))}
+                {filteredLogsByModelProvider.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="gateway-log-empty">
+                      {selectedModel ? '该模型暂无最近请求' : '暂无网关请求记录'}
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
 export default function UsageDashboard({
+  masterPassword,
   providerContextById = {},
   quickStats = [],
   onNavigate,
@@ -164,6 +537,15 @@ export default function UsageDashboard({
           ))}
         </div>
       )}
+
+      <GatewayAnalyticsSection
+        masterPassword={masterPassword}
+        onError={(msg) => {
+          if (msg) {
+            console.error(msg)
+          }
+        }}
+      />
     </div>
   );
 }
