@@ -95,11 +95,28 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
     }
   }
 
+  const latestGatewayLog = gatewayLogs[0]
+  const latestLogTime = latestGatewayLog
+    ? new Date(latestGatewayLog.created_at)
+    : null
+  const latestLogTimeText = latestLogTime && Number.isFinite(latestLogTime.getTime())
+    ? latestLogTime.toLocaleString()
+    : '--'
+  const latestLogAgeMinutes = latestLogTime
+    ? Math.max(0, Math.round((Date.now() - latestLogTime.getTime()) / 60000))
+    : null
+  const noWindowData = Boolean(
+    gatewayTraffic && gatewayTraffic.total_requests === 0 && gatewayLogs.length > 0
+  )
   const emptyDescription = gatewayError
     ? gatewayError
     : gatewayTraffic && gatewayTraffic.total_requests === 0 && gatewayLogs.length === 0
       ? `当前窗口（${gatewayWindow} 分钟）暂无网关请求。请先让一次请求走网关后再刷新。`
-      : '还没有网关流量数据，先调用一次网关接口后会自动出现。'
+      : noWindowData
+        ? latestLogAgeMinutes !== null && latestLogAgeMinutes > gatewayWindow
+          ? `当前窗口（${gatewayWindow} 分钟）内暂无网关请求，最近请求为 ${latestLogTimeText}（约 ${latestLogAgeMinutes} 分钟前）。可先切换到 24h 或触发一条新网关请求后再刷新。`
+          : `当前窗口（${gatewayWindow} 分钟）暂无汇总数据。请先让一次请求走网关后再刷新。`
+        : '还没有网关流量数据，先调用一次网关接口后会自动出现。'
 
   const renderEmptyState = () => (
     <div className="usage-gateway-empty">
