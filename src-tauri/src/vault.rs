@@ -2691,6 +2691,9 @@ impl Vault {
 
     pub fn append_gateway_request_log(&self, item: GatewayRequestLogInput) -> Result<(), String> {
         let now = Local::now().to_rfc3339();
+        let total_tokens = item.total_tokens.or(Some(
+            item.input_tokens.unwrap_or(0) + item.output_tokens.unwrap_or(0),
+        ));
         self.conn
             .execute(
                 "INSERT INTO gateway_request_logs (
@@ -2713,7 +2716,7 @@ impl Vault {
                     item.estimated_cost_usd,
                     item.input_tokens,
                     item.output_tokens,
-                    item.total_tokens,
+                    total_tokens,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -2778,12 +2781,7 @@ impl Vault {
                      COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS estimated_cost_usd,
                      COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS total_input_tokens,
                      COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS total_output_tokens,
-                     SUM(
-                       CASE
-                         WHEN total_tokens IS NOT NULL THEN total_tokens
-                         ELSE COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
-                       END
-                     ) AS total_tokens
+                     COALESCE(SUM(total_tokens), 0) AS total_tokens
                   FROM gateway_request_logs
                   WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)",
              )
@@ -2868,12 +2866,7 @@ impl Vault {
                  COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS estimated_cost_usd,
                  COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS total_input_tokens,
                  COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS total_output_tokens,
-                 SUM(
-                     CASE
-                       WHEN total_tokens IS NOT NULL THEN total_tokens
-                       ELSE COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
-                     END
-                 ) AS total_tokens
+                 COALESCE(SUM(total_tokens), 0) AS total_tokens
               FROM gateway_request_logs
               WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
               GROUP BY group_key
@@ -3089,12 +3082,7 @@ impl Vault {
                     substr(created_at, 1, 16) AS minute_bucket,
                     COUNT(*) AS requests,
                     COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_requests,
-                    SUM(
-                      CASE
-                        WHEN total_tokens IS NOT NULL THEN total_tokens
-                        ELSE COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
-                      END
-                    ) AS total_tokens,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens,
                     AVG(latency_ms) AS avg_latency_ms
                  FROM gateway_request_logs
                  WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
