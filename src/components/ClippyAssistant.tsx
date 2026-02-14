@@ -82,6 +82,15 @@ interface ClippySkill {
   source?: 'builtin' | 'custom'
 }
 
+interface ClippySkillCommandHint {
+  name: string
+  command: string
+  description: string
+  source: 'builtin' | 'custom' | 'unknown'
+  boundModel: string
+  tags: string
+}
+
 interface GatewayModelCatalogItem {
   app_type: string
   provider: string
@@ -798,7 +807,7 @@ function parseDollarInvocation(raw: string): ParsedDollarInvocation {
   return {
     kind: 'none',
     query: source,
-    error: `未识别的 $ 命令：${command}。可用：$py, $python, $skill, $mykey。`,
+    error: `未识别的 $ 命令：${command}。可用：$py, $python, $skill, $mykey。可在“技能提示”里查看可用技能命令。`,
   }
 }
 
@@ -1074,6 +1083,7 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   const [assistantStyleDraft, setAssistantStyleDraft] = useState(assistantStylePrompt)
   const [styleEditorOpen, setStyleEditorOpen] = useState(false)
   const [skillEditorOpen, setSkillEditorOpen] = useState(false)
+  const [showSkillCommandHints, setShowSkillCommandHints] = useState(false)
   const [skillDraftName, setSkillDraftName] = useState('')
   const [skillDraftDescription, setSkillDraftDescription] = useState('')
   const [skillDraftPrompt, setSkillDraftPrompt] = useState('')
@@ -1088,6 +1098,7 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   const openRef = useRef(open)
   const previousOpenRef = useRef(open)
   const previousSeverityRef = useRef<AssistantSeverity>('info')
+  const askInputRef = useRef<HTMLInputElement>(null)
   const idleAnimationRef = useRef<ClippyAnimationKey>()
   const clipTimeoutRef = useRef<number>()
   const idleTimeoutRef = useRef<number>()
@@ -1132,6 +1143,24 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     }
     return Array.from(names).sort()
   }, [skillCatalog])
+  const skillCommandHints = useMemo(() => {
+    const list = skills.map((item) => ({
+      name: item.name,
+      command: `$skill ${item.name}`,
+      description: item.description?.trim() || '未设置描述',
+      source: item.source === 'custom' ? 'custom' : item.source === 'builtin' ? 'builtin' : 'unknown',
+      boundModel: item.boundModel?.trim() || '',
+      tags: item.tags.length ? item.tags.join(', ') : '无标签',
+    }))
+    return list
+      .sort((a, b) => {
+        if (a.source !== b.source) {
+          return a.source === 'builtin' ? -1 : 1
+        }
+        return a.name.localeCompare(b.name)
+      })
+      .slice(0, 30)
+  }, [skills])
 
   const suggestions = useMemo(
     () => buildSuggestions(settings, policy, traffic, usageStatuses, runtimeGatewayOnline),
@@ -1348,6 +1377,14 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       .slice(0, 20)
       .map((item) => `- ${item.id}${item.params.length ? `(${item.params.join(', ')})` : ''}`)
       .join('\n')
+    const skillHintsText = skillCommandHints
+      .slice(0, 12)
+      .map((item) => {
+        const source = item.source === 'builtin' ? '内置' : item.source === 'custom' ? '自定义' : '未知'
+        const boundModel = item.boundModel ? ` [绑定模型: ${item.boundModel}]` : ''
+        return `- ${item.command} (${source})${boundModel}：${item.description}`
+      })
+      .join('\n')
     const skillHint = options?.skill
       ? [
           `已通过 Skills 调用：${options.skill.name}`,
@@ -1377,6 +1414,8 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       '{"actions":[{"command":"gateway.status","args":{},"reason":"说明原因"}]}',
       '```',
       '只允许使用提供的能力命令，最多 3 条；若不需要执行则不要输出该代码块。',
+      '可用 $skill 命令（可选）：',
+      skillHintsText || '- (当前无可用技能)',
       skillHint ? `技能上下文：${skillHint}` : '',
       animationProtocolEnabled
         ? `你可以在回复开头使用一个动画标签，格式示例：[Thinking] 或 [GetAttention]。可用标签：${CLIPPY_ANIMATION_HINT_KEYS.join(', ')}。动画标签只允许出现一次且必须位于最开头。`
@@ -2058,6 +2097,24 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     askByText(askInput)
   }
 
+  const appendSkillInvocation = (skillName: string) => {
+    const safeName = skillName.trim()
+    if (!safeName) return
+    setAskInput((prev) => {
+      const base = prev.trim()
+      const next = base ? `${base} $skill ${safeName}` : `$skill ${safeName}`
+      return `${next} `
+    })
+    setShowSkillCommandHints(false)
+    requestAnimationFrame(() => {
+      const target = askInputRef.current
+      if (!target) return
+      const position = target.value.length
+      target.focus()
+      target.setSelectionRange(position, position)
+    })
+  }
+
   return (
     <div className="clippy-float-root">
       {open && (
@@ -2404,16 +2461,60 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
               <button className="btn btn-secondary" onClick={() => askByText('下一步我该做什么')} disabled={busy}>
                 下一步
               </button>
+              <button
+                className="btn btn-secondary clippy-auto-toggle"
+                onClick={() => setShowSkillCommandHints((prev) => !prev)}
+                disabled={busy || skillCommandHints.length === 0}
+                title="将技能命令快速插入输入框"
+              >
+                技能提示
+              </button>
             </div>
             <form className="clippy-ask-form" onSubmit={onSubmitAsk}>
-              <input
-                value={askInput}
-                onChange={(event) => setAskInput(event.target.value)}
-                placeholder="问 Clippy：比如“我现在最该优化什么？”；技能：$skill code-review --model gpt-5-codex ...；Python：$py print(1)；能力：$mykey gateway.status"
-              />
-              <button className="btn btn-primary" type="submit" disabled={busy || !askInput.trim()}>
-                {busy ? '思考中...' : '发送'}
-              </button>
+              <div className="clippy-ask-input-row">
+                <input
+                  ref={askInputRef}
+                  value={askInput}
+                  onChange={(event) => setAskInput(event.target.value)}
+                  placeholder="问 Clippy：比如“我现在最该优化什么？”；技能：$skill code-review --model gpt-5-codex ...；Python：$py print(1)；能力：$mykey gateway.status"
+                />
+                <button className="btn btn-primary" type="submit" disabled={busy || !askInput.trim()}>
+                  {busy ? '思考中...' : '发送'}
+                </button>
+              </div>
+              {showSkillCommandHints ? (
+                <section className="clippy-skill-command-panel">
+                  <div className="clippy-skill-command-header">
+                    <span>可用技能命令</span>
+                    <span>{skillCommandHints.length} 个</span>
+                  </div>
+                  <div className="clippy-skill-command-list">
+                    {skillCommandHints.length === 0 ? (
+                      <div className="clippy-empty-state">当前暂无可用技能</div>
+                    ) : (
+                      skillCommandHints.map((item) => (
+                        <button
+                          key={`${item.source}-${item.name}`}
+                          type="button"
+                          className={`clippy-skill-command-item clippy-skill-command-item--${item.source}`}
+                          onClick={() => appendSkillInvocation(item.name)}
+                        >
+                          <div className="clippy-skill-command-item-main">
+                            <strong>{item.command}</strong>
+                            <p>{item.description}</p>
+                            <small>
+                              {item.source === 'builtin' ? '内置技能' : item.source === 'custom' ? '自定义技能' : '未知来源'}
+                              {item.boundModel ? `，模型：${item.boundModel}` : ''}
+                              {item.tags ? `，标签：${item.tags}` : ''}
+                            </small>
+                          </div>
+                          <span className="clippy-skill-command-fill">插入</span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </section>
+              ) : null}
             </form>
           </div>
         </section>

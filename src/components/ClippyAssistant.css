@@ -615,6 +615,12 @@
 }
 
 .clippy-ask-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.clippy-ask-input-row {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 8px;
@@ -631,6 +637,93 @@
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(255, 107, 61, 0.14);
+}
+
+.clippy-skill-command-panel {
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: rgba(239, 246, 255, 0.8);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.clippy-skill-command-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: #334155;
+}
+
+.clippy-skill-command-header strong {
+  font-size: 12px;
+  color: #0f172a;
+}
+
+.clippy-skill-command-list {
+  max-height: 160px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.clippy-skill-command-item {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.clippy-skill-command-item:hover {
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.clippy-skill-command-item-main strong {
+  font-size: 12px;
+  display: block;
+  color: #0f172a;
+}
+
+.clippy-skill-command-item-main p {
+  margin: 2px 0;
+  font-size: 11px;
+  color: #334155;
+  line-height: 1.35;
+}
+
+.clippy-skill-command-item-main small {
+  font-size: 11px;
+  color: #475569;
+}
+
+.clippy-skill-command-item .clippy-skill-command-fill {
+  font-size: 11px;
+  color: #1d4ed8;
+  border: 1px solid #93c5fd;
+  border-radius: 999px;
+  padding: 2px 7px;
+  white-space: nowrap;
+  background: rgba(219, 234, 254, 0.65);
+}
+
+.clippy-skill-command-item--custom {
+  border-left-width: 3px;
+  border-left-color: #14b8a6;
+}
+
+.clippy-skill-command-item--unknown {
+  border-left-width: 3px;
+  border-left-color: #f97316;
 }
 
 @media (max-width: 768px) {
