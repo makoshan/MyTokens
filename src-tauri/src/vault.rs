@@ -1163,7 +1163,7 @@ impl Vault {
                     "service".to_string(),
                     toml::Value::String("com.mykey.desktop".to_string()),
                 );
-            return Ok(SecretStoreConfig {
+                return Ok(SecretStoreConfig {
                     primary: "keychain".to_string(),
                     providers: vec![
                         SecretStoreProviderConfig {
@@ -1441,36 +1441,11 @@ impl Vault {
             "details_json",
             "TEXT NOT NULL DEFAULT '{}'",
         )?;
-        Self::ensure_column(
-            conn,
-            "gateway_request_logs",
-            "user_key",
-            "TEXT",
-        )?;
-        Self::ensure_column(
-            conn,
-            "gateway_request_logs",
-            "estimated_cost_usd",
-            "REAL",
-        )?;
-        Self::ensure_column(
-            conn,
-            "gateway_request_logs",
-            "input_tokens",
-            "INTEGER",
-        )?;
-        Self::ensure_column(
-            conn,
-            "gateway_request_logs",
-            "output_tokens",
-            "INTEGER",
-        )?;
-        Self::ensure_column(
-            conn,
-            "gateway_request_logs",
-            "total_tokens",
-            "INTEGER",
-        )?;
+        Self::ensure_column(conn, "gateway_request_logs", "user_key", "TEXT")?;
+        Self::ensure_column(conn, "gateway_request_logs", "estimated_cost_usd", "REAL")?;
+        Self::ensure_column(conn, "gateway_request_logs", "input_tokens", "INTEGER")?;
+        Self::ensure_column(conn, "gateway_request_logs", "output_tokens", "INTEGER")?;
+        Self::ensure_column(conn, "gateway_request_logs", "total_tokens", "INTEGER")?;
         conn.execute(
             "UPDATE providers SET details_json = '{}' WHERE details_json IS NULL OR TRIM(details_json) = ''",
             [],
@@ -2793,20 +2768,25 @@ impl Vault {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT
-                    COUNT(*) AS total_requests,
-                    COALESCE(SUM(CASE WHEN status_code BETWEEN 200 AND 399 THEN 1 ELSE 0 END), 0) AS success_requests,
-                    COALESCE(SUM(CASE WHEN status_code BETWEEN 400 AND 499 THEN 1 ELSE 0 END), 0) AS client_error_requests,
-                    COALESCE(SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END), 0) AS server_error_requests,
-                    COALESCE(SUM(CASE WHEN blocked_reason IS NOT NULL AND TRIM(blocked_reason) != '' THEN 1 ELSE 0 END), 0) AS blocked_requests,
-                    AVG(latency_ms) AS avg_latency_ms,
-                    COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS estimated_cost_usd,
-                    COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS total_input_tokens,
-                    COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS total_output_tokens,
-                    COALESCE(SUM(COALESCE(total_tokens, COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens
-                 FROM gateway_request_logs
-                 WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)",
-            )
+                 "SELECT
+                     COUNT(*) AS total_requests,
+                     COALESCE(SUM(CASE WHEN status_code BETWEEN 200 AND 399 THEN 1 ELSE 0 END), 0) AS success_requests,
+                     COALESCE(SUM(CASE WHEN status_code BETWEEN 400 AND 499 THEN 1 ELSE 0 END), 0) AS client_error_requests,
+                     COALESCE(SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END), 0) AS server_error_requests,
+                     COALESCE(SUM(CASE WHEN blocked_reason IS NOT NULL AND TRIM(blocked_reason) != '' THEN 1 ELSE 0 END), 0) AS blocked_requests,
+                     AVG(latency_ms) AS avg_latency_ms,
+                     COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS estimated_cost_usd,
+                     COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS total_input_tokens,
+                     COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS total_output_tokens,
+                     SUM(
+                       CASE
+                         WHEN total_tokens IS NOT NULL THEN total_tokens
+                         ELSE COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
+                       END
+                     ) AS total_tokens
+                  FROM gateway_request_logs
+                  WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)",
+             )
             .map_err(|e| e.to_string())?;
 
         let (
@@ -2878,23 +2858,28 @@ impl Vault {
             _ => return Err(format!("Unsupported gateway group column: {}", group_by)),
         };
         let sql = format!(
-            "SELECT
-                COALESCE(NULLIF(TRIM({group_column}), ''), 'unknown') AS group_key,
-                COUNT(*) AS requests,
-                COALESCE(SUM(CASE WHEN status_code BETWEEN 200 AND 399 THEN 1 ELSE 0 END), 0) AS success_requests,
-                COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_requests,
-                COALESCE(SUM(CASE WHEN blocked_reason IS NOT NULL AND TRIM(blocked_reason) != '' THEN 1 ELSE 0 END), 0) AS blocked_requests,
-                AVG(latency_ms) AS avg_latency_ms,
-                COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS estimated_cost_usd,
-                COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS total_input_tokens,
-                COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS total_output_tokens,
-                COALESCE(SUM(COALESCE(total_tokens, COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens
-             FROM gateway_request_logs
-             WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
-             GROUP BY group_key
-             ORDER BY requests DESC
-             LIMIT 16"
-        );
+             "SELECT
+                 COALESCE(NULLIF(TRIM({group_column}), ''), 'unknown') AS group_key,
+                 COUNT(*) AS requests,
+                 COALESCE(SUM(CASE WHEN status_code BETWEEN 200 AND 399 THEN 1 ELSE 0 END), 0) AS success_requests,
+                 COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_requests,
+                 COALESCE(SUM(CASE WHEN blocked_reason IS NOT NULL AND TRIM(blocked_reason) != '' THEN 1 ELSE 0 END), 0) AS blocked_requests,
+                 AVG(latency_ms) AS avg_latency_ms,
+                 COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS estimated_cost_usd,
+                 COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS total_input_tokens,
+                 COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS total_output_tokens,
+                 SUM(
+                     CASE
+                       WHEN total_tokens IS NOT NULL THEN total_tokens
+                       ELSE COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
+                     END
+                 ) AS total_tokens
+              FROM gateway_request_logs
+              WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
+              GROUP BY group_key
+              ORDER BY requests DESC
+              LIMIT 16"
+         );
         let mut stmt = self.conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![window_minutes], |row| {
@@ -3104,7 +3089,12 @@ impl Vault {
                     substr(created_at, 1, 16) AS minute_bucket,
                     COUNT(*) AS requests,
                     COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_requests,
-                    COALESCE(SUM(COALESCE(total_tokens, COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens,
+                    SUM(
+                      CASE
+                        WHEN total_tokens IS NOT NULL THEN total_tokens
+                        ELSE COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
+                      END
+                    ) AS total_tokens,
                     AVG(latency_ms) AS avg_latency_ms
                  FROM gateway_request_logs
                  WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
