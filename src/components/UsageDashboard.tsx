@@ -54,11 +54,13 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null)
   const [selectedUser, setSelectedUser] = useState<string | null>(null)
+  const [gatewayError, setGatewayError] = useState('')
 
   const fetchData = async () => {
     if (!masterPassword) return
     try {
       setGatewayLoading(true)
+      setGatewayError('')
       const [traffic, logs] = await Promise.all([
         invoke<GatewayTrafficMetrics>('get_gateway_traffic_metrics', {
           windowMinutes: gatewayWindow,
@@ -83,13 +85,28 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
       }
     } catch (error) {
       console.error('Failed to load gateway analytics:', error)
-      onError('网关分析加载失败')
+      const message = `网关分析加载失败：${String(error)}`
+      onError(message)
+      setGatewayError(message)
       setGatewayTraffic(null)
       setGatewayLogs([])
     } finally {
       setGatewayLoading(false)
     }
   }
+
+  const emptyDescription = gatewayError
+    ? gatewayError
+    : gatewayTraffic && gatewayTraffic.total_requests === 0 && gatewayLogs.length === 0
+      ? `当前窗口（${gatewayWindow} 分钟）暂无网关请求。请先让一次请求走网关后再刷新。`
+      : '还没有网关流量数据，先调用一次网关接口后会自动出现。'
+
+  const renderEmptyState = () => (
+    <div className="usage-gateway-empty">
+      <p>{emptyDescription}</p>
+      {gatewayError ? <p className="gateway-error-text">可尝试检查服务状态、数据库权限与网关日志写入链路。</p> : null}
+    </div>
+  )
 
   useEffect(() => {
     fetchData()
@@ -162,9 +179,7 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
       </div>
 
       {!gatewayTraffic ? (
-        <div className="usage-gateway-empty">
-          <p>还没有网关流量数据，先调用一次网关接口后会自动出现。</p>
-        </div>
+        renderEmptyState()
       ) : (
         <>
           <div className="usage-kpi-row usage-kpi-row-sm">
@@ -199,8 +214,13 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
             </article>
           </div>
 
-          <div className="usage-gateway-grid">
-            <div className="usage-mini-panel">
+            <div className="usage-gateway-grid">
+              {gatewayTraffic.total_requests === 0 ? (
+                <div className="usage-empty-state" style={{ marginBottom: 8 }}>
+                  当前窗口暂无请求记录；当前仅展示“最近请求明细”可用于校验是否有日志写入。
+                </div>
+              ) : null}
+              <div className="usage-mini-panel">
               <div className="usage-mini-panel-header">
                 <h3>按模型排行</h3>
                 {selectedModel ? <span>当前: {selectedModel}</span> : null}
