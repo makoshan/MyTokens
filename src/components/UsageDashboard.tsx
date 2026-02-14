@@ -124,6 +124,9 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
     typeof value === 'number' ? `$${value.toFixed(4)}` : '--'
   const formatTokens = (value: number | undefined | null) =>
     typeof value === 'number' ? value.toLocaleString() : '--'
+  const formatErrorRatio = (value: number, total: number) => {
+    return `${((value / Math.max(1, total)) * 100).toFixed(1)}%`
+  }
 
   return (
     <section className="usage-gateway-analytics panel">
@@ -302,6 +305,35 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                     <tr>
                       <td colSpan={6} className="gateway-log-empty">
                         暂无提供商流量
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="usage-mini-panel">
+              <h3>异常 Top</h3>
+              <table className="gateway-traffic-table">
+                <thead>
+                  <tr>
+                    <th>错误码</th>
+                    <th>请求</th>
+                    <th>占比</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {gatewayTraffic.top_errors.slice(0, 8).map((item) => (
+                    <tr key={`error-${item.code}`}>
+                      <td>{item.code}</td>
+                      <td>{item.requests}</td>
+                      <td>{formatErrorRatio(item.requests, gatewayTraffic.total_requests)}</td>
+                    </tr>
+                  ))}
+                  {gatewayTraffic.top_errors.length === 0 ? (
+                    <tr>
+                      <td colSpan={3} className="gateway-log-empty">
+                        暂无异常数据
                       </td>
                     </tr>
                   ) : null}
