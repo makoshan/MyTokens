@@ -4,7 +4,8 @@
   "description": "enables the default permissions",
   "windows": [
     "main",
-    "quick-result"
+    "quick-result",
+    "voice-overlay"
   ],
   "permissions": [
     "core:default",

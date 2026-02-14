@@ -2,13 +2,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::TrayIconBuilder;
 use tauri::WebviewUrl;
 use tauri::WebviewWindowBuilder;
 use tauri_plugin_global_shortcut::ShortcutState;
+use tauri_plugin_log::{Target, TargetKind};
 
 mod commands;
 mod gateway;
 mod provider_defaults;
+pub mod stt;
 mod secret_store;
 mod usage;
 mod vault;
@@ -22,6 +26,136 @@ pub struct AppState {
     gateway: Arc<Mutex<gateway::GatewayRuntime>>,
     quick_runtime: Arc<Mutex<QuickRuntimeState>>,
     voice_runtime: Arc<voice_input::VoiceInputRuntime>,
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn hide_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+}
+
+fn toggle_voice_input(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let next = {
+        let mut vault = match state.vault.lock() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let mut settings = vault.get_voice_input_settings().ok().unwrap_or_default();
+        settings.voice_input_enabled = !settings.voice_input_enabled;
+        let next = match vault.set_voice_input_settings(settings) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        next
+    };
+
+    if next.voice_input_enabled && commands::is_supported_voice_trigger_mode(&next.voice_trigger_mode) {
+        state.voice_runtime.stop_listener();
+        let trigger = commands::normalize_voice_trigger_mode(&next.voice_trigger_mode)
+            .unwrap_or_else(|| "fn_hold".to_string());
+        let _ = state.voice_runtime.start_hold_listener(
+            app.clone(),
+            trigger,
+            next.voice_hold_ms,
+            next.voice_min_record_ms,
+            next.voice_hands_free_enabled,
+        );
+    } else {
+        state.voice_runtime.stop_listener();
+    }
+}
+
+fn cycle_claude_code_model(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let mut vault = match state.vault.lock() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let routes = match vault.get_app_routes() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let current = routes
+        .iter()
+        .find(|r| r.app_type == "claude-code")
+        .cloned();
+    let provider = current
+        .as_ref()
+        .map(|r| r.provider.as_str())
+        .unwrap_or("anthropic");
+    let current_model = current.as_ref().and_then(|r| r.model.clone());
+
+    let provider_cfg = match vault.get_provider_config(provider) {
+        Some(v) => v,
+        None => return,
+    };
+    let mut candidates: Vec<String> = provider_cfg
+        .models
+        .iter()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect();
+    candidates.dedup();
+    if candidates.is_empty() {
+        return;
+    }
+
+    let next_model = match current_model.as_deref() {
+        None => candidates.first().cloned(),
+        Some(cur) => {
+            let idx = candidates.iter().position(|v| v == cur).unwrap_or(usize::MAX);
+            if idx == usize::MAX {
+                candidates.first().cloned()
+            } else {
+                candidates.get((idx + 1) % candidates.len()).cloned()
+            }
+        }
+    };
+    let Some(next_model) = next_model else {
+        return;
+    };
+    let _ = vault.set_app_route("claude-code", provider, Some(next_model));
+}
+
+fn setup_tray(app: &tauri::App) -> Result<(), tauri::Error> {
+    let handle = app.handle();
+    let show = MenuItem::with_id(handle, "tray_show", "显示 MyKey", true, None::<&str>)?;
+    let hide = MenuItem::with_id(handle, "tray_hide", "隐藏 MyKey", true, None::<&str>)?;
+    let toggle_voice =
+        MenuItem::with_id(handle, "tray_toggle_voice", "开关语音输入", true, None::<&str>)?;
+    let cycle_claude =
+        MenuItem::with_id(handle, "tray_cycle_claude", "Claude Code: 切换模型", true, None::<&str>)?;
+    let quit = MenuItem::with_id(handle, "tray_quit", "退出", true, None::<&str>)?;
+    let sep1 = PredefinedMenuItem::separator(handle)?;
+    let sep2 = PredefinedMenuItem::separator(handle)?;
+
+    let menu = Menu::with_items(
+        handle,
+        &[&show, &hide, &sep1, &toggle_voice, &cycle_claude, &sep2, &quit],
+    )?;
+
+    TrayIconBuilder::new()
+        .menu(&menu)
+        .on_menu_event(|app, event: tauri::menu::MenuEvent| {
+            match event.id().as_ref() {
+                "tray_show" => show_main_window(app),
+                "tray_hide" => hide_main_window(app),
+                "tray_toggle_voice" => toggle_voice_input(app),
+                "tray_cycle_claude" => cycle_claude_code_model(app),
+                "tray_quit" => app.exit(0),
+                _ => {}
+            }
+        })
+        .build(app)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +247,23 @@ pub struct QuickActionHistoryRecord {
     pub latency_ms: i64,
     pub status: String,
     pub error_code: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct VoiceInputHistoryRecord {
+    pub id: String,
+    pub session_id: Option<String>,
+    pub trigger_mode: String,
+    pub raw_text: Option<String>,
+    pub final_text: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub language: Option<String>,
+    pub latency_ms: Option<i64>,
+    pub pasted: bool,
+    pub cancelled: bool,
+    pub error: Option<String>,
     pub created_at: String,
 }
 
@@ -459,14 +610,31 @@ pub fn run() {
     tauri::Builder::default()
         .manage(app_state)
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+            // Always enable file logs so users can debug permission/hotkey issues without DevTools.
+            // macOS default: ~/Library/Logs/{bundleIdentifier}/mykey.log
+            let log_dir = app.path().app_log_dir().ok();
+            let mut log_builder = tauri_plugin_log::Builder::default();
+            log_builder = log_builder.level(if cfg!(debug_assertions) {
+                log::LevelFilter::Debug
+            } else {
+                log::LevelFilter::Info
+            });
+            if let Some(dir) = log_dir {
+                log_builder = log_builder.clear_targets().targets([
+                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::Folder {
+                        path: dir,
+                        file_name: Some("mykey".into()),
+                    }),
+                ]);
             }
+            app.handle().plugin(log_builder.build())?;
             app.handle().plugin(tauri_plugin_dialog::init())?;
+            #[cfg(target_os = "macos")]
+            {
+                // Required for PanelBuilder on macOS; registers WebviewPanelManager state.
+                app.handle().plugin(tauri_nspanel::init())?;
+            }
             app.handle().plugin(
                 tauri_plugin_global_shortcut::Builder::new()
                     .with_handler(|app, shortcut, event| {
@@ -477,11 +645,62 @@ pub fn run() {
                     })
                     .build(),
             )?;
+            setup_tray(app)?;
             ensure_quick_result_window(app)?;
             // Voice overlay window is a small always-on-top indicator for voice input recording/transcription.
             let _ = voice_input::ensure_voice_overlay_window(app.handle());
+            // Start voice input listener early so it keeps working even when the main window is hidden.
+            {
+                let state = app.handle().state::<AppState>();
+                let vault_arc = Arc::clone(&state.vault);
+                let voice_runtime = Arc::clone(&state.voice_runtime);
+                drop(state);
+
+                let settings = match vault_arc.lock() {
+                    Ok(vault) => vault.get_voice_input_settings().ok(),
+                    Err(_) => None,
+                };
+
+                if let Some(settings) = settings {
+                    if settings.voice_input_enabled {
+                        let trigger = match settings
+                            .voice_trigger_mode
+                            .trim()
+                            .to_ascii_lowercase()
+                            .as_str()
+                        {
+                            "fn_hold" => "fn_hold".to_string(),
+                            "option_hold" => "option_hold".to_string(),
+                            "fn_option_hold" | "fn_or_option_hold" => "fn_option_hold".to_string(),
+                            _ => "fn_hold".to_string(),
+                        };
+                        let _ = voice_runtime.start_hold_listener(
+                            app.handle().clone(),
+                            trigger,
+                            settings.voice_hold_ms,
+                            settings.voice_min_record_ms,
+                            settings.voice_hands_free_enabled,
+                        );
+                    }
+                }
+            }
             let _ = commands::register_quick_hotkeys_on_startup(app.handle());
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // On macOS we treat closing the main window as "hide" so the app can keep running
+            // (quick actions, voice input, etc).
+            #[cfg(target_os = "macos")]
+            {
+                if window.label() != "main" {
+                    return;
+                }
+                let tauri::WindowEvent::CloseRequested { api, .. } = event else {
+                    return;
+                };
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::set_master_password,
@@ -561,11 +780,15 @@ pub fn run() {
             commands::open_macos_screen_capture_settings,
             commands::open_macos_input_monitoring_settings,
             commands::open_macos_keyboard_settings,
+            commands::get_recent_debug_logs,
             commands::get_voice_input_settings,
             commands::set_voice_input_settings,
             commands::initialize_voice_input_listener,
+            commands::voice_input_frontend_cancel,
             commands::voice_input_transcribe,
             commands::get_voice_input_diagnostics,
+            commands::get_voice_input_history,
+            commands::delete_voice_input_history,
             commands::add_project,
             commands::get_projects,
             commands::delete_project,

@@ -6,7 +6,7 @@ use crate::{
     GlobalSettingsPayload, IntegrationConfigSnapshot, OpencodeConfigSnapshot, Project,
     PromptTemplate, ProviderAppBindingInput, ProviderConfig, ProviderDetails,
     ProviderEndpointInput, ProviderEnvVarInput, QuickActionHistoryRecord, QuickActionResult,
-    QuickActionSettings,
+    QuickActionSettings, VoiceInputHistoryRecord,
 };
 use base64::Engine as _;
 use regex::Regex;
@@ -274,6 +274,12 @@ pub struct MacosPermissionStatus {
     pub guidance: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RecentDebugLogs {
+    pub path: String,
+    pub lines: Vec<String>,
+}
+
 #[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -368,7 +374,7 @@ fn build_quick_error_result(
     }
 }
 
-fn resolve_quick_endpoint(provider: &ProviderConfig) -> String {
+pub(crate) fn resolve_quick_endpoint(provider: &ProviderConfig) -> String {
     if let Some(primary) = provider
         .endpoints
         .iter()
@@ -386,7 +392,7 @@ fn resolve_quick_endpoint(provider: &ProviderConfig) -> String {
     provider.base_url.trim().to_string()
 }
 
-fn resolve_provider_auth(vault: &crate::vault::Vault, provider: &ProviderConfig) -> String {
+pub(crate) fn resolve_provider_auth(vault: &crate::vault::Vault, provider: &ProviderConfig) -> String {
     if !provider.api_key.trim().is_empty() {
         return provider.api_key.trim().to_string();
     }
@@ -947,35 +953,21 @@ pub fn get_macos_permission_status() -> Result<MacosPermissionStatus, String> {
             .as_deref()
             .and_then(|p| std::path::Path::new(p).file_name())
             .map(|v| v.to_string_lossy().to_string());
-        let automation_probe = Command::new("osascript")
-            .arg("-e")
-            .arg(r#"tell application "System Events" to get name of first process"#)
-            .output()
-            .map_err(|e| format!("Failed to probe automation permission: {}", e))?;
-        let automation_error = if automation_probe.status.success() {
-            None
-        } else {
-            let detail = String::from_utf8_lossy(&automation_probe.stderr)
-                .trim()
-                .to_string();
-            Some(if detail.is_empty() {
-                "System Events automation is not authorized".to_string()
-            } else {
-                detail
-            })
-        };
-        let automation_granted = automation_error.is_none();
+        // We no longer rely on AppleScript "System Events" for copy/paste. Avoid probing
+        // automation permission here because it can trigger unnecessary system prompts.
+        let automation_error: Option<String> = None;
+        let automation_granted = true;
 
         return Ok(MacosPermissionStatus {
             is_macos: true,
             accessibility_granted,
             input_monitoring_granted,
             automation_granted,
-            selection_capture_ready: accessibility_granted && automation_granted,
+            selection_capture_ready: accessibility_granted,
             process_name,
             executable_path: exe_path,
             automation_error,
-            guidance: "系统设置 -> 隐私与安全性 -> 辅助功能（当前运行的 MyKey/app）/ 输入监控（当前运行的 MyKey/app）/ 自动化（MyKey -> System Events）".to_string(),
+            guidance: "系统设置 -> 隐私与安全性 -> 辅助功能（当前运行的 MyKey/app）/ 输入监控（当前运行的 MyKey/app）".to_string(),
         });
     }
 
@@ -1029,6 +1021,26 @@ pub fn open_macos_keyboard_settings() -> Result<bool, String> {
 }
 
 #[tauri::command]
+pub fn get_recent_debug_logs(
+    limit: Option<i64>,
+    app: tauri::AppHandle,
+) -> Result<RecentDebugLogs, String> {
+    let n = limit.unwrap_or(200).clamp(10, 2000) as usize;
+    let dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|e| format!("Failed to resolve app_log_dir: {e}"))?;
+    let path = dir.join("mykey.log");
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<String> = raw.lines().rev().take(n).map(|s| s.to_string()).collect();
+    lines.reverse();
+    Ok(RecentDebugLogs {
+        path: path.to_string_lossy().to_string(),
+        lines,
+    })
+}
+
+#[tauri::command]
 pub fn get_voice_input_settings(
     master_password: String,
     state: State<'_, AppState>,
@@ -1057,18 +1069,18 @@ pub fn set_voice_input_settings(
 
     // Apply listener lifecycle immediately.
     if next.voice_input_enabled
-        && (next.voice_trigger_mode == "fn_hold"
-            || next.voice_trigger_mode == "option_hold"
-            || next.voice_trigger_mode == "fn_option_hold")
+        && is_supported_voice_trigger_mode(&next.voice_trigger_mode)
     {
         // Restart to apply updated thresholds deterministically.
         state.voice_runtime.stop_listener();
-        let trigger = next.voice_trigger_mode.trim().to_ascii_lowercase();
+        let trigger = normalize_voice_trigger_mode(&next.voice_trigger_mode)
+            .unwrap_or_else(|| "fn_hold".to_string());
         let _ = state.voice_runtime.start_hold_listener(
             app,
             trigger,
             next.voice_hold_ms,
             next.voice_min_record_ms,
+            next.voice_hands_free_enabled,
         );
     } else {
         state.voice_runtime.stop_listener();
@@ -1091,20 +1103,37 @@ pub fn initialize_voice_input_listener(
         vault.get_voice_input_settings()?
     };
     if settings.voice_input_enabled
-        && (settings.voice_trigger_mode == "fn_hold"
-            || settings.voice_trigger_mode == "option_hold"
-            || settings.voice_trigger_mode == "fn_option_hold")
+        && is_supported_voice_trigger_mode(&settings.voice_trigger_mode)
     {
-        let trigger = settings.voice_trigger_mode.trim().to_ascii_lowercase();
+        let trigger = normalize_voice_trigger_mode(&settings.voice_trigger_mode)
+            .unwrap_or_else(|| "fn_hold".to_string());
         state.voice_runtime.start_hold_listener(
             app,
             trigger,
             settings.voice_hold_ms,
             settings.voice_min_record_ms,
+            settings.voice_hands_free_enabled,
         )?;
         return Ok(true);
     }
     Ok(false)
+}
+
+pub(crate) fn is_supported_voice_trigger_mode(mode: &str) -> bool {
+    matches!(
+        mode.trim().to_ascii_lowercase().as_str(),
+        "fn_hold" | "option_hold" | "fn_option_hold" | "fn_or_option_hold"
+    )
+}
+
+pub(crate) fn normalize_voice_trigger_mode(mode: &str) -> Option<String> {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "fn_hold" => Some("fn_hold".to_string()),
+        "option_hold" => Some("option_hold".to_string()),
+        "fn_option_hold" => Some("fn_option_hold".to_string()),
+        "fn_or_option_hold" => Some("fn_option_hold".to_string()),
+        _ => None,
+    }
 }
 
 #[tauri::command]
@@ -1117,6 +1146,72 @@ pub fn get_voice_input_diagnostics(
         return Err("Invalid master password".to_string());
     }
     Ok(state.voice_runtime.get_diagnostics())
+}
+
+#[tauri::command]
+pub fn get_voice_input_history(
+    limit: Option<i64>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<VoiceInputHistoryRecord>, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.get_voice_input_history(limit.unwrap_or(80))
+}
+
+#[tauri::command]
+pub fn delete_voice_input_history(
+    id: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.delete_voice_input_history(&id)
+}
+
+/// Frontend-side voice input may decide not to transcribe (e.g. mic permission denied,
+/// provider misconfigured, audio buffer too short). In that case, clear the backend
+/// "waiting transcribe" flag and update the overlay, otherwise the backend watchdog
+/// will surface a confusing "transcribe not started" error.
+#[tauri::command]
+pub fn voice_input_frontend_cancel(
+    session_id: Option<String>,
+    reason: String,
+    master_password: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    // Keep this command behind the same auth boundary as other voice input commands.
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+
+    state.voice_runtime.clear_waiting_transcribe();
+
+    if let Some(session_id) = session_id
+        .as_deref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
+        state.voice_runtime.clear_active_transcribe(session_id);
+    }
+
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        crate::voice_input::set_voice_overlay_state(&app, "hidden", None);
+    } else {
+        state.voice_runtime.mark_error(reason.clone());
+        crate::voice_input::set_voice_overlay_state(&app, "error", Some(reason));
+        crate::voice_input::hide_voice_overlay_after(app.clone(), 2400);
+    }
+
+    Ok(true)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1133,6 +1228,7 @@ pub struct VoiceInputTranscribeResult {
 pub async fn voice_input_transcribe(
     audio_base64: String,
     file_name: Option<String>,
+    session_id: Option<String>,
     master_password: String,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -1170,26 +1266,61 @@ pub async fn voice_input_transcribe(
     let model = settings.voice_stt_model.trim().to_string();
     let provider_id = provider.provider.clone();
 
-    let stt_result = match provider.provider.as_str() {
-        "elevenlabs" => {
-            Err("ElevenLabs STT 转写尚未接入（P0 仅支持 OpenAI Compatible）".to_string())
+    let provider_for_req = provider.clone();
+    let api_key_for_req = api_key.clone();
+    let model_for_req = model.clone();
+    let language_for_req = language.clone();
+    let file_name_for_req = file_name.clone();
+
+    let session_id = session_id
+        .as_deref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    state
+        .voice_runtime
+        .set_active_transcribe(session_id.clone(), cancel_tx);
+
+    let transcribe_fut = async move {
+        match provider_for_req.provider.as_str() {
+            "elevenlabs" => {
+                transcribe_with_elevenlabs(
+                    &provider_for_req,
+                    &api_key_for_req,
+                    &model_for_req,
+                    &language_for_req,
+                    &file_name_for_req,
+                    audio_bytes,
+                )
+                .await
+            }
+            _ => {
+                transcribe_with_openai_compatible(
+                    &provider_for_req,
+                    &api_key_for_req,
+                    &model_for_req,
+                    &language_for_req,
+                    &file_name_for_req,
+                    audio_bytes,
+                )
+                .await
+            }
         }
-        _ => {
-            transcribe_with_openai_compatible(
-                &provider,
-                &api_key,
-                &model,
-                &language,
-                &file_name,
-                audio_bytes,
-            )
-            .await
-        }
+    };
+    tokio::pin!(transcribe_fut);
+
+    let stt_result = tokio::select! {
+        _ = cancel_rx => Err("Cancelled".to_string()),
+        res = &mut transcribe_fut => res,
     };
 
     let latency_ms = started.elapsed().as_millis() as i64;
     state.voice_runtime.mark_transcribe_latency(latency_ms);
     state.voice_runtime.clear_waiting_transcribe();
+    state.voice_runtime.clear_active_transcribe(&session_id);
 
     match stt_result {
         Ok(text) => {
@@ -1247,20 +1378,24 @@ pub async fn voice_input_transcribe(
             Ok(VoiceInputTranscribeResult {
                 text: final_text,
                 provider: provider_id,
-                model,
+                model: model.clone(),
                 pasted,
                 latency_ms,
                 error,
             })
         }
         Err(err) => {
-            state.voice_runtime.mark_error(err.clone());
-            crate::voice_input::set_voice_overlay_state(&app, "error", Some(err.clone()));
-            crate::voice_input::hide_voice_overlay_after(app.clone(), 2400);
+            if err == "Cancelled" {
+                crate::voice_input::set_voice_overlay_state(&app, "hidden", None);
+            } else {
+                state.voice_runtime.mark_error(err.clone());
+                crate::voice_input::set_voice_overlay_state(&app, "error", Some(err.clone()));
+                crate::voice_input::hide_voice_overlay_after(app.clone(), 2400);
+            }
             Ok(VoiceInputTranscribeResult {
                 text: String::new(),
                 provider: provider_id,
-                model,
+                model: model.clone(),
                 pasted: false,
                 latency_ms,
                 error: Some(err),
@@ -1887,54 +2022,78 @@ fn capture_selected_text_with_fallback() -> Result<String, String> {
 
 #[cfg(target_os = "macos")]
 fn trigger_copy_shortcut() -> Result<(), String> {
-    let output = Command::new("osascript")
-        .arg("-e")
-        .arg(r#"tell application "System Events" to keystroke "c" using command down"#)
-        .output()
-        .map_err(|e| format!("Failed to execute copy shortcut: {}", e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            format!(
-                "Failed to capture selected text. {}",
-                selection_permission_hint()
-            )
-        } else {
-            format!(
-                "Failed to capture selected text: {}. {}",
-                stderr,
-                selection_permission_hint()
-            )
-        });
+    if let Err(err) = trigger_cmd_shortcut(8) {
+        log::warn!("copy shortcut failed: {}", err);
+        return Err(format!(
+            "Failed to capture selected text. {}",
+            selection_permission_hint()
+        ));
     }
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn trigger_paste_shortcut() -> Result<(), String> {
-    let output = Command::new("osascript")
-        .arg("-e")
-        .arg(r#"tell application "System Events" to keystroke "v" using command down"#)
-        .output()
-        .map_err(|e| format!("Failed to execute paste shortcut: {}", e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            format!("Failed to paste text. {}", selection_permission_hint())
-        } else {
-            format!(
-                "Failed to paste text: {}. {}",
-                stderr,
-                selection_permission_hint()
-            )
-        });
+pub(crate) fn trigger_paste_shortcut() -> Result<(), String> {
+    if let Err(err) = trigger_cmd_shortcut(9) {
+        log::warn!("paste shortcut failed: {}", err);
+        return Err(format!(
+            "自动粘贴失败（已写入剪贴板）。{}",
+            selection_permission_hint()
+        ));
     }
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn selection_permission_hint() -> &'static str {
-    "请在“系统设置 -> 隐私与安全性 -> 辅助功能”中给 MyKey 授权，并在“自动化”中允许 MyKey 控制“System Events”"
+    "请在“系统设置 -> 隐私与安全性 -> 辅助功能”中给 MyKey 授权（必要时退出并重开 MyKey）"
+}
+
+#[cfg(target_os = "macos")]
+fn trigger_cmd_shortcut(keycode: u16) -> Result<(), String> {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use std::thread;
+    use std::time::Duration;
+
+    // Without Accessibility permission, CGEvent posts can fail silently.
+    if unsafe { !AXIsProcessTrusted() } {
+        return Err("Accessibility permission not granted".to_string());
+    }
+
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+        .map_err(|_| "Failed to create CGEventSource".to_string())?;
+
+    // Use explicit modifier press/release to match real keyboard behavior
+    // and improve compatibility across apps.
+    const CMD_KEYCODE: u16 = 55; // kVK_Command
+
+    let cmd_down = CGEvent::new_keyboard_event(source.clone(), CMD_KEYCODE, true)
+        .map_err(|_| "Failed to create Cmd down event".to_string())?;
+    cmd_down.post(CGEventTapLocation::HID);
+
+    thread::sleep(Duration::from_millis(10));
+
+    let key_down = CGEvent::new_keyboard_event(source.clone(), keycode, true)
+        .map_err(|_| "Failed to create key down event".to_string())?;
+    key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+    key_down.post(CGEventTapLocation::HID);
+
+    thread::sleep(Duration::from_millis(10));
+
+    let key_up = CGEvent::new_keyboard_event(source.clone(), keycode, false)
+        .map_err(|_| "Failed to create key up event".to_string())?;
+    key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+    key_up.post(CGEventTapLocation::HID);
+
+    // Give the target app time to receive the key chord before releasing Cmd.
+    thread::sleep(Duration::from_millis(90));
+
+    let cmd_up = CGEvent::new_keyboard_event(source, CMD_KEYCODE, false)
+        .map_err(|_| "Failed to create Cmd up event".to_string())?;
+    cmd_up.post(CGEventTapLocation::HID);
+
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1954,7 +2113,7 @@ fn read_clipboard_text() -> Result<String, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn write_clipboard_text(content: &str) -> Result<(), String> {
+pub(crate) fn write_clipboard_text(content: &str) -> Result<(), String> {
     let mut process = Command::new("pbcopy")
         // Force UTF-8 to avoid mojibake when app env has no locale.
         .env("LANG", "en_US.UTF-8")
@@ -1973,6 +2132,37 @@ fn write_clipboard_text(content: &str) -> Result<(), String> {
         return Err("Failed to write clipboard".to_string());
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn paste_text_via_clipboard(
+    text: &str,
+    paste_delay_ms: u64,
+    restore_clipboard: bool,
+) -> Result<bool, String> {
+    let content = text.trim_end_matches('\n');
+    if content.trim().is_empty() {
+        return Ok(false);
+    }
+
+    // Best-effort. Reading text cannot preserve non-text clipboard types.
+    let original_text = read_clipboard_text().ok();
+
+    write_clipboard_text(content)?;
+    if paste_delay_ms > 0 {
+        std::thread::sleep(Duration::from_millis(paste_delay_ms));
+    }
+
+    // If paste fails, keep the new clipboard so the user can paste manually.
+    trigger_paste_shortcut()?;
+
+    if restore_clipboard {
+        if let Some(previous) = original_text.as_deref() {
+            let _ = write_clipboard_text(previous);
+        }
+    }
+
+    Ok(true)
 }
 
 fn capture_interactive_screenshot() -> Result<PathBuf, String> {
@@ -2381,7 +2571,7 @@ async fn translate_with_openai_compatible(
     Err("Provider returned empty translation".to_string())
 }
 
-async fn transcribe_with_openai_compatible(
+pub(crate) async fn transcribe_with_openai_compatible(
     provider: &ProviderConfig,
     api_key: &str,
     model: &str,
@@ -2481,6 +2671,41 @@ async fn transcribe_with_openai_compatible(
         ));
     }
     Ok(text)
+}
+
+pub(crate) async fn transcribe_with_elevenlabs(
+    provider: &ProviderConfig,
+    api_key: &str,
+    model: &str,
+    language: &str,
+    file_name: &str,
+    audio_bytes: Vec<u8>,
+) -> Result<String, String> {
+    let endpoint = resolve_quick_endpoint(provider);
+    if endpoint.trim().is_empty() {
+        return Err(format!(
+            "Provider {} has no endpoint configured",
+            provider.provider
+        ));
+    }
+    let primary_headers = provider
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.is_primary)
+        .and_then(|endpoint| endpoint.headers.as_deref());
+    let headers = parse_headers(primary_headers);
+
+    crate::stt::elevenlabs::transcribe(
+        &endpoint,
+        api_key,
+        model,
+        Some(language),
+        file_name,
+        audio_bytes,
+        headers,
+        Duration::from_secs(60),
+    )
+    .await
 }
 
 async fn run_ocr_with_provider(
@@ -4407,6 +4632,96 @@ pub async fn clippy_codex_chat(
     Ok(fallback)
 }
 
+pub(crate) async fn gateway_responses_text(
+    base_url: &str,
+    api_key: &str,
+    open_responses: bool,
+    model: &str,
+    system_prompt: &str,
+    user_text: &str,
+) -> Result<String, String> {
+    let base_url = base_url.trim();
+    let api_key = api_key.trim();
+    if base_url.is_empty() {
+        return Err("Gateway base_url is empty".to_string());
+    }
+    if api_key.is_empty() {
+        return Err("Gateway api_key is empty".to_string());
+    }
+
+    let gateway_endpoint = if open_responses {
+        format!("{}/responses/compact", base_url.trim_end_matches('/'))
+    } else {
+        format!("{}/responses", base_url.trim_end_matches('/'))
+    };
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("Gateway model is empty".to_string());
+    }
+
+    let instructions = system_prompt.trim();
+    let input_text = user_text.trim();
+    if input_text.is_empty() {
+        return Err("User text is empty".to_string());
+    }
+
+    let payload = json!({
+        "model": model,
+        "stream": false,
+        "instructions": instructions,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": input_text }
+                ]
+            }
+        ]
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client
+        .post(&gateway_endpoint)
+        .bearer_auth(api_key)
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("无法连接 Gateway：{}", e))?;
+
+    let status = response.status();
+    let raw = response.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<Value>(&raw).ok();
+
+    if !status.is_success() {
+        let detail = parsed
+            .as_ref()
+            .and_then(extract_error_message)
+            .unwrap_or_else(|| truncate_text(&raw, 220));
+        return Err(format!(
+            "Gateway 请求失败（HTTP {}）：{}",
+            status.as_u16(),
+            detail
+        ));
+    }
+
+    if let Some(parsed_value) = parsed.as_ref() {
+        if let Some(text) = extract_codex_text(parsed_value) {
+            return Ok(text);
+        }
+    }
+
+    let fallback = truncate_text(&raw, 400);
+    if fallback.is_empty() {
+        return Err("Gateway 返回为空".to_string());
+    }
+    Ok(fallback)
+}
+
 #[tauri::command]
 pub async fn quick_clippy_assist(
     translated_text: String,
@@ -4646,13 +4961,18 @@ pub async fn test_provider_endpoint(
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| {
                     if provider_id == "elevenlabs" {
-                        "scribe-v2"
+                        "scribe_v2"
                     } else {
                         "whisper-1"
                     }
                 });
             let form = if provider_id == "elevenlabs" {
-                reqwest::multipart::Form::new().text("model_id", probe_model.to_string())
+                let normalized = match probe_model.to_ascii_lowercase().as_str() {
+                    "scribe" | "scribe-v1" | "scribe_v1" => "scribe_v1",
+                    "scribe-v2" | "scribe_v2" => "scribe_v2",
+                    _ => probe_model,
+                };
+                reqwest::multipart::Form::new().text("model_id", normalized.to_string())
             } else {
                 reqwest::multipart::Form::new().text("model", probe_model.to_string())
             };

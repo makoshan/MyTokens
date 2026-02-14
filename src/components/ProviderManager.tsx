@@ -54,6 +54,8 @@ const createLocalId = () =>
 const SPEECH_TO_TEXT_REFERENCE_URL = 'https://artificialanalysis.ai/speech-to-text'
 const SPEECH_TO_TEXT_MODEL_PRESETS: Record<string, string[]> = {
   openai: ['gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1'],
+  'azure-openai': ['whisper-large-v2'],
+  'azure-speech': ['azure-realtime-speech-to-text', 'whisper-large-v2'],
   groq: ['whisper-large-v3', 'whisper-large-v3-turbo'],
   mistral: ['voxtral-small', 'voxtral-mini'],
   gemini: ['gemini-2.5-pro', 'gemini-2.5-flash', 'chirp-3'],
@@ -61,10 +63,25 @@ const SPEECH_TO_TEXT_MODEL_PRESETS: Record<string, string[]> = {
   deepgram: ['nova-3', 'nova-2'],
   assemblyai: ['universal', 'slam-1'],
   speechmatics: ['speechmatics-enhanced', 'speechmatics-standard'],
-  elevenlabs: ['scribe-v2'],
+  elevenlabs: ['scribe_v2', 'scribe_v1'],
   'amazon-bedrock': ['amazon-transcribe', 'nova-2-omni', 'nova-2-pro'],
+  bedrock: ['amazon-transcribe', 'nova-2-omni', 'nova-2-pro'],
   fireworks: ['whisper-large-v3', 'whisper-large-v3-turbo'],
   deepinfra: ['whisper-large-v3', 'voxtral-small', 'voxtral-mini'],
+  together: ['whisper-large-v3'],
+  sambanova: ['whisper-large-v3'],
+  'fal-ai': ['wizper-large-v3', 'whisper-large-v3'],
+  replicate: [
+    'incredibly-fast-whisper',
+    'whisper-large-v2',
+    'whisper-large-v3',
+    'whisperx',
+    'parakeet-rnnt-1.1b',
+    'canary-qwen-2.5b',
+  ],
+  gladia: ['solaria-1'],
+  hathora: ['parakeet-tdt-0.6b-v3'],
+  nvidia: ['parakeet-tdt-0.6b-v2'],
 }
 
 type EditableEndpoint = Required<ProviderEndpointInput>
@@ -164,6 +181,17 @@ export default function ProviderManager({
     if (!providerId) return []
     return SPEECH_TO_TEXT_MODEL_PRESETS[providerId] || []
   }, [activeProvider])
+
+  const sttCapableProviders = useMemo(() => {
+    return providers
+      .filter((provider) => {
+        const category = getProviderCategory(provider.provider)
+        if (category === 'speech_to_text') return true
+        const providerId = provider.provider.trim().toLowerCase()
+        return !!SPEECH_TO_TEXT_MODEL_PRESETS[providerId]
+      })
+      .sort((a, b) => a.label.localeCompare(b.label))
+  }, [providers])
   const endpoints = editableEndpoints
   const envVars = editableEnvVars
   const appBindings = editableAppBindings
@@ -208,8 +236,11 @@ export default function ProviderManager({
     if (categoryFilter === 'all') {
       return CATEGORY_ORDER.filter((category) => (providerGroups.get(category)?.length || 0) > 0)
     }
+    if (categoryFilter === 'speech_to_text') {
+      return sttCapableProviders.length > 0 ? (['speech_to_text'] as const) : []
+    }
     return (providerGroups.get(categoryFilter)?.length || 0) > 0 ? [categoryFilter] : []
-  }, [categoryFilter, providerGroups])
+  }, [categoryFilter, providerGroups, sttCapableProviders.length])
   useEffect(() => {
     if (activeProvider) {
       const resolvedDetails = resolveDetails(activeProvider)
@@ -391,11 +422,21 @@ export default function ProviderManager({
       setTestingBaseUrl(true)
     }
     try {
+      const probe =
+        activeCategory === 'speech_to_text' ? 'stt' : 'models'
+      const providerId = activeProvider?.provider?.trim() || null
+      const resolvedModel =
+        activeCategory === 'speech_to_text'
+          ? (models[0]?.trim() || speechToTextPresetModels[0]?.trim() || null)
+          : null
       const result = await invoke<EndpointSpeedTestResult>('test_provider_endpoint', {
         url: normalizedUrl,
         apiKey: apiKey.trim() || null,
         headers: headers || null,
         timeoutMs: 8000,
+        probe,
+        provider: providerId,
+        model: resolvedModel,
       })
       if (endpointId) {
         setTestResults((prev) => ({
@@ -460,7 +501,10 @@ export default function ProviderManager({
             <span>{providers.length}</span>
           </button>
           {CATEGORY_ORDER.map((category) => {
-            const count = providerGroups.get(category)?.length || 0
+            const count =
+              category === 'speech_to_text'
+                ? sttCapableProviders.length
+                : providerGroups.get(category)?.length || 0
             if (count === 0) return null
             return (
               <button
@@ -483,9 +527,16 @@ export default function ProviderManager({
               <div key={category} className="provider-group">
                 <div className="provider-group-title">
                   {getProviderCategoryLabel(category)}
-                  <span>{providerGroups.get(category)?.length || 0}</span>
+                  <span>
+                    {category === 'speech_to_text' && categoryFilter === 'speech_to_text'
+                      ? sttCapableProviders.length
+                      : providerGroups.get(category)?.length || 0}
+                  </span>
                 </div>
-                {(providerGroups.get(category) || []).map((provider) => (
+                {(category === 'speech_to_text' && categoryFilter === 'speech_to_text'
+                  ? sttCapableProviders
+                  : providerGroups.get(category) || []
+                ).map((provider) => (
                   <div
                     key={provider.provider}
                     className={`provider-row ${
@@ -1563,7 +1614,7 @@ function getFormProfile(category: ProviderCategory | null) {
       apiKeyLabel: 'API Key',
       showBaseUrl: true,
       baseUrlLabel: '接口地址',
-      baseUrlTip: '填写 STT 服务 API 端点地址，不要以斜杠结尾。',
+      baseUrlTip: '填写 STT 服务 API 端点地址，不要以斜杠结尾。测速只验证接口可达与鉴权，不会上传你的语音。',
       showModels: true,
       modelLabel: '识别模型',
       modelPlaceholder: '输入模型名称，例如 whisper-1',

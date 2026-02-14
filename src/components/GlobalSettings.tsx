@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import './GlobalSettings.css'
@@ -7,8 +7,12 @@ import {
   GatewayPolicySettings,
   GatewayRequestLog,
   GlobalSettingsPayload,
+  MacosPermissionStatus,
   QuickActionSettings,
   ServiceConfig,
+  VoiceInputDiagnostics,
+  VoiceInputSettings,
+  RecentDebugLogs,
 } from '../types/settings'
 import type { ProviderConfig } from '../types/provider'
 import { getProviderCategory } from '../utils/provider'
@@ -107,6 +111,13 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
   const [quickSettings, setQuickSettings] = useState<QuickActionSettings | null>(null)
   const [quickProviders, setQuickProviders] = useState<ProviderConfig[]>([])
   const [quickSaveMessage, setQuickSaveMessage] = useState<string>('')
+  const [voiceSettings, setVoiceSettings] = useState<VoiceInputSettings | null>(null)
+  const [voiceDiagnostics, setVoiceDiagnostics] = useState<VoiceInputDiagnostics | null>(null)
+  const [voiceSaveMessage, setVoiceSaveMessage] = useState<string>('')
+  const [macPerm, setMacPerm] = useState<MacosPermissionStatus | null>(null)
+  const [voiceSelfTestMessage, setVoiceSelfTestMessage] = useState<string>('')
+  const [debugLogs, setDebugLogs] = useState<RecentDebugLogs | null>(null)
+  const refreshSeqRef = useRef(0)
 
   const services = settings?.services ?? []
   const integrations = settings?.integrations ?? []
@@ -115,41 +126,86 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
 
   const refresh = async (showLoading = true, windowMinutes = gatewayTrafficWindow) => {
     if (!masterPassword) return
+    const seq = (refreshSeqRef.current += 1)
     try {
       if (showLoading) {
         setLoading(true)
       }
-      const [payload, policy, logs, traffic, quick, providers] = await Promise.all([
-        invoke<GlobalSettingsPayload>('get_global_settings', {
-          masterPassword,
-        }),
-        invoke<GatewayPolicySettings>('get_gateway_policy_settings', {
-          masterPassword,
-        }),
-        invoke<GatewayRequestLog[]>('get_gateway_request_logs', {
-          limit: 80,
-          masterPassword,
-        }),
-        invoke<GatewayTrafficMetrics>('get_gateway_traffic_metrics', {
-          windowMinutes,
-          masterPassword,
-        }),
-        invoke<QuickActionSettings>('get_quick_action_settings', {
-          masterPassword,
-        }),
-        invoke<ProviderConfig[]>('get_providers', { masterPassword }),
-      ])
-      setSettings(payload)
-      setGatewayPolicy(policy)
-      setGatewayLogs(logs)
-      setGatewayTraffic(traffic)
-      setQuickSettings(quick)
-      setQuickProviders(providers)
-      setBudgetDraft(policy.daily_budget_usd ? policy.daily_budget_usd.toFixed(2) : '')
       setError(null)
+
+      const payload = await invoke<GlobalSettingsPayload>('get_global_settings', {
+        masterPassword,
+      })
+      if (seq !== refreshSeqRef.current) return
+      setSettings(payload)
+
+      if (showLoading) {
+        setLoading(false)
+      }
+
+      ;(async () => {
+        const results = await Promise.allSettled([
+          invoke<GatewayPolicySettings>('get_gateway_policy_settings', {
+            masterPassword,
+          }),
+          invoke<GatewayRequestLog[]>('get_gateway_request_logs', {
+            limit: 80,
+            masterPassword,
+          }),
+          invoke<GatewayTrafficMetrics>('get_gateway_traffic_metrics', {
+            windowMinutes,
+            masterPassword,
+          }),
+          invoke<QuickActionSettings>('get_quick_action_settings', {
+            masterPassword,
+          }),
+          invoke<ProviderConfig[]>('get_providers', { masterPassword }),
+          invoke<VoiceInputSettings>('get_voice_input_settings', { masterPassword }),
+          invoke<VoiceInputDiagnostics>('get_voice_input_diagnostics', { masterPassword }),
+          invoke<MacosPermissionStatus>('get_macos_permission_status'),
+        ])
+
+        if (seq !== refreshSeqRef.current) return
+
+        const errors: string[] = []
+        const settledValue = <T,>(idx: number): T | null => {
+          const item = results[idx]
+          if (item.status === 'fulfilled') return item.value as T
+          errors.push(String(item.reason))
+          return null
+        }
+
+        const policy = settledValue<GatewayPolicySettings>(0)
+        const logs = settledValue<GatewayRequestLog[]>(1)
+        const traffic = settledValue<GatewayTrafficMetrics>(2)
+        const quick = settledValue<QuickActionSettings>(3)
+        const providers = settledValue<ProviderConfig[]>(4)
+        const voice = settledValue<VoiceInputSettings>(5)
+        const voiceDiag = settledValue<VoiceInputDiagnostics>(6)
+        const perm = settledValue<MacosPermissionStatus>(7)
+
+        if (policy) {
+          setGatewayPolicy(policy)
+          setBudgetDraft(policy.daily_budget_usd ? policy.daily_budget_usd.toFixed(2) : '')
+        }
+        if (logs) setGatewayLogs(logs)
+        if (traffic) setGatewayTraffic(traffic)
+        if (quick) setQuickSettings(quick)
+        if (providers) setQuickProviders(providers)
+        if (voice) setVoiceSettings(voice)
+        if (voiceDiag) setVoiceDiagnostics(voiceDiag)
+        if (perm) setMacPerm(perm)
+
+        if (errors.length > 0) {
+          setError(`部分信息加载失败：${errors[0]}`)
+        }
+      })().catch((err) => {
+        if (seq !== refreshSeqRef.current) return
+        setError(`部分信息加载失败：${String(err)}`)
+      })
     } catch (err) {
       console.error('Failed to load global settings:', err)
-      setError('无法加载全局设置')
+      setError(`无法加载全局设置：${String(err)}`)
     } finally {
       if (showLoading) {
         setLoading(false)
@@ -212,6 +268,22 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
   const ocrProviderOptions = useMemo(
     () => quickProviders.filter((item) => getProviderCategory(item.provider) === 'ocr'),
     [quickProviders]
+  )
+  const sttProviderOptions = useMemo(() => {
+    return quickProviders.filter((item) => {
+      if (item.provider === 'openai') return true
+      return getProviderCategory(item.provider) === 'speech_to_text'
+    })
+  }, [quickProviders])
+
+  const voiceLanguagePresets = useMemo(
+    () => [
+      { value: 'zh', label: '中文 (zh)' },
+      { value: 'auto', label: '自动检测 (auto)' },
+      { value: 'en', label: 'English (en)' },
+      { value: 'ja', label: '日本語 (ja)' },
+    ],
+    []
   )
   const shipkeyBusy = busyKey?.startsWith('project-sync:') ?? false
   const shipkeyScanPreviewBusy = busyKey === 'project-sync:backup'
@@ -589,6 +661,88 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
     }
   }
 
+  const saveVoiceInputSettings = async () => {
+    if (!voiceSettings) return
+    setBusyKey('voice-settings')
+    setVoiceSaveMessage('')
+    try {
+      const saved = await invoke<VoiceInputSettings>('set_voice_input_settings', {
+        settings: voiceSettings,
+        masterPassword,
+      })
+      setVoiceSettings(saved)
+      const diag = await invoke<VoiceInputDiagnostics>('get_voice_input_diagnostics', {
+        masterPassword,
+      })
+      setVoiceDiagnostics(diag)
+      const perm = await invoke<MacosPermissionStatus>('get_macos_permission_status')
+      setMacPerm(perm)
+      if (!saved.voice_input_enabled) {
+        setVoiceSaveMessage('语音输入已关闭')
+      } else if (diag.listener_running) {
+        setVoiceSaveMessage('语音输入设置已保存并初始化监听')
+      } else {
+        setVoiceSaveMessage(`保存成功，但监听启动失败：${diag.last_error || '未知错误'}`)
+      }
+    } catch (err) {
+      console.error(err)
+      setVoiceSaveMessage(`保存失败: ${String(err)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const runVoiceTriggerSelfTest = async () => {
+    if (!masterPassword) return
+    setVoiceSelfTestMessage('')
+    setBusyKey('voice-self-test')
+    try {
+      const baseline = await invoke<VoiceInputDiagnostics>('get_voice_input_diagnostics', { masterPassword })
+      setVoiceDiagnostics(baseline)
+      const startCount = baseline.fn_edge_count || 0
+      setVoiceSelfTestMessage('自检开始：请在 5 秒内按一下你选择的“触发键”（Fn 或 Option）')
+
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setTimeout(r, 250))
+        // eslint-disable-next-line no-await-in-loop
+        const diag = await invoke<VoiceInputDiagnostics>('get_voice_input_diagnostics', { masterPassword })
+        setVoiceDiagnostics(diag)
+        const nowCount = diag.fn_edge_count || 0
+        if (nowCount > startCount) {
+          setVoiceSelfTestMessage('自检通过：已捕获到触发键事件')
+          return
+        }
+      }
+
+      setVoiceSelfTestMessage(
+        '自检失败：5 秒内没有捕获到触发键事件。可能原因：1) 未开启“输入监控”权限；2) macOS 系统功能或其它软件抢占了该键。建议先开启“输入监控(MyKey)”，再切换触发键为“长按 Option（备用）”，或到键盘设置关闭 Fn 的系统动作。'
+      )
+    } catch (err) {
+      console.error(err)
+      setVoiceSelfTestMessage(`自检失败: ${String(err)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const refreshDebugLogs = async () => {
+    setBusyKey('debug-logs')
+    try {
+      const logs = await invoke<RecentDebugLogs>('get_recent_debug_logs', { limit: 240 })
+      setDebugLogs(logs)
+    } catch (err) {
+      console.error(err)
+      setDebugLogs({
+        path: '',
+        lines: [`加载日志失败: ${String(err)}`],
+      })
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
   if (loading) {
     return (
       <section className="panel settings-panel-empty">
@@ -597,7 +751,7 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
     )
   }
 
-  if (error || !settings) {
+  if (!settings) {
     return (
       <section className="panel settings-panel-empty">
         <p>{error || '无法读取全局设置'}</p>
@@ -610,6 +764,14 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
 
   return (
     <div className="settings-view">
+      {error ? (
+        <section className="panel settings-section">
+          <div className="panel-header">
+            <h2>加载提示</h2>
+          </div>
+          <div className="settings-item-subtitle">{error}</div>
+        </section>
+      ) : null}
       <section className="panel settings-summary-grid">
         <div className="settings-summary-card">
           <span className="settings-summary-label">启用集成</span>
@@ -627,6 +789,15 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
           <span className="settings-summary-hint">
             {settings.debug_mode ? 'Debug 模式已开启' : 'Debug 模式已关闭'}
           </span>
+          <div style={{ marginTop: 10 }}>
+            <button
+              className={`btn ${settings.debug_mode ? 'btn-secondary' : 'btn-primary'}`}
+              disabled={busyKey === 'debug-mode'}
+              onClick={() => toggleDebug(!settings.debug_mode)}
+            >
+              {settings.debug_mode ? '关闭 Debug' : '开启 Debug'}
+            </button>
+          </div>
         </div>
       </section>
 
@@ -769,6 +940,428 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
           </div>
         ) : (
           <div className="settings-item-subtitle">快捷翻译设置加载中...</div>
+        )}
+      </section>
+
+      <section className="panel settings-section">
+        <div className="panel-header">
+          <h2>语音输入（长按 Fn）</h2>
+        </div>
+        {voiceSettings ? (
+          <div className="settings-list">
+            <div className="settings-item">
+              <div className="settings-item-header">
+                <div>
+                  <div className="settings-item-title">Fn Hold 语音输入</div>
+                  <div className="settings-item-subtitle">
+                    将光标放到任意文本框中，长按 Fn 开始录音，松开 Fn 停止并自动转写粘贴。Esc 取消本次粘贴但仍会保存到历史记录；免提模式用 Fn+Space 开始/停止。需要麦克风/辅助功能/输入监控权限。
+                  </div>
+                </div>
+                <div className="settings-item-badges">
+                  <span
+                    className={`service-badge ${voiceSettings.voice_input_enabled ? 'enabled' : 'disabled'}`}
+                  >
+                    {voiceSettings.voice_input_enabled ? '已启用' : '已禁用'}
+                  </span>
+                  {voiceDiagnostics ? (
+                    <span className={`service-badge ${voiceDiagnostics.listener_running ? 'running' : 'stopped'}`}>
+                      {voiceDiagnostics.listener_running ? '监听中' : '未监听'}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="settings-item-controls">
+                <button
+                  className={`btn ${voiceSettings.voice_input_enabled ? 'btn-secondary' : 'btn-primary'}`}
+                  disabled={busyKey === 'voice-settings'}
+                  onClick={() =>
+                    setVoiceSettings((prev) =>
+                      prev ? { ...prev, voice_input_enabled: !prev.voice_input_enabled } : prev
+                    )
+                  }
+                >
+                  {voiceSettings.voice_input_enabled ? '关闭语音输入' : '启用语音输入'}
+                </button>
+              </div>
+
+              <div className="settings-item-controls">
+                <label className="shipkey-field">
+                  <span>触发键</span>
+                  <select
+                    className="shipkey-target-select"
+                    value={voiceSettings.voice_trigger_mode}
+                    onChange={(event) =>
+                      setVoiceSettings((prev) =>
+                        prev ? { ...prev, voice_trigger_mode: event.target.value } : prev
+                      )
+                    }
+                  >
+                    <option value="fn_hold">长按 Fn（默认）</option>
+                    <option value="option_hold">长按 Option（备用）</option>
+                    <option value="fn_option_hold">长按 Fn+Option（组合）</option>
+                  </select>
+                </label>
+                <label className="shipkey-field">
+                  <span>长按阈值（ms）</span>
+                  <input
+                    type="number"
+                    min={120}
+                    max={800}
+                    value={voiceSettings.voice_hold_ms}
+                    onChange={(event) => {
+                      const value = Number.parseInt(event.target.value, 10)
+                      setVoiceSettings((prev) =>
+                        prev ? { ...prev, voice_hold_ms: Number.isNaN(value) ? 200 : value } : prev
+                      )
+                    }}
+                  />
+                </label>
+                <label className="shipkey-field">
+                  <span>最短录音（ms）</span>
+                  <input
+                    type="number"
+                    min={120}
+                    max={8000}
+                    value={voiceSettings.voice_min_record_ms}
+                    onChange={(event) => {
+                      const value = Number.parseInt(event.target.value, 10)
+                      setVoiceSettings((prev) =>
+                        prev
+                          ? { ...prev, voice_min_record_ms: Number.isNaN(value) ? 300 : value }
+                          : prev
+                      )
+                    }}
+                  />
+                </label>
+              </div>
+
+              <div className="settings-item-controls">
+                <label className="shipkey-field">
+                  <span>免提模式（Fn+Space）</span>
+                  <select
+                    className="shipkey-target-select"
+                    value={voiceSettings.voice_hands_free_enabled ? 'true' : 'false'}
+                    onChange={(event) =>
+                      setVoiceSettings((prev) =>
+                        prev
+                          ? { ...prev, voice_hands_free_enabled: event.target.value === 'true' }
+                          : prev
+                      )
+                    }
+                  >
+                    <option value="false">关闭</option>
+                    <option value="true">开启</option>
+                  </select>
+                </label>
+                <label className="shipkey-field">
+                  <span>AI 自动编辑</span>
+                  <select
+                    className="shipkey-target-select"
+                    value={voiceSettings.voice_ai_auto_edit ? 'true' : 'false'}
+                    onChange={(event) =>
+                      setVoiceSettings((prev) =>
+                        prev ? { ...prev, voice_ai_auto_edit: event.target.value === 'true' } : prev
+                      )
+                    }
+                  >
+                    <option value="false">关闭</option>
+                    <option value="true">开启（润色/去口癖/格式化）</option>
+                  </select>
+                </label>
+                <label className="shipkey-field">
+                  <span>AI 模型（可选）</span>
+                  <input
+                    value={voiceSettings.voice_ai_model}
+                    disabled={!voiceSettings.voice_ai_auto_edit}
+                    onChange={(event) =>
+                      setVoiceSettings((prev) =>
+                        prev ? { ...prev, voice_ai_model: event.target.value } : prev
+                      )
+                    }
+                    placeholder="留空使用 codex 路由默认模型"
+                  />
+                </label>
+              </div>
+
+              <div className="settings-item-controls">
+                <label className="shipkey-field">
+                  <span>STT Provider</span>
+                  <select
+                    className="shipkey-target-select"
+                    value={voiceSettings.voice_stt_provider}
+                    onChange={(event) => {
+                      const nextProvider = event.target.value
+                      setVoiceSettings((prev) => {
+                        if (!prev) return prev
+                        let nextModel = prev.voice_stt_model
+                        let nextLanguage = prev.voice_language
+                        if (nextProvider === 'elevenlabs') {
+                          const current = (nextModel || '').trim()
+                          if (!current || current === 'whisper-1') {
+                            nextModel = 'scribe_v2'
+                          }
+                          const lang = (nextLanguage || '').trim()
+                          if (!lang || lang === 'auto') {
+                            nextLanguage = 'zh'
+                          }
+                        }
+                        return {
+                          ...prev,
+                          voice_stt_provider: nextProvider,
+                          voice_stt_model: nextModel,
+                          voice_language: nextLanguage,
+                        }
+                      })
+                    }}
+                  >
+                    {sttProviderOptions.map((provider) => (
+                      <option key={provider.provider} value={provider.provider}>
+                        {provider.label || provider.provider}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="shipkey-field">
+                  <span>模型</span>
+                  <input
+                    value={voiceSettings.voice_stt_model}
+                    onChange={(event) =>
+                      setVoiceSettings((prev) =>
+                        prev ? { ...prev, voice_stt_model: event.target.value } : prev
+                      )
+                    }
+                    placeholder="whisper-1"
+                  />
+                </label>
+                <label className="shipkey-field">
+                  <span>语言</span>
+                  {(() => {
+                    const current = (voiceSettings.voice_language || '').trim()
+                    const isPreset = voiceLanguagePresets.some((item) => item.value === current)
+                    const selectValue = isPreset ? current : '__custom__'
+                    return (
+                      <>
+                        <select
+                          className="shipkey-target-select"
+                          value={selectValue}
+                          onChange={(event) => {
+                            const value = event.target.value
+                            if (value === '__custom__') return
+                            setVoiceSettings((prev) => (prev ? { ...prev, voice_language: value } : prev))
+                          }}
+                        >
+                          {voiceLanguagePresets.map((item) => (
+                            <option key={item.value} value={item.value}>
+                              {item.label}
+                            </option>
+                          ))}
+                          <option value="__custom__">自定义…</option>
+                        </select>
+                        {selectValue === '__custom__' ? (
+                          <input
+                            value={voiceSettings.voice_language}
+                            onChange={(event) =>
+                              setVoiceSettings((prev) =>
+                                prev ? { ...prev, voice_language: event.target.value } : prev
+                              )
+                            }
+                            placeholder="ISO-639-1/3 (例如 zh / cmn / en)"
+                          />
+                        ) : null}
+                      </>
+                    )
+                  })()}
+                </label>
+              </div>
+
+              <div className="settings-item-controls">
+                <label className="shipkey-field">
+                  <span>自动粘贴</span>
+                  <select
+                    className="shipkey-target-select"
+                    value={voiceSettings.voice_auto_paste ? 'true' : 'false'}
+                    onChange={(event) =>
+                      setVoiceSettings((prev) =>
+                        prev
+                          ? { ...prev, voice_auto_paste: event.target.value === 'true' }
+                          : prev
+                      )
+                    }
+                  >
+                    <option value="true">是</option>
+                    <option value="false">否（仅写入剪贴板）</option>
+                  </select>
+                </label>
+                <label className="shipkey-field">
+                  <span>粘贴延迟（ms）</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={1200}
+                    value={voiceSettings.voice_paste_delay_ms}
+                    onChange={(event) => {
+                      const value = Number.parseInt(event.target.value, 10)
+                      setVoiceSettings((prev) =>
+                        prev ? { ...prev, voice_paste_delay_ms: Number.isNaN(value) ? 120 : value } : prev
+                      )
+                    }}
+                  />
+                </label>
+                <label className="shipkey-field">
+                  <span>恢复剪贴板</span>
+                  <select
+                    className="shipkey-target-select"
+                    value={voiceSettings.voice_restore_clipboard ? 'true' : 'false'}
+                    onChange={(event) =>
+                      setVoiceSettings((prev) =>
+                        prev
+                          ? { ...prev, voice_restore_clipboard: event.target.value === 'true' }
+                          : prev
+                      )
+                    }
+                  >
+                    <option value="false">否（保留本次转写文本）</option>
+                    <option value="true">是（仅文本，可能影响图片/文件剪贴板）</option>
+                  </select>
+                </label>
+                <label className="shipkey-field">
+                  <span>末尾加空格</span>
+                  <select
+                    className="shipkey-target-select"
+                    value={voiceSettings.voice_append_trailing_space ? 'true' : 'false'}
+                    onChange={(event) =>
+                      setVoiceSettings((prev) =>
+                        prev
+                          ? { ...prev, voice_append_trailing_space: event.target.value === 'true' }
+                          : prev
+                      )
+                    }
+                  >
+                    <option value="true">是</option>
+                    <option value="false">否</option>
+                  </select>
+                </label>
+              </div>
+
+              <div className="settings-item-controls">
+                <button
+                  className="btn btn-primary"
+                  disabled={busyKey === 'voice-settings'}
+                  onClick={saveVoiceInputSettings}
+                >
+                  {busyKey === 'voice-settings' ? '保存中...' : '保存'}
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  disabled={busyKey === 'voice-self-test'}
+                  onClick={runVoiceTriggerSelfTest}
+                >
+                  {busyKey === 'voice-self-test' ? '自检中...' : '自检触发键'}
+                </button>
+              </div>
+
+              {voiceSaveMessage ? <div className="settings-item-subtitle">{voiceSaveMessage}</div> : null}
+              {voiceSelfTestMessage ? <div className="settings-item-subtitle">{voiceSelfTestMessage}</div> : null}
+              {voiceDiagnostics?.last_error ? (
+                <div className="settings-item-subtitle">最近错误: {voiceDiagnostics.last_error}</div>
+              ) : null}
+              {voiceDiagnostics ? (
+                <div className="settings-item-subtitle">
+                  触发键边沿次数: {voiceDiagnostics.fn_edge_count ?? 0}
+                  {voiceDiagnostics.last_fn_edge_at ? `（最近: ${voiceDiagnostics.last_fn_edge_at}）` : ''}
+                </div>
+              ) : null}
+              {voiceDiagnostics ? (
+                <div className="settings-item-subtitle">
+                  原始键盘事件: {voiceDiagnostics.raw_event_count ?? 0}
+                  {voiceDiagnostics.last_raw_event_type ? `（最近: ${voiceDiagnostics.last_raw_event_type}` : ''}
+                  {voiceDiagnostics.last_raw_keycode != null ? ` keycode=${voiceDiagnostics.last_raw_keycode}` : ''}
+                  {voiceDiagnostics.last_raw_event_at ? ` @ ${voiceDiagnostics.last_raw_event_at}` : ''}
+                  {voiceDiagnostics.last_raw_event_type ? ')' : ''}
+                </div>
+              ) : null}
+              {voiceDiagnostics?.tap_location ? (
+                <div className="settings-item-subtitle">EventTap: {voiceDiagnostics.tap_location}</div>
+              ) : null}
+              {voiceSettings.voice_input_enabled && voiceDiagnostics?.listener_running && (voiceDiagnostics?.fn_edge_count ?? 0) <= 0 ? (
+                <div className="settings-item-subtitle">
+                  提示: 触发键无响应时，先按一下你选择的触发键，看“边沿次数”是否增加；若不增加，说明系统/其他软件抢占了该键。
+                  可切换到“长按 Option（备用）”，或在 macOS 键盘设置里把 Fn 的系统动作关闭。
+                </div>
+              ) : null}
+              {voiceSettings.voice_input_enabled &&
+              voiceDiagnostics?.listener_running &&
+              (voiceDiagnostics?.raw_event_count ?? 0) > 0 &&
+              (voiceDiagnostics?.fn_edge_count ?? 0) <= 0 ? (
+                <div className="settings-item-subtitle">
+                  诊断: 已收到键盘事件但没有捕获到“触发键”边沿。若你按的是 Fn，通常表示 Fn 被系统占用或不会被 macOS 作为可监听事件发出；
+                  建议把触发键切到“长按 Option（备用）”，或在键盘设置里关闭 Fn 的系统动作后再试。
+                </div>
+              ) : null}
+              {macPerm?.is_macos ? (
+                <div className="settings-item-subtitle">
+                  权限状态: 辅助功能 {macPerm.accessibility_granted ? '已授权' : '未授权'}；输入监控{' '}
+                  {macPerm.input_monitoring_granted ? '已授权' : '未授权'}
+                </div>
+              ) : null}
+              {macPerm?.is_macos && (macPerm.process_name || macPerm.executable_path) ? (
+                <div className="settings-item-subtitle">
+                  当前运行进程: {macPerm.process_name || '未知'}
+                  {macPerm.executable_path ? `（${macPerm.executable_path}）` : ''}
+                </div>
+              ) : null}
+              {macPerm?.is_macos && !macPerm.accessibility_granted ? (
+                <div className="settings-item-controls">
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => invoke('open_macos_accessibility_settings')}
+                  >
+                    打开辅助功能设置
+                  </button>
+                </div>
+              ) : null}
+              {macPerm?.is_macos && !macPerm.input_monitoring_granted ? (
+                <div className="settings-item-controls">
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => invoke('open_macos_input_monitoring_settings')}
+                  >
+                    打开输入监控设置
+                  </button>
+                </div>
+              ) : null}
+              {macPerm?.is_macos ? (
+                <div className="settings-item-controls">
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => invoke('open_macos_keyboard_settings')}
+                  >
+                    打开键盘设置
+                  </button>
+                </div>
+              ) : null}
+              {voiceDiagnostics?.last_latency_ms ? (
+                <div className="settings-item-subtitle">最近转写耗时: {voiceDiagnostics.last_latency_ms}ms</div>
+              ) : null}
+
+              <div className="settings-item-controls">
+                <button className="btn btn-secondary" disabled={busyKey === 'debug-logs'} onClick={refreshDebugLogs}>
+                  {busyKey === 'debug-logs' ? '加载中...' : '查看 Debug Log'}
+                </button>
+              </div>
+              {debugLogs ? (
+                <div className="settings-item-subtitle">
+                  日志文件: {debugLogs.path || '（未知）'}
+                  <pre style={{ whiteSpace: 'pre-wrap', marginTop: 8, maxHeight: 220, overflow: 'auto' }}>
+                    {debugLogs.lines.join('\n') || '（空）'}
+                  </pre>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : (
+          <div className="settings-item-subtitle">语音输入设置加载中...</div>
         )}
       </section>
 

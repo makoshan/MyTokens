@@ -9,6 +9,7 @@ use crate::{
     ProviderAppBindingInput, ProviderConfig, ProviderDetails, ProviderEndpoint,
     ProviderEndpointInput, ProviderEnvVar, ProviderEnvVarInput, ProviderModel,
     QuickActionHistoryRecord, QuickActionResult, QuickActionSettings, ServiceConfig,
+    VoiceInputHistoryRecord,
 };
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -21,7 +22,7 @@ use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub struct Vault {
@@ -36,6 +37,7 @@ pub struct Vault {
     provider_env_vars: HashMap<String, Vec<ProviderEnvVar>>,
     provider_app_bindings: HashMap<String, Vec<ProviderAppBinding>>,
     secret_manager: SecretManager,
+    last_integration_detection_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +84,11 @@ pub struct GatewayRequestLogInput {
 }
 
 impl Vault {
+    fn gateway_window_cutoff_rfc3339(window_minutes: i64) -> String {
+        let window = window_minutes.clamp(5, 24 * 60);
+        (Local::now() - chrono::Duration::minutes(window)).to_rfc3339()
+    }
+
     pub fn new() -> Self {
         let (conn, db_path) = Self::open_db().unwrap_or_else(|err| panic!("DB init failed: {err}"));
         Self::migrate(&conn).unwrap_or_else(|err| panic!("DB migrate failed: {err}"));
@@ -109,6 +116,7 @@ impl Vault {
             provider_env_vars,
             provider_app_bindings,
             secret_manager,
+            last_integration_detection_at: None,
         };
         vault.ensure_default_providers();
         vault.ensure_usage_provider_settings();
@@ -1418,6 +1426,21 @@ impl Vault {
                 error_code TEXT,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS voice_input_history (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                trigger_mode TEXT NOT NULL,
+                raw_text TEXT,
+                final_text TEXT,
+                provider TEXT,
+                model TEXT,
+                language TEXT,
+                latency_ms INTEGER,
+                pasted INTEGER NOT NULL DEFAULT 0,
+                cancelled INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                created_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_provider_endpoints_provider ON provider_endpoints(provider);
             CREATE INDEX IF NOT EXISTS idx_provider_models_provider ON provider_models(provider);
             CREATE INDEX IF NOT EXISTS idx_provider_env_vars_provider ON provider_env_vars(provider);
@@ -1431,7 +1454,11 @@ impl Vault {
             CREATE INDEX IF NOT EXISTS idx_backup_runs_started_at ON backup_runs(started_at);
             CREATE INDEX IF NOT EXISTS idx_gateway_logs_created_at ON gateway_request_logs(created_at);
             CREATE INDEX IF NOT EXISTS idx_gateway_logs_app_type ON gateway_request_logs(app_type);
-            CREATE INDEX IF NOT EXISTS idx_quick_action_history_created_at ON quick_action_history(created_at);",
+            CREATE INDEX IF NOT EXISTS idx_gateway_logs_provider ON gateway_request_logs(provider);
+            CREATE INDEX IF NOT EXISTS idx_gateway_logs_model ON gateway_request_logs(model);
+            CREATE INDEX IF NOT EXISTS idx_gateway_logs_latency_ms ON gateway_request_logs(latency_ms);
+            CREATE INDEX IF NOT EXISTS idx_quick_action_history_created_at ON quick_action_history(created_at);
+            CREATE INDEX IF NOT EXISTS idx_voice_input_history_created_at ON voice_input_history(created_at);",
         )
         .map_err(|e| e.to_string())?;
 
@@ -1873,13 +1900,13 @@ impl Vault {
                     next.voice_min_record_ms = 300;
                 }
                 if next.voice_stt_provider.trim().is_empty() {
-                    next.voice_stt_provider = "openai".to_string();
+                    next.voice_stt_provider = "elevenlabs".to_string();
                 }
                 if next.voice_stt_model.trim().is_empty() {
-                    next.voice_stt_model = "whisper-1".to_string();
+                    next.voice_stt_model = "scribe_v2".to_string();
                 }
                 if next.voice_language.trim().is_empty() {
-                    next.voice_language = "auto".to_string();
+                    next.voice_language = "zh".to_string();
                 }
                 if next.voice_paste_delay_ms < 0 {
                     next.voice_paste_delay_ms = 0;
@@ -2020,8 +2047,91 @@ impl Vault {
         Ok(items)
     }
 
+    pub fn append_voice_input_history(
+        &self,
+        record: &VoiceInputHistoryRecord,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO voice_input_history
+                (id, session_id, trigger_mode, raw_text, final_text, provider, model, language, latency_ms, pasted, cancelled, error, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    record.id,
+                    record.session_id,
+                    record.trigger_mode,
+                    record.raw_text,
+                    record.final_text,
+                    record.provider,
+                    record.model,
+                    record.language,
+                    record.latency_ms,
+                    if record.pasted { 1 } else { 0 },
+                    if record.cancelled { 1 } else { 0 },
+                    record.error,
+                    record.created_at,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_voice_input_history(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<VoiceInputHistoryRecord>, String> {
+        let capped_limit = limit.clamp(1, 300);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, session_id, trigger_mode, raw_text, final_text, provider, model, language, latency_ms, pasted, cancelled, error, created_at
+                 FROM voice_input_history
+                 ORDER BY created_at DESC
+                 LIMIT ?1",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let rows = stmt
+            .query_map(params![capped_limit], |row| {
+                Ok(VoiceInputHistoryRecord {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    trigger_mode: row.get(2)?,
+                    raw_text: row.get(3)?,
+                    final_text: row.get(4)?,
+                    provider: row.get(5)?,
+                    model: row.get(6)?,
+                    language: row.get(7)?,
+                    latency_ms: row.get(8)?,
+                    pasted: row.get::<_, i64>(9)? != 0,
+                    cancelled: row.get::<_, i64>(10)? != 0,
+                    error: row.get(11)?,
+                    created_at: row.get(12)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(items)
+    }
+
+    pub fn delete_voice_input_history(&self, id: &str) -> Result<bool, String> {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            return Err("Missing history id".to_string());
+        }
+        let changed = self
+            .conn
+            .execute("DELETE FROM voice_input_history WHERE id = ?1", params![trimmed])
+            .map_err(|e| e.to_string())?;
+        Ok(changed > 0)
+    }
+
     pub fn get_global_settings(&mut self) -> Result<GlobalSettingsPayload, String> {
-        self.refresh_app_integration_detection();
+        self.refresh_app_integration_detection_throttled();
 
         let debug_mode = self.get_debug_mode()?;
         let log_level = self.meta_get("log_level")?.unwrap_or_else(|| {
@@ -2768,10 +2878,11 @@ impl Vault {
         window_minutes: i64,
     ) -> Result<GatewayTrafficMetrics, String> {
         let window = window_minutes.clamp(5, 24 * 60);
+        let cutoff = Self::gateway_window_cutoff_rfc3339(window);
         let mut stmt = self
             .conn
             .prepare(
-                 "SELECT
+                "SELECT
                      COUNT(*) AS total_requests,
                      COALESCE(SUM(CASE WHEN status_code BETWEEN 200 AND 399 THEN 1 ELSE 0 END), 0) AS success_requests,
                      COALESCE(SUM(CASE WHEN status_code BETWEEN 400 AND 499 THEN 1 ELSE 0 END), 0) AS client_error_requests,
@@ -2783,8 +2894,8 @@ impl Vault {
                      COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS total_output_tokens,
                      COALESCE(SUM(total_tokens), 0) AS total_tokens
                   FROM gateway_request_logs
-                  WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)",
-             )
+                  WHERE created_at >= ?1",
+            )
             .map_err(|e| e.to_string())?;
 
         let (
@@ -2799,7 +2910,7 @@ impl Vault {
             total_output_tokens,
             total_tokens,
         ) = stmt
-            .query_row(params![window], |row| {
+            .query_row(params![cutoff], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
@@ -2851,6 +2962,7 @@ impl Vault {
         window_minutes: i64,
         group_by: &str,
     ) -> Result<Vec<GatewayTrafficGroup>, String> {
+        let cutoff = Self::gateway_window_cutoff_rfc3339(window_minutes);
         let group_column = match group_by {
             "app_type" | "provider" | "model" | "user_key" => group_by,
             _ => return Err(format!("Unsupported gateway group column: {}", group_by)),
@@ -2868,14 +2980,14 @@ impl Vault {
                  COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS total_output_tokens,
                  COALESCE(SUM(total_tokens), 0) AS total_tokens
               FROM gateway_request_logs
-              WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
+              WHERE created_at >= ?1
               GROUP BY group_key
               ORDER BY requests DESC
               LIMIT 16"
          );
         let mut stmt = self.conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![window_minutes], |row| {
+            .query_map(params![cutoff], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
@@ -2929,119 +3041,69 @@ impl Vault {
         window_minutes: i64,
         scoped_group: Option<(&str, &str)>,
     ) -> Result<Option<i64>, String> {
-        let mut latencies: Vec<i64> = match scoped_group {
-            Some(("app_type", value)) => {
-                let mut stmt = self
-                    .conn
-                    .prepare(
-                        "SELECT latency_ms
-                         FROM gateway_request_logs
-                         WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
-                           AND app_type = ?2
-                         ORDER BY latency_ms ASC",
-                    )
-                    .map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map(params![window_minutes, value], |row| row.get::<_, i64>(0))
-                    .map_err(|e| e.to_string())?;
-                let mut values = Vec::new();
-                for row in rows {
-                    values.push(row.map_err(|e| e.to_string())?);
-                }
-                values
-            }
-            Some(("provider", value)) => {
-                let mut stmt = self
-                    .conn
-                    .prepare(
-                        "SELECT latency_ms
-                         FROM gateway_request_logs
-                         WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
-                           AND provider = ?2
-                         ORDER BY latency_ms ASC",
-                    )
-                    .map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map(params![window_minutes, value], |row| row.get::<_, i64>(0))
-                    .map_err(|e| e.to_string())?;
-                let mut values = Vec::new();
-                for row in rows {
-                    values.push(row.map_err(|e| e.to_string())?);
-                }
-                values
-            }
-            Some(("model", value)) => {
-                let mut stmt = self
-                    .conn
-                    .prepare(
-                        "SELECT latency_ms
-                         FROM gateway_request_logs
-                         WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
-                           AND model = ?2
-                         ORDER BY latency_ms ASC",
-                    )
-                    .map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map(params![window_minutes, value], |row| row.get::<_, i64>(0))
-                    .map_err(|e| e.to_string())?;
-                let mut values = Vec::new();
-                for row in rows {
-                    values.push(row.map_err(|e| e.to_string())?);
-                }
-                values
-            }
-            Some(("user_key", value)) => {
-                let mut stmt = self
-                    .conn
-                    .prepare(
-                        "SELECT latency_ms
-                         FROM gateway_request_logs
-                         WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
-                           AND COALESCE(NULLIF(TRIM(user_key), ''), 'unknown') = ?2
-                         ORDER BY latency_ms ASC",
-                    )
-                    .map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map(params![window_minutes, value], |row| row.get::<_, i64>(0))
-                    .map_err(|e| e.to_string())?;
-                let mut values = Vec::new();
-                for row in rows {
-                    values.push(row.map_err(|e| e.to_string())?);
-                }
-                values
-            }
+        let cutoff = Self::gateway_window_cutoff_rfc3339(window_minutes);
+        let (count_sql, value_param_sql, value_param) = match scoped_group {
+            Some(("app_type", value)) => (
+                "SELECT COUNT(*) FROM gateway_request_logs WHERE created_at >= ?1 AND app_type = ?2",
+                "SELECT latency_ms FROM gateway_request_logs WHERE created_at >= ?1 AND app_type = ?2 ORDER BY latency_ms ASC LIMIT 1 OFFSET ?3",
+                Some(value),
+            ),
+            Some(("provider", value)) => (
+                "SELECT COUNT(*) FROM gateway_request_logs WHERE created_at >= ?1 AND provider = ?2",
+                "SELECT latency_ms FROM gateway_request_logs WHERE created_at >= ?1 AND provider = ?2 ORDER BY latency_ms ASC LIMIT 1 OFFSET ?3",
+                Some(value),
+            ),
+            Some(("model", value)) => (
+                "SELECT COUNT(*) FROM gateway_request_logs WHERE created_at >= ?1 AND model = ?2",
+                "SELECT latency_ms FROM gateway_request_logs WHERE created_at >= ?1 AND model = ?2 ORDER BY latency_ms ASC LIMIT 1 OFFSET ?3",
+                Some(value),
+            ),
+            Some(("user_key", value)) => (
+                "SELECT COUNT(*) FROM gateway_request_logs WHERE created_at >= ?1 AND COALESCE(NULLIF(TRIM(user_key), ''), 'unknown') = ?2",
+                "SELECT latency_ms FROM gateway_request_logs WHERE created_at >= ?1 AND COALESCE(NULLIF(TRIM(user_key), ''), 'unknown') = ?2 ORDER BY latency_ms ASC LIMIT 1 OFFSET ?3",
+                Some(value),
+            ),
             Some((field, _)) => return Err(format!("Unsupported p95 scope field: {}", field)),
-            None => {
-                let mut stmt = self
-                    .conn
-                    .prepare(
-                        "SELECT latency_ms
-                         FROM gateway_request_logs
-                         WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
-                         ORDER BY latency_ms ASC",
-                    )
-                    .map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map(params![window_minutes], |row| row.get::<_, i64>(0))
-                    .map_err(|e| e.to_string())?;
-                let mut values = Vec::new();
-                for row in rows {
-                    values.push(row.map_err(|e| e.to_string())?);
-                }
-                values
-            }
+            None => (
+                "SELECT COUNT(*) FROM gateway_request_logs WHERE created_at >= ?1",
+                "SELECT latency_ms FROM gateway_request_logs WHERE created_at >= ?1 ORDER BY latency_ms ASC LIMIT 1 OFFSET ?2",
+                None,
+            ),
         };
 
-        if latencies.is_empty() {
+        let total: i64 = match value_param {
+            Some(value) => self
+                .conn
+                .query_row(count_sql, params![cutoff, value], |row| row.get(0))
+                .map_err(|e| e.to_string())?,
+            None => self
+                .conn
+                .query_row(count_sql, params![cutoff], |row| row.get(0))
+                .map_err(|e| e.to_string())?,
+        };
+        if total <= 0 {
             return Ok(None);
         }
-        latencies.sort_unstable();
-        let p95_rank = ((latencies.len() as f64) * 0.95).ceil() as usize;
-        let index = p95_rank.saturating_sub(1).min(latencies.len() - 1);
-        Ok(Some(latencies[index]))
+        let rank = ((total as f64) * 0.95).ceil() as i64;
+        let offset = (rank - 1).clamp(0, total.saturating_sub(1));
+
+        let value: i64 = match value_param {
+            Some(value) => self
+                .conn
+                .query_row(value_param_sql, params![cutoff, value, offset], |row| {
+                    row.get(0)
+                })
+                .map_err(|e| e.to_string())?,
+            None => self
+                .conn
+                .query_row(value_param_sql, params![cutoff, offset], |row| row.get(0))
+                .map_err(|e| e.to_string())?,
+        };
+        Ok(Some(value))
     }
 
     fn gateway_top_errors(&self, window_minutes: i64) -> Result<Vec<GatewayErrorSummary>, String> {
+        let cutoff = Self::gateway_window_cutoff_rfc3339(window_minutes);
         let mut stmt = self
             .conn
             .prepare(
@@ -3049,7 +3111,7 @@ impl Vault {
                     COALESCE(NULLIF(TRIM(error_code), ''), NULLIF(TRIM(blocked_reason), ''), 'unknown') AS error_key,
                     COUNT(*) AS requests
                  FROM gateway_request_logs
-                 WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
+                 WHERE created_at >= ?1
                    AND (
                      (error_code IS NOT NULL AND TRIM(error_code) != '')
                      OR (blocked_reason IS NOT NULL AND TRIM(blocked_reason) != '')
@@ -3060,7 +3122,7 @@ impl Vault {
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![window_minutes], |row| {
+            .query_map(params![cutoff], |row| {
                 Ok(GatewayErrorSummary {
                     code: row.get(0)?,
                     requests: row.get(1)?,
@@ -3075,6 +3137,7 @@ impl Vault {
     }
 
     fn gateway_timeline(&self, window_minutes: i64) -> Result<Vec<GatewayTrafficPoint>, String> {
+        let cutoff = Self::gateway_window_cutoff_rfc3339(window_minutes);
         let mut stmt = self
             .conn
             .prepare(
@@ -3082,17 +3145,25 @@ impl Vault {
                     substr(created_at, 1, 16) AS minute_bucket,
                     COUNT(*) AS requests,
                     COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_requests,
-                    COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                    COALESCE(
+                      SUM(
+                        CASE
+                          WHEN total_tokens IS NOT NULL THEN total_tokens
+                          ELSE COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
+                        END
+                      ),
+                      0
+                    ) AS total_tokens,
                     AVG(latency_ms) AS avg_latency_ms
                  FROM gateway_request_logs
-                 WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
+                 WHERE created_at >= ?1
                  GROUP BY minute_bucket
                  ORDER BY minute_bucket ASC
                  LIMIT 360",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![window_minutes], |row| {
+            .query_map(params![cutoff], |row| {
                 Ok(GatewayTrafficPoint {
                     minute: row.get(0)?,
                     requests: row.get(1)?,
@@ -4536,7 +4607,7 @@ impl Vault {
         let rows = {
             let mut stmt = match self
                 .conn
-                .prepare("SELECT app_type, config_path, enabled FROM app_integrations")
+                .prepare("SELECT app_type, config_path, enabled, detected FROM app_integrations")
             {
                 Ok(stmt) => stmt,
                 Err(_) => return,
@@ -4545,7 +4616,8 @@ impl Vault {
                 let app_type: String = row.get(0)?;
                 let config_path: Option<String> = row.get(1)?;
                 let enabled: i64 = row.get(2)?;
-                Ok((app_type, config_path, enabled))
+                let detected: i64 = row.get(3)?;
+                Ok((app_type, config_path, enabled, detected))
             }) {
                 Ok(iter) => iter,
                 Err(_) => return,
@@ -4560,26 +4632,52 @@ impl Vault {
             rows
         };
 
-        for (app_type, config_path, enabled) in rows {
+        for (app_type, config_path, enabled, detected_before) in rows {
             let default_path = Self::default_integration_path(&app_type);
-            let final_path = match config_path {
-                Some(path) if !path.trim().is_empty() => Some(path),
-                _ => default_path,
+            let normalized_existing_path = config_path
+                .as_deref()
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty());
+
+            let final_path = match normalized_existing_path {
+                Some(path) => Some(path.to_string()),
+                None => default_path,
             };
             let detected = Self::detect_integration(&app_type, final_path.as_deref());
-            let _ = self.conn.execute(
-                "UPDATE app_integrations
-                 SET detected = ?1, config_path = ?2, updated_at = ?3, enabled = ?4
-                 WHERE app_type = ?5",
-                params![
-                    bool_to_int(detected),
-                    final_path,
-                    Local::now().to_rfc3339(),
-                    enabled,
-                    app_type
-                ],
-            );
+
+            let normalized_next_path = final_path
+                .as_deref()
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty());
+            let path_changed = normalized_existing_path != normalized_next_path;
+            let detected_changed = int_to_bool(detected_before) != detected;
+
+            if path_changed || detected_changed {
+                let _ = self.conn.execute(
+                    "UPDATE app_integrations
+                     SET detected = ?1, config_path = ?2, updated_at = ?3, enabled = ?4
+                     WHERE app_type = ?5",
+                    params![
+                        bool_to_int(detected),
+                        final_path,
+                        Local::now().to_rfc3339(),
+                        enabled,
+                        app_type
+                    ],
+                );
+            }
         }
+    }
+
+    fn refresh_app_integration_detection_throttled(&mut self) {
+        let now = Instant::now();
+        if let Some(last) = self.last_integration_detection_at {
+            if now.duration_since(last) < Duration::from_secs(30) {
+                return;
+            }
+        }
+        self.last_integration_detection_at = Some(now);
+        self.refresh_app_integration_detection();
     }
 
     fn get_app_integrations(&self) -> Result<Vec<AppIntegration>, String> {

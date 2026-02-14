@@ -180,11 +180,15 @@ export interface VoiceInputSettings {
   voice_trigger_mode: string
   voice_hold_ms: number
   voice_min_record_ms: number
+  voice_hands_free_enabled: boolean
   voice_stt_provider: string
   voice_stt_model: string
   voice_language: string
+  voice_ai_auto_edit: boolean
+  voice_ai_model: string
   voice_auto_paste: boolean
   voice_paste_delay_ms: number
+  voice_restore_clipboard: boolean
   voice_append_trailing_space: boolean
   updated_at: string
 }
@@ -214,4 +218,25 @@ export interface VoiceInputTranscribeResult {
   pasted: boolean
   latency_ms: number
   error?: string | null
+}
+
+export interface VoiceInputHistoryRecord {
+  id: string
+  session_id?: string | null
+  trigger_mode: string
+  raw_text?: string | null
+  final_text?: string | null
+  provider?: string | null
+  model?: string | null
+  language?: string | null
+  latency_ms?: number | null
+  pasted: boolean
+  cancelled: boolean
+  error?: string | null
+  created_at: string
+}
+
+export interface RecentDebugLogs {
+  path: string
+  lines: string[]
 }

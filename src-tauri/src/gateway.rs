@@ -1096,8 +1096,12 @@ fn as_i64(value: &Value) -> Option<i64> {
 
 fn parse_gateway_token_usage(value: &Value) -> GatewayTokenUsage {
     let usage = value.get("usage").or_else(|| value.get("token_usage"));
-    let input_tokens = usage.and_then(|item| item.get("input_tokens")).and_then(as_i64);
-    let output_tokens = usage.and_then(|item| item.get("output_tokens")).and_then(as_i64);
+    let input_tokens = usage
+        .and_then(|item| item.get("input_tokens"))
+        .and_then(as_i64);
+    let output_tokens = usage
+        .and_then(|item| item.get("output_tokens"))
+        .and_then(as_i64);
     let total_tokens = usage
         .and_then(|item| item.get("total_tokens"))
         .and_then(as_i64)
@@ -1138,10 +1142,12 @@ async fn relay_to_codex(
         Err(err) => {
             return (
                 error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("Invalid JSON body: {}", err),
-                "invalid_json",
-            ), GatewayTokenUsage::default());
+                    StatusCode::BAD_REQUEST,
+                    &format!("Invalid JSON body: {}", err),
+                    "invalid_json",
+                ),
+                GatewayTokenUsage::default(),
+            );
         }
     };
     if !payload.is_object() {

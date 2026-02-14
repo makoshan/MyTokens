@@ -13,6 +13,8 @@ import ApplicationManager from './components/ApplicationManager'
 import OpencodeMcpManager from './components/OpencodeMcpManager'
 import OpencodeSkillManager from './components/OpencodeSkillManager'
 import ClippyAssistant from './components/ClippyAssistant'
+import VoiceInputController from './components/VoiceInputController'
+import type { VoiceInputHistoryRecord } from './types/settings'
 import {
   DEFAULT_PROVIDER_DETAILS,
   ProviderDetails,
@@ -60,6 +62,7 @@ type View =
   | 'mcp'
   | 'skills'
   | 'prompts'
+  | 'history'
   | 'settings'
 
 const VIEW_META: Record<View, { title: string; description: string }> = {
@@ -94,6 +97,10 @@ const VIEW_META: Record<View, { title: string; description: string }> = {
   prompts: {
     title: '提示词库',
     description: '集中管理系统提示词与模板。',
+  },
+  history: {
+    title: '历史记录',
+    description: '查看语音输入的转写、复制与取消记录。',
   },
   settings: {
     title: '全局设置',
@@ -226,10 +233,12 @@ function App() {
   const [providers, setProviders] = useState<ProviderConfig[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [prompts, setPrompts] = useState<PromptTemplateRecord[]>([])
+  const [voiceHistory, setVoiceHistory] = useState<VoiceInputHistoryRecord[]>([])
   const [selectedKey, setSelectedKey] = useState<Credential | null>(null)
   const [selectedProvider, setSelectedProvider] = useState<ProviderConfig | null>(null)
   const [selectedPrompt, setSelectedPrompt] = useState<PromptTemplateRecord | null>(null)
   const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null)
+  const [copiedVoiceHistoryId, setCopiedVoiceHistoryId] = useState<string | null>(null)
   const [view, setView] = useState<View>('dashboard')
   const [showForm, setShowForm] = useState(false)
   const [showImport, setShowImport] = useState(false)
@@ -238,6 +247,8 @@ function App() {
   const [loadingKeys, setLoadingKeys] = useState(false)
   const [loadingProviders, setLoadingProviders] = useState(false)
   const [loadingPrompts, setLoadingPrompts] = useState(false)
+  const [loadingVoiceHistory, setLoadingVoiceHistory] = useState(false)
+  const [voiceHistoryError, setVoiceHistoryError] = useState<string | null>(null)
   const [hasPassword, setHasPassword] = useState<boolean | null>(null)
   const [projectLabelsByCredential, setProjectLabelsByCredential] = useState<Record<string, string>>({})
   const [projectFocus, setProjectFocus] = useState<{ name: string; token: number } | null>(null)
@@ -372,6 +383,25 @@ function App() {
     }
   }
 
+  const loadVoiceHistory = async () => {
+    if (!masterPassword) return
+    try {
+      setLoadingVoiceHistory(true)
+      setVoiceHistoryError(null)
+      const result = await invoke<VoiceInputHistoryRecord[]>('get_voice_input_history', {
+        masterPassword,
+        limit: 200,
+      })
+      setVoiceHistory(result)
+    } catch (error) {
+      console.error('Failed to load voice history:', error)
+      setVoiceHistory([])
+      setVoiceHistoryError(String(error))
+    } finally {
+      setLoadingVoiceHistory(false)
+    }
+  }
+
   const loadDashboardOverview = async () => {
     if (!masterPassword) return
     try {
@@ -413,6 +443,12 @@ function App() {
       loadDashboardOverview()
     }
   }, [isAuthenticated, masterPassword])
+
+  useEffect(() => {
+    if (!isAuthenticated || !masterPassword) return
+    if (view !== 'history') return
+    loadVoiceHistory()
+  }, [isAuthenticated, masterPassword, view])
 
   useEffect(() => {
     if (!isAuthenticated || !masterPassword) return
@@ -761,6 +797,34 @@ function App() {
     }
   }
 
+  const handleCopyVoiceHistory = async (item: VoiceInputHistoryRecord) => {
+    const text = (item.final_text || item.raw_text || '').trim()
+    if (!text) return
+    try {
+      await copyTextToClipboard(text)
+      setCopiedVoiceHistoryId(item.id)
+      window.setTimeout(() => {
+        setCopiedVoiceHistoryId((current) => (current === item.id ? null : current))
+      }, 1500)
+    } catch (error) {
+      console.error('Failed to copy voice history:', error)
+      alert('复制失败，请检查系统剪贴板权限')
+    }
+  }
+
+  const handleDeleteVoiceHistory = async (id: string) => {
+    if (!confirm('确定要删除这条历史记录吗？')) return
+    try {
+      const ok = await invoke<boolean>('delete_voice_input_history', { id, masterPassword })
+      if (ok) {
+        setVoiceHistory((prev) => prev.filter((item) => item.id !== id))
+      }
+    } catch (error) {
+      console.error('Failed to delete voice history:', error)
+      alert(`删除失败: ${String(error)}`)
+    }
+  }
+
   const navigateToProviderFromKey = (providerId: string) => {
     const target = providers.find((item) => item.provider === providerId)
     if (target) {
@@ -839,6 +903,7 @@ function App() {
 
   return (
     <div className="app-shell">
+      <VoiceInputController masterPassword={masterPassword} />
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">MK</div>
@@ -897,6 +962,12 @@ function App() {
             提示词
           </button>
           <button
+            className={`nav-item ${view === 'history' ? 'active' : ''}`}
+            onClick={() => setView('history')}
+          >
+            历史记录
+          </button>
+          <button
             className={`nav-item ${view === 'settings' ? 'active' : ''}`}
             onClick={() => setView('settings')}
           >
@@ -949,6 +1020,76 @@ function App() {
               ]}
               onNavigate={(nextView) => setView(nextView)}
             />
+          ) : view === 'history' ? (
+            <section className="panel voice-history-view">
+              <div className="panel-header voice-history-header">
+                <h2>语音输入历史</h2>
+                <div className="header-actions">
+                  <button
+                    className="btn btn-secondary"
+                    disabled={loadingVoiceHistory}
+                    onClick={loadVoiceHistory}
+                  >
+                    {loadingVoiceHistory ? '刷新中...' : '刷新'}
+                  </button>
+                </div>
+              </div>
+
+              {voiceHistoryError ? (
+                <div className="settings-item-subtitle">加载失败: {voiceHistoryError}</div>
+              ) : null}
+
+              {loadingVoiceHistory ? (
+                <div className="panel-loading">加载中...</div>
+              ) : voiceHistory.length === 0 ? (
+                <div className="panel-empty">
+                  <p>暂无语音输入历史记录</p>
+                </div>
+              ) : (
+                <div className="voice-history-list">
+                  {voiceHistory.map((item) => {
+                    const text = (item.final_text || item.raw_text || '').trim()
+                    const status = item.cancelled ? '已取消粘贴' : item.pasted ? '已粘贴' : '未粘贴'
+                    return (
+                      <div key={item.id} className="voice-history-item">
+                        <div className="voice-history-item-header">
+                          <div className="voice-history-meta">
+                            <div className="voice-history-title">{status}</div>
+                            <div className="voice-history-subtitle">
+                              {new Date(item.created_at).toLocaleString()}
+                              {item.trigger_mode ? ` · ${item.trigger_mode}` : ''}
+                              {item.provider ? ` · ${item.provider}` : ''}
+                              {item.model ? ` · ${item.model}` : ''}
+                            </div>
+                          </div>
+                          <div className="voice-history-actions">
+                            <button
+                              className="btn btn-secondary"
+                              disabled={!text}
+                              onClick={() => handleCopyVoiceHistory(item)}
+                            >
+                              {copiedVoiceHistoryId === item.id ? '已复制' : '复制'}
+                            </button>
+                            <button
+                              className="btn btn-secondary"
+                              onClick={() => handleDeleteVoiceHistory(item.id)}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </div>
+                        <div className="voice-history-item-body">
+                          <div className="voice-history-text">{text || '（空）'}</div>
+                          {item.error ? (
+                            <div className="voice-history-error">错误: {item.error}</div>
+                          ) : null}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </section>
           ) : view === 'keys' ? (
             <div className="keys-view">
               <section className="panel">

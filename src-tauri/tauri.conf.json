@@ -10,6 +10,7 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "MyKey - AI 资产保险箱",
@@ -43,6 +44,7 @@
       "frameworks": [],
       "minimumSystemVersion": "10.13",
       "exceptionDomain": "com.mykey.desktop",
+      "infoPlist": "Info.plist",
       "signingIdentity": null,
       "entitlements": null
     }

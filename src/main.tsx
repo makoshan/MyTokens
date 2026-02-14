@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import QuickResultPanel from './components/QuickResultPanel'
+import VoiceOverlay from './components/VoiceOverlay'
 import './index.css'
 
 const escapeHtml = (value: string) =>
@@ -40,6 +41,12 @@ window.addEventListener('unhandledrejection', (event) => {
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
-    {window.location.hash.startsWith('#/quick-result') ? <QuickResultPanel /> : <App />}
+    {window.location.hash.startsWith('#/quick-result') ? (
+      <QuickResultPanel />
+    ) : window.location.hash.startsWith('#/voice-overlay') ? (
+      <VoiceOverlay />
+    ) : (
+      <App />
+    )}
   </React.StrictMode>,
 )
