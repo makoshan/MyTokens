@@ -376,6 +376,9 @@ pub struct GatewayRequestLog {
     pub blocked_reason: Option<String>,
     pub error_code: Option<String>,
     pub estimated_cost_usd: Option<f64>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
     pub user_key: Option<String>,
 }
 
@@ -387,6 +390,9 @@ pub struct GatewayTrafficGroup {
     pub error_requests: i64,
     pub blocked_requests: i64,
     pub estimated_cost_usd: f64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub total_tokens: i64,
     pub avg_latency_ms: Option<f64>,
     pub p95_latency_ms: Option<i64>,
 }
@@ -402,6 +408,7 @@ pub struct GatewayTrafficPoint {
     pub minute: String,
     pub requests: i64,
     pub error_requests: i64,
+    pub total_tokens: i64,
     pub avg_latency_ms: Option<f64>,
 }
 
@@ -417,6 +424,9 @@ pub struct GatewayTrafficMetrics {
     pub avg_latency_ms: Option<f64>,
     pub p95_latency_ms: Option<i64>,
     pub estimated_cost_usd: f64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub total_tokens: i64,
     pub by_app: Vec<GatewayTrafficGroup>,
     pub by_provider: Vec<GatewayTrafficGroup>,
     pub by_model: Vec<GatewayTrafficGroup>,

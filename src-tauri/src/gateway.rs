@@ -532,6 +532,7 @@ async fn relay_responses(
             started.elapsed().as_millis() as i64,
             Some("forbidden_gateway_key"),
             Some("forbidden_gateway_key"),
+            None,
         );
         return response;
     }
@@ -546,10 +547,12 @@ async fn relay_responses(
             started.elapsed().as_millis() as i64,
             Some(&reason),
             Some(&reason),
+            None,
         );
         return response;
     }
-    let response = relay_to_codex(ctx.clone(), &headers, body, false, route.model.as_deref()).await;
+    let (response, token_usage) =
+        relay_to_codex(ctx.clone(), &headers, body, false, route.model.as_deref()).await;
     let status = response.status();
     let code = if status.is_success() {
         None
@@ -565,6 +568,7 @@ async fn relay_responses(
         started.elapsed().as_millis() as i64,
         None,
         code,
+        Some(&token_usage),
     );
     response
 }
@@ -594,6 +598,7 @@ async fn relay_responses_compact(
             started.elapsed().as_millis() as i64,
             Some("forbidden_gateway_key"),
             Some("forbidden_gateway_key"),
+            None,
         );
         return response;
     }
@@ -608,10 +613,12 @@ async fn relay_responses_compact(
             started.elapsed().as_millis() as i64,
             Some(&reason),
             Some(&reason),
+            None,
         );
         return response;
     }
-    let response = relay_to_codex(ctx.clone(), &headers, body, true, route.model.as_deref()).await;
+    let (response, token_usage) =
+        relay_to_codex(ctx.clone(), &headers, body, true, route.model.as_deref()).await;
     let status = response.status();
     let code = if status.is_success() {
         None
@@ -627,6 +634,7 @@ async fn relay_responses_compact(
         started.elapsed().as_millis() as i64,
         None,
         code,
+        Some(&token_usage),
     );
     response
 }
@@ -656,6 +664,7 @@ async fn relay_to_codex_chat_completions(
             started.elapsed().as_millis() as i64,
             Some("forbidden_gateway_key"),
             Some("forbidden_gateway_key"),
+            None,
         );
         return response;
     }
@@ -670,10 +679,12 @@ async fn relay_to_codex_chat_completions(
             started.elapsed().as_millis() as i64,
             Some(&reason),
             Some(&reason),
+            None,
         );
         return response;
     }
-    let response = relay_to_codex(ctx.clone(), &headers, body, false, route.model.as_deref()).await;
+    let (response, token_usage) =
+        relay_to_codex(ctx.clone(), &headers, body, false, route.model.as_deref()).await;
     let status = response.status();
     let code = if status.is_success() {
         None
@@ -689,6 +700,7 @@ async fn relay_to_codex_chat_completions(
         started.elapsed().as_millis() as i64,
         None,
         code,
+        Some(&token_usage),
     );
     response
 }
@@ -718,6 +730,7 @@ async fn relay_claude_messages(
             started.elapsed().as_millis() as i64,
             Some("forbidden_gateway_key"),
             Some("forbidden_gateway_key"),
+            None,
         );
         return response;
     }
@@ -732,6 +745,7 @@ async fn relay_claude_messages(
             started.elapsed().as_millis() as i64,
             Some(&reason),
             Some(&reason),
+            None,
         );
         return response;
     }
@@ -753,6 +767,7 @@ async fn relay_claude_messages(
                 started.elapsed().as_millis() as i64,
                 None,
                 Some("invalid_json"),
+                None,
             );
             return response;
         }
@@ -795,6 +810,7 @@ async fn relay_claude_messages(
                 started.elapsed().as_millis() as i64,
                 None,
                 Some("upstream_error"),
+                None,
             );
             return response;
         }
@@ -896,6 +912,7 @@ async fn relay_claude_messages(
                     started.elapsed().as_millis() as i64,
                     None,
                     Some("upstream_error"),
+                    None,
                 );
                 return response;
             }
@@ -928,6 +945,34 @@ async fn relay_claude_messages(
             started.elapsed().as_millis() as i64,
             None,
             parsed_code.as_deref().or(Some(fallback_code)),
+            None,
+        );
+        return response;
+    }
+
+    if !is_stream {
+        let body = upstream.bytes().await.unwrap_or_default();
+        let token_usage = extract_gateway_token_usage_from_body(&body);
+        let mut response = Response::new(Body::from(body));
+        *response.status_mut() = status;
+
+        apply_passed_response_headers(&mut response, &upstream_headers, true);
+        if !response.headers().contains_key(CONTENT_TYPE) {
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        }
+
+        append_gateway_log(
+            &ctx,
+            Some(&route),
+            &headers,
+            "/v1/messages",
+            response.status(),
+            started.elapsed().as_millis() as i64,
+            None,
+            None,
+            Some(&token_usage),
         );
         return response;
     }
@@ -937,12 +982,9 @@ async fn relay_claude_messages(
 
     apply_passed_response_headers(&mut response, &upstream_headers, true);
     if !response.headers().contains_key(CONTENT_TYPE) {
-        let default_type = if is_stream {
-            HeaderValue::from_static("text/event-stream")
-        } else {
-            HeaderValue::from_static("application/json")
-        };
-        response.headers_mut().insert(CONTENT_TYPE, default_type);
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
     }
 
     append_gateway_log(
@@ -952,6 +994,7 @@ async fn relay_claude_messages(
         "/v1/messages",
         response.status(),
         started.elapsed().as_millis() as i64,
+        None,
         None,
         None,
     );
@@ -992,6 +1035,7 @@ fn append_gateway_log(
     latency_ms: i64,
     blocked_reason: Option<&str>,
     error_code: Option<&str>,
+    token_usage: Option<&GatewayTokenUsage>,
 ) {
     let app_type = route
         .map(|value| value.app_type.clone())
@@ -1015,8 +1059,61 @@ fn append_gateway_log(
             blocked_reason: blocked_reason.map(|value| value.to_string()),
             error_code: error_code.map(|value| value.to_string()),
             estimated_cost_usd: None,
+            input_tokens: token_usage.and_then(|item| item.input_tokens),
+            output_tokens: token_usage.and_then(|item| item.output_tokens),
+            total_tokens: token_usage.and_then(|item| item.total_tokens),
         });
     }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct GatewayTokenUsage {
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+}
+
+fn as_i64(value: &Value) -> Option<i64> {
+    if let Some(value) = value.as_i64() {
+        Some(value)
+    } else if let Some(value) = value.as_u64().and_then(|value| i64::try_from(value).ok()) {
+        Some(value)
+    } else {
+        value
+            .as_str()
+            .and_then(|value| value.parse::<i64>().ok())
+            .or_else(|| {
+                value.as_f64().and_then(|value| {
+                    if value.is_finite() && value >= 0.0 {
+                        Some(value.trunc() as i64)
+                    } else {
+                        None
+                    }
+                })
+            })
+    }
+}
+
+fn parse_gateway_token_usage(value: &Value) -> GatewayTokenUsage {
+    let usage = value.get("usage").or_else(|| value.get("token_usage"));
+    let input_tokens = usage.and_then(|item| item.get("input_tokens")).and_then(as_i64);
+    let output_tokens = usage.and_then(|item| item.get("output_tokens")).and_then(as_i64);
+    let total_tokens = usage
+        .and_then(|item| item.get("total_tokens"))
+        .and_then(as_i64)
+        .or_else(|| input_tokens.and_then(|input| output_tokens.map(|output| input + output)));
+
+    GatewayTokenUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens,
+    }
+}
+
+fn extract_gateway_token_usage_from_body(body: &[u8]) -> GatewayTokenUsage {
+    serde_json::from_slice::<Value>(body)
+        .map(|value| parse_gateway_token_usage(&value))
+        .unwrap_or_default()
 }
 
 async fn relay_to_codex(
@@ -1025,29 +1122,36 @@ async fn relay_to_codex(
     body: Bytes,
     compact: bool,
     route_model: Option<&str>,
-) -> Response {
+) -> (Response, GatewayTokenUsage) {
     let auth = match read_codex_auth_context() {
         Ok(value) => value,
         Err(err) => {
-            return error_response(StatusCode::UNAUTHORIZED, &err, "missing_codex_auth");
+            return (
+                error_response(StatusCode::UNAUTHORIZED, &err, "missing_codex_auth"),
+                GatewayTokenUsage::default(),
+            );
         }
     };
 
     let mut payload: Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(err) => {
-            return error_response(
+            return (
+                error_response(
                 StatusCode::BAD_REQUEST,
                 &format!("Invalid JSON body: {}", err),
                 "invalid_json",
-            );
+            ), GatewayTokenUsage::default());
         }
     };
     if !payload.is_object() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "Request body must be a JSON object.",
-            "invalid_json",
+        return (
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "Request body must be a JSON object.",
+                "invalid_json",
+            ),
+            GatewayTokenUsage::default(),
         );
     }
 
@@ -1129,10 +1233,13 @@ async fn relay_to_codex(
     let upstream = match request.send().await {
         Ok(value) => value,
         Err(err) => {
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("Failed to call Codex upstream: {}", err),
-                "upstream_error",
+            return (
+                error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Failed to call Codex upstream: {}", err),
+                    "upstream_error",
+                ),
+                GatewayTokenUsage::default(),
             );
         }
     };
@@ -1146,17 +1253,20 @@ async fn relay_to_codex(
         let body = upstream.bytes().await.unwrap_or_default();
         let (parsed_message, parsed_code) = parse_error_payload(&body);
         let fallback_code = default_error_code_for_status(status);
-        return error_response_with_retry_after(
-            status,
-            parsed_message
-                .as_deref()
-                .unwrap_or("Codex upstream request failed"),
-            parsed_code.as_deref().unwrap_or(fallback_code),
-            retry_after,
+        return (
+            error_response_with_retry_after(
+                status,
+                parsed_message
+                    .as_deref()
+                    .unwrap_or("Codex upstream request failed"),
+                parsed_code.as_deref().unwrap_or(fallback_code),
+                retry_after,
+            ),
+            GatewayTokenUsage::default(),
         );
     }
 
-    if !compact && !client_stream {
+    if !upstream_stream || !client_stream {
         let body = upstream.bytes().await.unwrap_or_default();
         let response_json = parse_codex_non_stream_response(
             &body,
@@ -1165,13 +1275,14 @@ async fn relay_to_codex(
                 .and_then(|value| value.as_str())
                 .or(route_model),
         );
+        let token_usage = parse_gateway_token_usage(&response_json);
         let mut response = Response::new(Body::from(response_json.to_string()));
         *response.status_mut() = status;
         apply_passed_response_headers(&mut response, &upstream_headers, false);
         response
             .headers_mut()
             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        return response;
+        return (response, token_usage);
     }
 
     let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
@@ -1187,7 +1298,7 @@ async fn relay_to_codex(
         response.headers_mut().insert(CONTENT_TYPE, default_type);
     }
 
-    response
+    (response, GatewayTokenUsage::default())
 }
 
 fn should_pass_header(name: &HeaderName) -> bool {

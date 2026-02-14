@@ -122,6 +122,8 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
     : 0
   const formatCost = (value: number | undefined) =>
     typeof value === 'number' ? `$${value.toFixed(4)}` : '--'
+  const formatTokens = (value: number | undefined | null) =>
+    typeof value === 'number' ? value.toLocaleString() : '--'
 
   return (
     <section className="usage-gateway-analytics panel">
@@ -185,6 +187,13 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
               <strong>{gatewayTraffic.blocked_requests}</strong>
               <small>${gatewayTraffic.estimated_cost_usd.toFixed(4)}</small>
             </article>
+            <article className="usage-kpi-card">
+              <p>Token 消耗</p>
+              <strong>{formatTokens(gatewayTraffic.total_tokens)}</strong>
+              <small>
+                in {formatTokens(gatewayTraffic.total_input_tokens)} / out {formatTokens(gatewayTraffic.total_output_tokens)}
+              </small>
+            </article>
           </div>
 
           <div className="usage-gateway-grid">
@@ -209,6 +218,7 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                     <th>请求</th>
                     <th>成功</th>
                     <th>P95</th>
+                    <th>总 Token</th>
                     <th>成本</th>
                   </tr>
                 </thead>
@@ -227,13 +237,14 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                         <td>{item.requests}</td>
                         <td>{item.success_requests}</td>
                         <td>{item.p95_latency_ms ? `${item.p95_latency_ms}ms` : '--'}</td>
+                        <td>{formatTokens(item.total_tokens)}</td>
                         <td>{formatCost(item.estimated_cost_usd)}</td>
                       </tr>
                     )
                   })}
                   {gatewayTraffic.by_model.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="gateway-log-empty">
+                      <td colSpan={6} className="gateway-log-empty">
                         暂无模型级流量
                       </td>
                     </tr>
@@ -263,6 +274,7 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                     <th>请求</th>
                     <th>成功</th>
                     <th>P95</th>
+                    <th>总 Token</th>
                     <th>成本</th>
                   </tr>
                 </thead>
@@ -281,13 +293,14 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                         <td>{item.requests}</td>
                         <td>{item.success_requests}</td>
                         <td>{item.p95_latency_ms ? `${item.p95_latency_ms}ms` : '--'}</td>
+                        <td>{formatTokens(item.total_tokens)}</td>
                         <td>{formatCost(item.estimated_cost_usd)}</td>
                       </tr>
                     )
                   })}
                   {gatewayTraffic.by_provider.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="gateway-log-empty">
+                      <td colSpan={6} className="gateway-log-empty">
                         暂无提供商流量
                       </td>
                     </tr>
@@ -305,6 +318,7 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                     <th>请求</th>
                     <th>成功</th>
                     <th>P95</th>
+                    <th>总 Token</th>
                     <th>成本</th>
                   </tr>
                 </thead>
@@ -315,12 +329,13 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                       <td>{item.requests}</td>
                       <td>{item.success_requests}</td>
                       <td>{item.p95_latency_ms ? `${item.p95_latency_ms}ms` : '--'}</td>
+                      <td>{formatTokens(item.total_tokens)}</td>
                       <td>{formatCost(item.estimated_cost_usd)}</td>
                     </tr>
                   ))}
                   {gatewayTraffic.by_app.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="gateway-log-empty">
+                      <td colSpan={6} className="gateway-log-empty">
                         暂无应用流量
                       </td>
                     </tr>
@@ -350,6 +365,7 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                     <th>请求</th>
                     <th>成功</th>
                     <th>P95</th>
+                    <th>总 Token</th>
                     <th>成本</th>
                   </tr>
                 </thead>
@@ -368,13 +384,14 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                         <td>{item.requests}</td>
                         <td>{item.success_requests}</td>
                         <td>{item.p95_latency_ms ? `${item.p95_latency_ms}ms` : '--'}</td>
+                        <td>{formatTokens(item.total_tokens)}</td>
                         <td>{formatCost(item.estimated_cost_usd)}</td>
                       </tr>
                     )
                   })}
                   {gatewayTraffic.by_user.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="gateway-log-empty">
+                      <td colSpan={6} className="gateway-log-empty">
                         暂无用户级流量
                       </td>
                     </tr>
@@ -391,6 +408,7 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                     <span>{point.minute.slice(11)}</span>
                     <span>{point.requests} req</span>
                     <span>{point.error_requests} err</span>
+                    <span>{formatTokens(point.total_tokens)} token</span>
                     <span>{point.avg_latency_ms ? `${Math.round(point.avg_latency_ms)}ms` : '--'}</span>
                   </div>
                 ))}
@@ -418,6 +436,7 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                   <th>端点</th>
                   <th>状态</th>
                   <th>耗时</th>
+                  <th>Token</th>
                   <th>原因</th>
                 </tr>
               </thead>
@@ -434,12 +453,13 @@ function GatewayAnalyticsSection({ masterPassword, onError }: GatewayOverviewPro
                     </td>
                     <td>{item.status_code}</td>
                     <td>{item.latency_ms}ms</td>
+                    <td>{formatTokens(item.total_tokens)}</td>
                     <td>{item.blocked_reason || item.error_code || '-'}</td>
                   </tr>
                 ))}
                 {filteredLogs.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="gateway-log-empty">
+                    <td colSpan={9} className="gateway-log-empty">
                       {selectedModel || selectedProvider || selectedUser
                         ? '该筛选条件暂无最近请求'
                         : '暂无网关请求记录'}

@@ -46,6 +46,10 @@ export interface GatewayRequestLog {
   blocked_reason?: string | null
   error_code?: string | null
   estimated_cost_usd?: number | null
+  input_tokens?: number | null
+  output_tokens?: number | null
+  total_tokens?: number | null
+  user_key?: string | null
 }
 
 export interface GatewayTrafficGroup {
@@ -55,6 +59,9 @@ export interface GatewayTrafficGroup {
   error_requests: number
   blocked_requests: number
   estimated_cost_usd?: number
+  total_input_tokens?: number
+  total_output_tokens?: number
+  total_tokens?: number
   avg_latency_ms?: number | null
   p95_latency_ms?: number | null
 }
@@ -68,6 +75,7 @@ export interface GatewayTrafficPoint {
   minute: string
   requests: number
   error_requests: number
+  total_tokens?: number
   avg_latency_ms?: number | null
 }
 
@@ -82,9 +90,13 @@ export interface GatewayTrafficMetrics {
   avg_latency_ms?: number | null
   p95_latency_ms?: number | null
   estimated_cost_usd: number
+  total_input_tokens?: number
+  total_output_tokens?: number
+  total_tokens?: number
   by_app: GatewayTrafficGroup[]
   by_provider: GatewayTrafficGroup[]
   by_model: GatewayTrafficGroup[]
+  by_user: GatewayTrafficGroup[]
   top_errors: GatewayErrorSummary[]
   timeline: GatewayTrafficPoint[]
 }
@@ -154,8 +166,52 @@ export interface QuickHotkeyDiagnostics {
 export interface MacosPermissionStatus {
   is_macos: boolean
   accessibility_granted: boolean
+  input_monitoring_granted: boolean
   automation_granted: boolean
   selection_capture_ready: boolean
+  process_name?: string | null
+  executable_path?: string | null
   automation_error?: string | null
   guidance: string
+}
+
+export interface VoiceInputSettings {
+  voice_input_enabled: boolean
+  voice_trigger_mode: string
+  voice_hold_ms: number
+  voice_min_record_ms: number
+  voice_stt_provider: string
+  voice_stt_model: string
+  voice_language: string
+  voice_auto_paste: boolean
+  voice_paste_delay_ms: number
+  voice_append_trailing_space: boolean
+  updated_at: string
+}
+
+export interface VoiceInputDiagnostics {
+  listener_running: boolean
+  fn_is_down: boolean
+  fn_edge_count?: number | null
+  last_fn_edge_at?: string | null
+  raw_event_count?: number | null
+  last_raw_event_at?: string | null
+  last_raw_event_type?: string | null
+  last_raw_keycode?: number | null
+  tap_location?: string | null
+  is_recording: boolean
+  waiting_transcribe: boolean
+  last_trigger_at?: string | null
+  last_stop_at?: string | null
+  last_latency_ms?: number | null
+  last_error?: string | null
+}
+
+export interface VoiceInputTranscribeResult {
+  text: string
+  provider: string
+  model: string
+  pasted: boolean
+  latency_ms: number
+  error?: string | null
 }

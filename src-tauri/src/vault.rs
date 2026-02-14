@@ -76,6 +76,9 @@ pub struct GatewayRequestLogInput {
     pub blocked_reason: Option<String>,
     pub error_code: Option<String>,
     pub estimated_cost_usd: Option<f64>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
 }
 
 impl Vault {
@@ -1336,7 +1339,10 @@ impl Vault {
                 latency_ms INTEGER NOT NULL,
                 blocked_reason TEXT,
                 error_code TEXT,
-                estimated_cost_usd REAL
+                estimated_cost_usd REAL,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                total_tokens INTEGER
             );
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY,
@@ -1440,6 +1446,30 @@ impl Vault {
             "gateway_request_logs",
             "user_key",
             "TEXT",
+        )?;
+        Self::ensure_column(
+            conn,
+            "gateway_request_logs",
+            "estimated_cost_usd",
+            "REAL",
+        )?;
+        Self::ensure_column(
+            conn,
+            "gateway_request_logs",
+            "input_tokens",
+            "INTEGER",
+        )?;
+        Self::ensure_column(
+            conn,
+            "gateway_request_logs",
+            "output_tokens",
+            "INTEGER",
+        )?;
+        Self::ensure_column(
+            conn,
+            "gateway_request_logs",
+            "total_tokens",
+            "INTEGER",
         )?;
         conn.execute(
             "UPDATE providers SET details_json = '{}' WHERE details_json IS NULL OR TRIM(details_json) = ''",
@@ -2690,8 +2720,9 @@ impl Vault {
             .execute(
                 "INSERT INTO gateway_request_logs (
                     id, created_at, app_type, provider, model, endpoint,
-                    user_key, status_code, latency_ms, blocked_reason, error_code, estimated_cost_usd
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    user_key, status_code, latency_ms, blocked_reason, error_code, estimated_cost_usd,
+                    input_tokens, output_tokens, total_tokens
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     Uuid::new_v4().to_string(),
                     now,
@@ -2705,6 +2736,9 @@ impl Vault {
                     item.blocked_reason,
                     item.error_code,
                     item.estimated_cost_usd,
+                    item.input_tokens,
+                    item.output_tokens,
+                    item.total_tokens,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -2716,7 +2750,8 @@ impl Vault {
             .conn
             .prepare(
                 "SELECT id, created_at, app_type, provider, model, endpoint,
-                        status_code, latency_ms, blocked_reason, error_code, estimated_cost_usd, user_key
+                        status_code, latency_ms, blocked_reason, error_code, estimated_cost_usd, input_tokens,
+                        output_tokens, total_tokens, user_key
                  FROM gateway_request_logs
                  ORDER BY created_at DESC
                  LIMIT ?1",
@@ -2736,7 +2771,10 @@ impl Vault {
                     blocked_reason: row.get(8)?,
                     error_code: row.get(9)?,
                     estimated_cost_usd: row.get(10)?,
-                    user_key: row.get(11)?,
+                    input_tokens: row.get(11)?,
+                    output_tokens: row.get(12)?,
+                    total_tokens: row.get(13)?,
+                    user_key: row.get(14)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -2762,7 +2800,10 @@ impl Vault {
                     COALESCE(SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END), 0) AS server_error_requests,
                     COALESCE(SUM(CASE WHEN blocked_reason IS NOT NULL AND TRIM(blocked_reason) != '' THEN 1 ELSE 0 END), 0) AS blocked_requests,
                     AVG(latency_ms) AS avg_latency_ms,
-                    COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS estimated_cost_usd
+                    COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS estimated_cost_usd,
+                    COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS total_input_tokens,
+                    COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS total_output_tokens,
+                    COALESCE(SUM(COALESCE(total_tokens, COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens
                  FROM gateway_request_logs
                  WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)",
             )
@@ -2776,6 +2817,9 @@ impl Vault {
             blocked_requests,
             avg_latency_ms,
             estimated_cost_usd,
+            total_input_tokens,
+            total_output_tokens,
+            total_tokens,
         ) = stmt
             .query_row(params![window], |row| {
                 Ok((
@@ -2786,6 +2830,9 @@ impl Vault {
                     row.get::<_, i64>(4)?,
                     row.get::<_, Option<f64>>(5)?,
                     row.get::<_, f64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -2809,6 +2856,9 @@ impl Vault {
             avg_latency_ms,
             p95_latency_ms,
             estimated_cost_usd,
+            total_input_tokens,
+            total_output_tokens,
+            total_tokens,
             by_app,
             by_provider,
             by_model,
@@ -2835,7 +2885,10 @@ impl Vault {
                 COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_requests,
                 COALESCE(SUM(CASE WHEN blocked_reason IS NOT NULL AND TRIM(blocked_reason) != '' THEN 1 ELSE 0 END), 0) AS blocked_requests,
                 AVG(latency_ms) AS avg_latency_ms,
-                COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS estimated_cost_usd
+                COALESCE(SUM(COALESCE(estimated_cost_usd, 0)), 0) AS estimated_cost_usd,
+                COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS total_input_tokens,
+                COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS total_output_tokens,
+                COALESCE(SUM(COALESCE(total_tokens, COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens
              FROM gateway_request_logs
              WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
              GROUP BY group_key
@@ -2853,6 +2906,9 @@ impl Vault {
                     row.get::<_, i64>(4)?,
                     row.get::<_, Option<f64>>(5)?,
                     row.get::<_, f64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -2867,6 +2923,9 @@ impl Vault {
                 blocked_requests,
                 avg_latency_ms,
                 estimated_cost_usd,
+                total_input_tokens,
+                total_output_tokens,
+                total_tokens,
             ) = row.map_err(|e| e.to_string())?;
             let p95_latency_ms =
                 self.gateway_p95_latency(window_minutes, Some((group_column, &key)))?;
@@ -2877,6 +2936,9 @@ impl Vault {
                 error_requests,
                 blocked_requests,
                 estimated_cost_usd,
+                total_input_tokens,
+                total_output_tokens,
+                total_tokens,
                 avg_latency_ms,
                 p95_latency_ms,
             });
@@ -3042,6 +3104,7 @@ impl Vault {
                     substr(created_at, 1, 16) AS minute_bucket,
                     COUNT(*) AS requests,
                     COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_requests,
+                    COALESCE(SUM(COALESCE(total_tokens, COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens,
                     AVG(latency_ms) AS avg_latency_ms
                  FROM gateway_request_logs
                  WHERE julianday(created_at) >= julianday('now', 'localtime') - (?1 / 1440.0)
@@ -3056,7 +3119,8 @@ impl Vault {
                     minute: row.get(0)?,
                     requests: row.get(1)?,
                     error_requests: row.get(2)?,
-                    avg_latency_ms: row.get(3)?,
+                    total_tokens: row.get(3)?,
+                    avg_latency_ms: row.get(4)?,
                 })
             })
             .map_err(|e| e.to_string())?;
