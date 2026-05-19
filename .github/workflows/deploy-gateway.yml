@@ -1,0 +1,94 @@
+name: Deploy compute gateway
+
+on:
+  push:
+    tags:
+      - 'gateway-v*'
+  workflow_dispatch:
+    inputs:
+      skip_migrations:
+        description: 'Skip D1 migrations (deploy worker only)'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gateway-deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloud-gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: cloud-gateway/package-lock.json
+      - run: npm ci
+      - name: Run tests
+        run: npm test
+      - name: Type-check production build
+        run: npm run build
+
+  deploy:
+    name: Deploy to Cloudflare
+    needs: test
+    runs-on: ubuntu-latest
+    # GitHub environment with required reviewers gives a manual approval
+    # gate. Configure under Settings → Environments → production.
+    environment: production
+    defaults:
+      run:
+        working-directory: cloud-gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: cloud-gateway/package-lock.json
+      - run: npm ci
+
+      - name: Apply D1 migrations
+        if: ${{ github.event.inputs.skip_migrations != 'true' }}
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: cloud-gateway
+          command: d1 migrations apply mykey-compute-gateway --remote
+
+      - name: Deploy worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: cloud-gateway
+          command: deploy
+
+      - name: Smoke /health (skipped if GATEWAY_URL secret unset)
+        env:
+          GATEWAY_URL: ${{ secrets.GATEWAY_URL }}
+        run: |
+          set -eu
+          if [ -z "${GATEWAY_URL:-}" ]; then
+            echo "GATEWAY_URL secret not set; skipping smoke check"
+            exit 0
+          fi
+          for i in $(seq 1 10); do
+            if curl -fsS "$GATEWAY_URL/health" | grep -q '"ok":true'; then
+              echo "health probe passed on attempt $i"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "health probe failed after 10 attempts" >&2
+          exit 1

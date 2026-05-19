@@ -185,7 +185,72 @@ npm run dev
 The worker listens on `http://127.0.0.1:8787`. Bootstrap is the same as
 production, just point `--gateway-url` at `http://127.0.0.1:8787`.
 
-## 10. Rollback
+## 10. CI / CD via GitHub Actions
+
+The workflow at [.github/workflows/deploy-gateway.yml](../.github/workflows/deploy-gateway.yml)
+runs tests on every tag push that matches `gateway-v*` (plus manual
+`workflow_dispatch`), then waits for environment approval and runs the
+remote D1 migration + `wrangler deploy`, then probes `/health`.
+
+### One-time setup
+
+1. **Create a Cloudflare API token** at
+   https://dash.cloudflare.com/profile/api-tokens with these scopes:
+   - Account → Workers Scripts → Edit
+   - Account → D1 → Edit
+   - Account → Account Settings → Read
+   - Zone → Workers Routes → Edit (only if you bind a custom hostname)
+
+2. **Find your account ID** in the Cloudflare dashboard (right sidebar of
+   any Workers page).
+
+3. **Add GitHub repository secrets** (Settings → Secrets and variables →
+   Actions):
+
+   | Secret | Value | Required |
+   |---|---|---|
+   | `CLOUDFLARE_API_TOKEN` | the token from step 1 | yes |
+   | `CLOUDFLARE_ACCOUNT_ID` | account ID from step 2 | yes |
+   | `GATEWAY_URL` | e.g. `https://mykey-compute-gateway.<acct>.workers.dev` | optional (smoke check skipped if unset) |
+
+4. **Create the `production` environment** (Settings → Environments →
+   New environment → `production`). Add yourself (or a small group) as a
+   required reviewer. Every deploy then waits for explicit approval.
+
+### Releasing
+
+```bash
+git tag gateway-v1.0.0
+git push origin gateway-v1.0.0
+```
+
+The workflow runs tests → waits for `production` approval → applies D1
+migrations → deploys → probes `/health`. Watch progress in the Actions
+tab. The deploy step uses [`cloudflare/wrangler-action@v3`], so any
+custom flags can be added via the `command:` input.
+
+[`cloudflare/wrangler-action@v3`]: https://github.com/cloudflare/wrangler-action
+
+### Skipping migrations
+
+If you only need a worker redeploy (no schema change), trigger
+`workflow_dispatch` from the Actions tab and tick `skip_migrations`.
+
+### Upgrading to OIDC (optional, more secure)
+
+`CLOUDFLARE_API_TOKEN` is a long-lived secret stored in GitHub. To move
+to short-lived OIDC tokens:
+
+1. In Cloudflare → Manage Account → API Tokens → Create OIDC role; bind
+   it to your GitHub repository identity.
+2. Replace the `apiToken:` input on the wrangler-action with the
+   equivalent OIDC flow (see [Cloudflare OIDC docs](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)).
+3. Add `permissions: id-token: write` to the deploy job.
+
+Not required for v1 alpha — API token is simpler and acceptable for a
+small operator team.
+
+## 11. Rollback
 
 `wrangler` stores every deploy. To roll back:
 
