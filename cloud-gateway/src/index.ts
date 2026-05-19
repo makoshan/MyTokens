@@ -8,7 +8,13 @@ import { openAIAdapter } from './providers/openai.js'
 import { createDashboardSession, createInviteToken, hashDashboardToken } from './routes/dashboard.js'
 import { relayCompletion, relayCompletionStream } from './routes/relay.js'
 import { resolveRoutingRule } from './routing/router.js'
-import type { PriceBookRow, ProviderTokenSummary, RoutingRule } from './types.js'
+import type {
+  CreditRequestRecord,
+  CreditRequestStatus,
+  PriceBookRow,
+  ProviderTokenSummary,
+  RoutingRule,
+} from './types.js'
 import { decryptProviderToken, encryptProviderToken } from './vault/provider-tokens.js'
 
 export class AccountDurableObject {}
@@ -168,6 +174,19 @@ function requireActiveAccount(account: Awaited<ReturnType<GatewayStore['getAccou
   if (!account) throw new GatewayError('account_not_found', 404)
   if (account.status !== 'active') throw new GatewayError('account_paused', 403)
   return account
+}
+
+function serializeCreditRequest(record: CreditRequestRecord) {
+  return {
+    id: record.id,
+    account_id: record.accountId,
+    requested_micro_usd: record.requestedMicroUsd,
+    message: record.message ?? null,
+    status: record.status,
+    created_at: record.createdAt,
+    resolved_at: record.resolvedAt ?? null,
+    resolved_by: record.resolvedBy ?? null,
+  }
 }
 
 function providerTokenSummariesFromChannels(
@@ -432,6 +451,29 @@ async function handleRequest(
     return json({ data: await store.listUsage(accountId) })
   }
 
+  if (url.pathname === '/dashboard/credit-requests' && request.method === 'POST') {
+    const accountId = await authenticateDashboard(request, store, now)
+    const body = await readJsonObject(request)
+    const requested = positiveIntegerField(body, 'requested_micro_usd')
+    const message = optionalStringField(body, 'message')
+    const record: CreditRequestRecord = {
+      id: `crq_${crypto.randomUUID()}`,
+      accountId,
+      requestedMicroUsd: requested,
+      message,
+      status: 'pending',
+      createdAt: now,
+    }
+    await store.createCreditRequest(record)
+    return json(serializeCreditRequest(record), 201)
+  }
+
+  if (url.pathname === '/dashboard/credit-requests' && request.method === 'GET') {
+    const accountId = await authenticateDashboard(request, store, now)
+    const records = await store.listCreditRequests({ accountId })
+    return json({ data: records.map(serializeCreditRequest) })
+  }
+
   if (url.pathname === '/v1/balance' && request.method === 'GET') {
     if (!pepper) throw new GatewayError('server_pepper_not_configured', 500)
     const { accountId } = await authenticateBuyer(request, store, pepper, now)
@@ -536,6 +578,55 @@ async function handleRequest(
       balance_micro_usd: account.balanceMicroUsd,
       updated_at: account.updatedAt,
     })
+  }
+
+  if (url.pathname === '/admin/credit-requests' && request.method === 'GET') {
+    await requireAdmin(request, adminToken)
+    const statusParam = url.searchParams.get('status')
+    const statusFilter: CreditRequestStatus | undefined =
+      statusParam === 'pending' || statusParam === 'approved' || statusParam === 'rejected' ? statusParam : undefined
+    const records = await store.listCreditRequests({ statusFilter })
+    return json({ data: records.map(serializeCreditRequest) })
+  }
+
+  const approveCreditRequestMatch = /^\/admin\/credit-requests\/([^/]+)\/approve$/.exec(url.pathname)
+  if (approveCreditRequestMatch && request.method === 'POST') {
+    await requireAdmin(request, adminToken)
+    const existing = await store.getCreditRequest(approveCreditRequestMatch[1])
+    if (!existing) throw new GatewayError('credit_request_not_found', 404)
+    const result = await store.resolveCreditRequest({
+      id: approveCreditRequestMatch[1],
+      decision: 'approve',
+      resolvedBy: 'admin',
+      now,
+    })
+    if (!result.ok) {
+      return new Response(JSON.stringify(serializeCreditRequest(result.record)), {
+        status: 409,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    return json(serializeCreditRequest(result.record))
+  }
+
+  const rejectCreditRequestMatch = /^\/admin\/credit-requests\/([^/]+)\/reject$/.exec(url.pathname)
+  if (rejectCreditRequestMatch && request.method === 'POST') {
+    await requireAdmin(request, adminToken)
+    const existing = await store.getCreditRequest(rejectCreditRequestMatch[1])
+    if (!existing) throw new GatewayError('credit_request_not_found', 404)
+    const result = await store.resolveCreditRequest({
+      id: rejectCreditRequestMatch[1],
+      decision: 'reject',
+      resolvedBy: 'admin',
+      now,
+    })
+    if (!result.ok) {
+      return new Response(JSON.stringify(serializeCreditRequest(result.record)), {
+        status: 409,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    return json(serializeCreditRequest(result.record))
   }
 
   const createInviteMatch = /^\/admin\/accounts\/([^/]+)\/invites$/.exec(url.pathname)

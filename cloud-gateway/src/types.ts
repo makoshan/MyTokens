@@ -68,6 +68,19 @@ export interface ResolvedRoute {
   actualProviderModel: string
 }
 
+export type CreditRequestStatus = 'pending' | 'approved' | 'rejected'
+
+export interface CreditRequestRecord {
+  id: string
+  accountId: string
+  requestedMicroUsd: number
+  message?: string
+  status: CreditRequestStatus
+  createdAt: string
+  resolvedAt?: string | null
+  resolvedBy?: string | null
+}
+
 export interface RequestLog {
   id: string
   accountId: string

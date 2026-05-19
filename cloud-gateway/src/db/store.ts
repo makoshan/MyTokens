@@ -1,5 +1,5 @@
 import type { AccountInvite } from '../routes/dashboard.js'
-import type { ApiKeyRecord, PriceBookRow, RequestLog, RoutingRule } from '../types.js'
+import type { ApiKeyRecord, CreditRequestRecord, CreditRequestStatus, PriceBookRow, RequestLog, RoutingRule } from '../types.js'
 import type { ProviderTokenRecord } from '../vault/provider-tokens.js'
 
 export interface GatewayAccountRecord {
@@ -150,6 +150,19 @@ export interface GatewayStore {
     now: string
   }): Promise<void>
   manualCredit(accountId: string, amountMicroUsd: number, now: string): Promise<GatewayAccountRecord>
+  createCreditRequest(record: CreditRequestRecord): Promise<CreditRequestRecord>
+  listCreditRequests(input: {
+    accountId?: string
+    statusFilter?: CreditRequestStatus
+    limit?: number
+  }): Promise<CreditRequestRecord[]>
+  getCreditRequest(id: string): Promise<CreditRequestRecord | null>
+  resolveCreditRequest(input: {
+    id: string
+    decision: 'approve' | 'reject'
+    resolvedBy: string
+    now: string
+  }): Promise<{ record: CreditRequestRecord; ok: true } | { record: CreditRequestRecord; ok: false; reason: 'already_resolved' }>
 }
 
 export class InMemoryGatewayStore implements GatewayStore {
@@ -163,6 +176,8 @@ export class InMemoryGatewayStore implements GatewayStore {
   readonly modelQuality: ModelQualityRecord[]
   readonly providerTokens: ProviderTokenRecord[]
   readonly priceBook: PriceBookRow[]
+  readonly creditRequests: CreditRequestRecord[]
+  readonly ledger: Array<{ id: string; accountId: string; type: string; amountMicroUsd: number; createdAt: string }>
   readonly baseUrl: string
 
   constructor(input: {
@@ -177,6 +192,7 @@ export class InMemoryGatewayStore implements GatewayStore {
     modelQuality?: ModelQualityRecord[]
     providerTokens?: ProviderTokenRecord[]
     priceBook?: PriceBookRow[]
+    creditRequests?: CreditRequestRecord[]
   }) {
     this.baseUrl = input.baseUrl
     this.accounts = input.accounts
@@ -189,6 +205,8 @@ export class InMemoryGatewayStore implements GatewayStore {
     this.modelQuality = input.modelQuality ?? []
     this.providerTokens = input.providerTokens ?? []
     this.priceBook = input.priceBook ?? []
+    this.creditRequests = input.creditRequests ?? []
+    this.ledger = []
   }
 
   async findApiKeyByHash(hash: string): Promise<ApiKeyRecord | null> {
@@ -324,7 +342,15 @@ export class InMemoryGatewayStore implements GatewayStore {
         status: row.statusCode >= 200 && row.statusCode < 400 ? 'ok' : 'error',
       })),
       modelQuality: this.modelQuality,
-      creditRequests: [],
+      creditRequests: this.creditRequests
+        .filter((row) => row.accountId === accountId)
+        .map((row) => ({
+          id: row.id,
+          requestedMicroUsd: row.requestedMicroUsd,
+          message: row.message,
+          status: row.status,
+          createdAt: row.createdAt,
+        })),
     }
   }
 
@@ -450,17 +476,77 @@ export class InMemoryGatewayStore implements GatewayStore {
     account.updatedAt = now
     return account
   }
+
+  async createCreditRequest(record: CreditRequestRecord): Promise<CreditRequestRecord> {
+    this.creditRequests.push(record)
+    return record
+  }
+
+  async listCreditRequests(input: {
+    accountId?: string
+    statusFilter?: CreditRequestStatus
+    limit?: number
+  }): Promise<CreditRequestRecord[]> {
+    const limit = input.limit ?? 100
+    return this.creditRequests
+      .filter((row) => (input.accountId ? row.accountId === input.accountId : true))
+      .filter((row) => (input.statusFilter ? row.status === input.statusFilter : true))
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      .slice(0, limit)
+  }
+
+  async getCreditRequest(id: string): Promise<CreditRequestRecord | null> {
+    return this.creditRequests.find((row) => row.id === id) ?? null
+  }
+
+  async resolveCreditRequest(input: {
+    id: string
+    decision: 'approve' | 'reject'
+    resolvedBy: string
+    now: string
+  }): Promise<{ record: CreditRequestRecord; ok: true } | { record: CreditRequestRecord; ok: false; reason: 'already_resolved' }> {
+    const record = this.creditRequests.find((row) => row.id === input.id)
+    if (!record) throw new Error('credit_request_not_found')
+    if (record.status !== 'pending') {
+      return { record, ok: false, reason: 'already_resolved' }
+    }
+    if (input.decision === 'approve') {
+      const account = await this.getAccount(record.accountId)
+      if (!account) throw new Error('account_not_found')
+      account.balanceMicroUsd += record.requestedMicroUsd
+      account.updatedAt = input.now
+      this.ledger.push({
+        id: `cr_${record.id}`,
+        accountId: record.accountId,
+        type: 'credit',
+        amountMicroUsd: record.requestedMicroUsd,
+        createdAt: input.now,
+      })
+      record.status = 'approved'
+    } else {
+      record.status = 'rejected'
+    }
+    record.resolvedAt = input.now
+    record.resolvedBy = input.resolvedBy
+    return { record, ok: true }
+  }
+}
+
+export interface D1RunResult {
+  success?: boolean
+  meta?: { changes?: number; rows_written?: number; rows_read?: number }
 }
 
 export interface D1Database {
   prepare(query: string): D1PreparedStatement
+  batch?(statements: D1PreparedStatement[]): Promise<D1RunResult[]>
 }
 
 export interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement
   first<T = Record<string, unknown>>(): Promise<T | null>
   all<T = Record<string, unknown>>(): Promise<{ results: T[] }>
-  run(): Promise<unknown>
+  run(): Promise<D1RunResult>
 }
 
 function stringValue(value: unknown, fallback = ''): string {
@@ -715,6 +801,7 @@ export class D1GatewayStore implements GatewayStore {
       routingRules: await this.listRoutingRules(),
       usage: await this.listUsage(accountId),
       modelQuality: await this.listModelQuality(),
+      creditRequests: await this.listCreditRequests({ accountId }),
     })
     return memory.getDashboardSnapshot(accountId)
   }
@@ -1038,6 +1125,148 @@ export class D1GatewayStore implements GatewayStore {
       weight: numberValue(row.weight),
       status: stringValue(row.status) === 'active' ? 'active' : 'disabled',
     }))
+  }
+
+  async createCreditRequest(record: CreditRequestRecord): Promise<CreditRequestRecord> {
+    await this.db
+      .prepare(
+        'INSERT INTO compute_credit_requests (id, account_id, requested_micro_usd, message, status, created_at, resolved_at, resolved_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      )
+      .bind(
+        record.id,
+        record.accountId,
+        record.requestedMicroUsd,
+        record.message ?? null,
+        record.status,
+        record.createdAt,
+        record.resolvedAt ?? null,
+        record.resolvedBy ?? null
+      )
+      .run()
+    return record
+  }
+
+  async listCreditRequests(input: {
+    accountId?: string
+    statusFilter?: CreditRequestStatus
+    limit?: number
+  }): Promise<CreditRequestRecord[]> {
+    const conditions: string[] = []
+    const binds: unknown[] = []
+    if (input.accountId) {
+      conditions.push('account_id = ?')
+      binds.push(input.accountId)
+    }
+    if (input.statusFilter) {
+      conditions.push('status = ?')
+      binds.push(input.statusFilter)
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+    const limit = input.limit ?? 100
+    const rows = await this.db
+      .prepare(`SELECT * FROM compute_credit_requests ${where} ORDER BY created_at DESC LIMIT ?`)
+      .bind(...binds, limit)
+      .all<Record<string, unknown>>()
+    return rows.results.map((row) => this.creditRequestFromRow(row))
+  }
+
+  async getCreditRequest(id: string): Promise<CreditRequestRecord | null> {
+    const row = await this.db
+      .prepare('SELECT * FROM compute_credit_requests WHERE id = ? LIMIT 1')
+      .bind(id)
+      .first<Record<string, unknown>>()
+    if (!row) return null
+    return this.creditRequestFromRow(row)
+  }
+
+  async resolveCreditRequest(input: {
+    id: string
+    decision: 'approve' | 'reject'
+    resolvedBy: string
+    now: string
+  }): Promise<{ record: CreditRequestRecord; ok: true } | { record: CreditRequestRecord; ok: false; reason: 'already_resolved' }> {
+    const existing = await this.getCreditRequest(input.id)
+    if (!existing) throw new Error('credit_request_not_found')
+    if (existing.status !== 'pending') {
+      return { record: existing, ok: false, reason: 'already_resolved' }
+    }
+
+    if (input.decision === 'reject') {
+      const result = await this.db
+        .prepare(
+          "UPDATE compute_credit_requests SET status = 'rejected', resolved_at = ?, resolved_by = ? WHERE id = ? AND status = 'pending'"
+        )
+        .bind(input.now, input.resolvedBy, input.id)
+        .run()
+      const changes = result.meta?.changes ?? 0
+      if (changes === 0) {
+        const refetched = (await this.getCreditRequest(input.id)) ?? existing
+        return { record: refetched, ok: false, reason: 'already_resolved' }
+      }
+      const refetched = (await this.getCreditRequest(input.id)) ?? existing
+      return { record: refetched, ok: true }
+    }
+
+    const account = await this.getAccount(existing.accountId)
+    if (!account) throw new Error('account_not_found')
+    const balanceAfter = account.balanceMicroUsd + existing.requestedMicroUsd
+
+    const stmts: D1PreparedStatement[] = [
+      this.db
+        .prepare(
+          "UPDATE compute_credit_requests SET status = 'approved', resolved_at = ?, resolved_by = ? WHERE id = ? AND status = 'pending'"
+        )
+        .bind(input.now, input.resolvedBy, input.id),
+      this.db
+        .prepare(
+          'INSERT OR IGNORE INTO compute_ledger_entries (id, account_id, type, amount_micro_usd, balance_after_micro_usd, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+        )
+        .bind(`cr_${input.id}`, existing.accountId, 'credit', existing.requestedMicroUsd, balanceAfter, input.now),
+    ]
+    let updateChanges: number
+    let insertChanges: number
+    if (this.db.batch) {
+      const results = await this.db.batch(stmts)
+      updateChanges = results[0]?.meta?.changes ?? 0
+      insertChanges = results[1]?.meta?.changes ?? 0
+    } else {
+      const updateRes = await stmts[0].run()
+      updateChanges = updateRes.meta?.changes ?? 0
+      if (updateChanges === 0) {
+        const refetched = (await this.getCreditRequest(input.id)) ?? existing
+        return { record: refetched, ok: false, reason: 'already_resolved' }
+      }
+      const insertRes = await stmts[1].run()
+      insertChanges = insertRes.meta?.changes ?? 0
+    }
+    if (updateChanges === 0) {
+      const refetched = (await this.getCreditRequest(input.id)) ?? existing
+      return { record: refetched, ok: false, reason: 'already_resolved' }
+    }
+    if (insertChanges === 0) {
+      // Ledger row already existed (cr_<id> collision) — a prior approve had
+      // committed but its UPDATE was missed. Treat as already resolved so we
+      // never double-credit. The duplicate UPDATE we just ran is harmless: it
+      // overwrites resolved_at/resolved_by on an already-approved row.
+      const refetched = (await this.getCreditRequest(input.id)) ?? existing
+      return { record: refetched, ok: false, reason: 'already_resolved' }
+    }
+    const refetched = (await this.getCreditRequest(input.id)) ?? existing
+    return { record: refetched, ok: true }
+  }
+
+  private creditRequestFromRow(row: Record<string, unknown>): CreditRequestRecord {
+    const status = stringValue(row.status)
+    return {
+      id: stringValue(row.id),
+      accountId: stringValue(row.account_id),
+      requestedMicroUsd: numberValue(row.requested_micro_usd),
+      message: optionalString(row.message),
+      status: status === 'approved' || status === 'rejected' ? status : 'pending',
+      createdAt: stringValue(row.created_at),
+      resolvedAt: optionalString(row.resolved_at) ?? null,
+      resolvedBy: optionalString(row.resolved_by) ?? null,
+    }
   }
 
   private async listModelQuality(): Promise<ModelQualityRecord[]> {
