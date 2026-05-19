@@ -608,3 +608,47 @@ test('admin config endpoints create encrypted channels, price rows, and routing 
   assert.equal(modelsResponse.status, 200)
   assert.ok(modelsPayload.data.some((model: { id: string }) => model.id === 'gpt-4.1-nano'))
 })
+
+test('unmatched paths fall through to env.ASSETS so the SPA dashboards are served, and stay 404 without an ASSETS binding', async () => {
+  const { store, pepper } = seedStore()
+  const app = createGatewayApp({
+    store,
+    pepper,
+    adminToken: 'admin-secret',
+    now: () => '2026-05-19T00:00:00Z',
+  })
+
+  // No ASSETS bound → unmatched path is a real 404 with a JSON envelope.
+  const bareNotFound = await app.fetch(new Request('https://gateway.test/some-spa-page'))
+  assert.equal(bareNotFound.status, 404)
+
+  // ASSETS bound → Worker delegates so the static dashboard HTML wins.
+  let assetCalls = 0
+  const assetsEnv = {
+    ASSETS: {
+      async fetch(request: Request) {
+        assetCalls += 1
+        const url = new URL(request.url)
+        return new Response(`<!doctype html><body>asset:${url.pathname}</body>`, {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        })
+      },
+    },
+  }
+  const assetResponse = await app.fetch(
+    new Request('https://gateway.test/some-spa-page'),
+    assetsEnv
+  )
+  assert.equal(assetResponse.status, 200)
+  assert.equal(assetCalls, 1)
+  const body = await assetResponse.text()
+  assert.ok(body.includes('asset:/some-spa-page'))
+
+  // API paths must NOT fall through to ASSETS — the gateway still returns
+  // its real responses so SDKs see the right error envelopes.
+  const apiCallsBefore = assetCalls
+  const apiResponse = await app.fetch(new Request('https://gateway.test/v1/balance'), assetsEnv)
+  assert.equal(apiResponse.status, 401)
+  assert.equal(assetCalls, apiCallsBefore, 'matched API routes must not invoke ASSETS')
+})

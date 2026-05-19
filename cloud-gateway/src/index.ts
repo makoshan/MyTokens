@@ -39,6 +39,7 @@ export interface GatewayEnv {
   MASTER_KEY_V1?: string
   ACCOUNT_DO?: GatewayDurableObjectNamespace
   ACCOUNT_RPM_LIMIT?: string
+  ASSETS?: { fetch(request: Request): Promise<Response> }
 }
 
 export interface GatewayAppOptions {
@@ -377,6 +378,45 @@ async function handleRequest(
 
   if (url.pathname === '/health') {
     return json({ ok: true, service: 'mykey-compute-gateway' })
+  }
+
+  // Browser-facing invite landing. Friend clicks `<gateway>/accept?token=...`
+  // from a bootstrap-generated invite URL → we mint a dashboard session,
+  // drop a cookie, and 302 them at the SPA root. POST /dashboard/invites/accept
+  // remains the JSON path for programmatic use.
+  if (url.pathname === '/accept' && request.method === 'GET') {
+    const inviteToken = url.searchParams.get('token')
+    if (!inviteToken) throw new GatewayError('invite_token_required', 400)
+    const invite = await store.findInviteByHash(hashDashboardToken(inviteToken))
+    if (!invite) throw new GatewayError('invite_not_found', 404)
+    if (invite.status !== 'active') throw new GatewayError('invite_not_active', 409)
+    if (Date.parse(invite.expiresAt) <= Date.parse(now)) throw new GatewayError('invite_expired', 410)
+    await store.markInviteAccepted(invite.id, now)
+    const session = createDashboardSession({
+      accountId: invite.accountId,
+      authMethod: 'magic_link',
+      now,
+    })
+    await store.createDashboardSession({
+      id: session.id,
+      accountId: session.accountId,
+      sessionHash: session.sessionHash,
+      authMethod: session.authMethod,
+      createdAt: session.createdAt,
+      expiresAt: session.expiresAt,
+    })
+    const cookie = [
+      `mykey_dashboard_session=${session.sessionToken}`,
+      'Path=/',
+      'HttpOnly',
+      'Secure',
+      'SameSite=Strict',
+      `Expires=${new Date(session.expiresAt).toUTCString()}`,
+    ].join('; ')
+    return new Response(null, {
+      status: 302,
+      headers: { location: '/', 'set-cookie': cookie },
+    })
   }
 
   if (url.pathname === '/dashboard/invites/accept' && request.method === 'POST') {
@@ -742,7 +782,7 @@ async function handleRequest(
         id: invite.id,
         account_id: invite.accountId,
         invite_token: rawToken,
-        invite_url: `${options.baseUrl ?? env?.PUBLIC_GATEWAY_URL ?? 'https://dashboard.mykey.example'}/accept?token=${rawToken}`,
+        invite_url: `${options.baseUrl ?? new URL(request.url).origin}/accept?token=${rawToken}`,
         expires_at: invite.expiresAt,
         status: invite.status,
         created_at: invite.createdAt,
@@ -956,6 +996,65 @@ async function handleRequest(
     )
   }
 
+  if (url.pathname === '/admin/provider-tokens' && request.method === 'GET') {
+    await requireAdmin(request, adminToken, adminIpAllowlist)
+    const channels = await store.listProviderTokenSummaries()
+    return json({
+      data: channels.map((channel) => ({
+        id: channel.id,
+        label: channel.label,
+        provider: channel.provider,
+        adapter: channel.adapter,
+        base_url: channel.baseUrl ?? null,
+        models: channel.models,
+        status: channel.status,
+        priority: channel.priority,
+        weight: channel.weight,
+        latency_ms: channel.latencyMs,
+        error_rate: channel.errorRate,
+        exhausted_until: channel.exhaustedUntil,
+      })),
+    })
+  }
+
+  if (url.pathname === '/admin/routing-rules' && request.method === 'GET') {
+    await requireAdmin(request, adminToken, adminIpAllowlist)
+    const rules = await store.listRoutingRules()
+    return json({
+      data: rules.map((rule) => ({
+        id: rule.id,
+        account_group: rule.accountGroup,
+        requested_provider: rule.requestedProvider ?? null,
+        requested_model: rule.requestedModel,
+        provider_token_id: rule.providerTokenId,
+        actual_provider_model: rule.actualProviderModel,
+        priority: rule.priority,
+        weight: rule.weight,
+        status: rule.status,
+      })),
+    })
+  }
+
+  if (url.pathname === '/admin/price-book' && request.method === 'GET') {
+    await requireAdmin(request, adminToken, adminIpAllowlist)
+    const rows = await store.listPriceBook()
+    return json({
+      data: rows.map((row) => ({
+        id: row.id,
+        version: row.version,
+        provider: row.provider,
+        model: row.model,
+        sell_input_micro_usd_per_1m_tokens: row.sellInputMicroUsdPer1MTokens,
+        sell_output_micro_usd_per_1m_tokens: row.sellOutputMicroUsdPer1MTokens,
+        upstream_input_micro_usd_per_1m_tokens: row.upstreamInputMicroUsdPer1MTokens,
+        upstream_output_micro_usd_per_1m_tokens: row.upstreamOutputMicroUsdPer1MTokens,
+        valid_from: row.validFrom,
+        valid_to: row.validTo,
+        enabled: row.enabled,
+      })),
+    })
+  }
+
   if (url.pathname === '/admin/audit-log' && request.method === 'GET') {
     await requireAdmin(request, adminToken, adminIpAllowlist)
     const limitParam = url.searchParams.get('limit')
@@ -980,6 +1079,13 @@ async function handleRequest(
     })
   }
 
+  // API and dashboard JSON routes already returned above. Any path the Worker
+  // didn't explicitly handle (/, /accept, /manage, /assets/*, ...) belongs to
+  // the bundled SPA assets. With wrangler.toml's not_found_handling = "none"
+  // Cloudflare will NOT auto-serve the static dir; the Worker has to forward.
+  if (env?.ASSETS) {
+    return env.ASSETS.fetch(request)
+  }
   return json({ error: { code: 'not_found' } }, 404)
 }
 
