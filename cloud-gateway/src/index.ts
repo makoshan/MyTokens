@@ -1,3 +1,4 @@
+import { recordAuditAdminAction } from './audit.js'
 import { createApiKey, registerApiKey, verifyApiKey } from './auth/api-keys.js'
 import { AccountBalance } from './billing/account-do.js'
 import { D1GatewayStore, type D1Database, type GatewayStore } from './db/store.js'
@@ -196,6 +197,7 @@ function providerTokenSummariesFromChannels(
     id: channel.id,
     provider: channel.provider,
     adapter: channel.adapter,
+    baseUrl: channel.baseUrl ?? null,
     status: channel.status === 'active' ? 'active' : 'disabled',
     exhaustedUntil: channel.exhaustedUntil,
     lastResponseMs: channel.latencyMs,
@@ -550,6 +552,14 @@ async function handleRequest(
       createdAt: now,
       updatedAt: now,
     })
+    await recordAuditAdminAction(store, {
+      action: 'admin.account.create',
+      targetType: 'account',
+      targetId: account.id,
+      body,
+      statusCode: 201,
+      now,
+    })
     return json(
       {
         id: account.id,
@@ -573,6 +583,14 @@ async function handleRequest(
     const amount = Number(body.amount_micro_usd)
     if (!Number.isInteger(amount) || amount <= 0) throw new GatewayError('invalid_credit_amount', 400)
     const account = await store.manualCredit(manualCreditMatch[1], amount, now)
+    await recordAuditAdminAction(store, {
+      action: 'admin.account.credit',
+      targetType: 'account',
+      targetId: manualCreditMatch[1],
+      body,
+      statusCode: 200,
+      now,
+    })
     return json({
       account_id: account.id,
       balance_micro_usd: account.balanceMicroUsd,
@@ -600,6 +618,15 @@ async function handleRequest(
       resolvedBy: 'admin',
       now,
     })
+    const statusCode = result.ok ? 200 : 409
+    await recordAuditAdminAction(store, {
+      action: 'admin.credit_request.approve',
+      targetType: 'credit_request',
+      targetId: approveCreditRequestMatch[1],
+      statusCode,
+      now,
+      extra: { decision_ok: result.ok, account_id: existing.accountId, amount_micro_usd: existing.requestedMicroUsd },
+    })
     if (!result.ok) {
       return new Response(JSON.stringify(serializeCreditRequest(result.record)), {
         status: 409,
@@ -619,6 +646,15 @@ async function handleRequest(
       decision: 'reject',
       resolvedBy: 'admin',
       now,
+    })
+    const statusCode = result.ok ? 200 : 409
+    await recordAuditAdminAction(store, {
+      action: 'admin.credit_request.reject',
+      targetType: 'credit_request',
+      targetId: rejectCreditRequestMatch[1],
+      statusCode,
+      now,
+      extra: { decision_ok: result.ok, account_id: existing.accountId },
     })
     if (!result.ok) {
       return new Response(JSON.stringify(serializeCreditRequest(result.record)), {
@@ -645,6 +681,15 @@ async function handleRequest(
       now,
     })
     await store.createInvite(invite)
+    await recordAuditAdminAction(store, {
+      action: 'admin.invite.create',
+      targetType: 'account',
+      targetId: account.id,
+      body,
+      statusCode: 201,
+      now,
+      extra: { invite_id: invite.id },
+    })
     return json(
       {
         id: invite.id,
@@ -664,6 +709,14 @@ async function handleRequest(
     await requireAdmin(request, adminToken)
     const revoked = await store.revokeApiKey(revokeAdminKeyMatch[1], now)
     if (!revoked) throw new GatewayError('api_key_not_found', 404)
+    await recordAuditAdminAction(store, {
+      action: 'admin.api_key.revoke',
+      targetType: 'api_key',
+      targetId: revoked.id,
+      statusCode: 200,
+      now,
+      extra: { account_id: revoked.accountId },
+    })
     return json({
       id: revoked.id,
       account_id: revoked.accountId,
@@ -690,6 +743,15 @@ async function handleRequest(
       name: optionalStringField(body, 'name'),
     })
     await store.createApiKeyRecord(apiKey)
+    await recordAuditAdminAction(store, {
+      action: 'admin.api_key.create',
+      targetType: 'api_key',
+      targetId: apiKey.id,
+      body,
+      statusCode: 201,
+      now,
+      extra: { account_id: apiKey.accountId, prefix: apiKey.keyPrefix, last4: apiKey.keyLast4 },
+    })
     return json(
       {
         id: apiKey.id,
@@ -713,6 +775,7 @@ async function handleRequest(
     const provider = requireString(body, 'provider')
     const label = requireString(body, 'label')
     const adapter = optionalStringField(body, 'adapter') ?? provider
+    const baseUrl = optionalStringField(body, 'base_url') ?? null
     const plaintext = requireString(body, 'plaintext')
     const models = stringArrayField(body, 'models')
     const keyVersion = optionalStringField(body, 'key_version') ?? 'v1'
@@ -721,6 +784,7 @@ async function handleRequest(
       provider,
       label,
       adapter,
+      baseUrl,
       plaintext,
       masterKeys: getMasterKeys(options, env),
       keyVersion,
@@ -732,6 +796,15 @@ async function handleRequest(
       priority: positiveIntegerField(body, 'priority', 1),
       weight: positiveIntegerField(body, 'weight', 1),
       now,
+    })
+    await recordAuditAdminAction(store, {
+      action: 'admin.provider_token.upsert',
+      targetType: 'provider_token',
+      targetId: channel.id,
+      body,
+      statusCode: 201,
+      now,
+      extra: { provider: channel.provider, adapter: channel.adapter, key_version: token.keyVersion },
     })
     return json(
       {
@@ -765,6 +838,15 @@ async function handleRequest(
       enabled: booleanField(body, 'enabled', true),
     }
     const saved = await store.upsertPriceBook({ row, now })
+    await recordAuditAdminAction(store, {
+      action: 'admin.price_book.upsert',
+      targetType: 'price_book',
+      targetId: saved.id,
+      body,
+      statusCode: 201,
+      now,
+      extra: { provider: saved.provider, model: saved.model, version: saved.version },
+    })
     return json(
       {
         id: saved.id,
@@ -798,6 +880,19 @@ async function handleRequest(
       status: optionalStringField(body, 'status') === 'disabled' ? 'disabled' : 'active',
     }
     const saved = await store.upsertRoutingRule({ rule, now })
+    await recordAuditAdminAction(store, {
+      action: 'admin.routing_rule.upsert',
+      targetType: 'routing_rule',
+      targetId: saved.id,
+      body,
+      statusCode: 201,
+      now,
+      extra: {
+        account_group: saved.accountGroup,
+        requested_model: saved.requestedModel,
+        provider_token_id: saved.providerTokenId,
+      },
+    })
     return json(
       {
         id: saved.id,
@@ -812,6 +907,30 @@ async function handleRequest(
       },
       201
     )
+  }
+
+  if (url.pathname === '/admin/audit-log' && request.method === 'GET') {
+    await requireAdmin(request, adminToken)
+    const limitParam = url.searchParams.get('limit')
+    const sinceParam = url.searchParams.get('since')
+    const actorParam = url.searchParams.get('actor')
+    const limit = limitParam ? Math.max(1, Math.min(500, Number(limitParam) || 100)) : 100
+    const records = await store.listAdminAudit({
+      limit,
+      since: sinceParam ?? undefined,
+      actorFilter: actorParam ?? undefined,
+    })
+    return json({
+      data: records.map((row) => ({
+        id: row.id,
+        actor: row.actor,
+        action: row.action,
+        target_type: row.targetType,
+        target_id: row.targetId,
+        metadata: row.metadata,
+        created_at: row.createdAt,
+      })),
+    })
   }
 
   return json({ error: { code: 'not_found' } }, 404)

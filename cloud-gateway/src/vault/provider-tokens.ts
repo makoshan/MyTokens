@@ -20,6 +20,7 @@ export async function encryptProviderToken(input: {
   provider: string
   label: string
   adapter: string
+  baseUrl?: string | null
   plaintext: string
   masterKeys: Record<string, Uint8Array>
   keyVersion: string
@@ -36,6 +37,7 @@ export async function encryptProviderToken(input: {
     provider: input.provider,
     label: input.label,
     adapter: input.adapter,
+    baseUrl: input.baseUrl ?? null,
     status: 'active',
     exhaustedUntil: null,
     successCount: 0,

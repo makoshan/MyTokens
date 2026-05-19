@@ -1,5 +1,13 @@
 import type { AccountInvite } from '../routes/dashboard.js'
-import type { ApiKeyRecord, CreditRequestRecord, CreditRequestStatus, PriceBookRow, RequestLog, RoutingRule } from '../types.js'
+import type {
+  AdminAuditRecord,
+  ApiKeyRecord,
+  CreditRequestRecord,
+  CreditRequestStatus,
+  PriceBookRow,
+  RequestLog,
+  RoutingRule,
+} from '../types.js'
 import type { ProviderTokenRecord } from '../vault/provider-tokens.js'
 
 export interface GatewayAccountRecord {
@@ -28,6 +36,7 @@ export interface ChannelRecord {
   label: string
   provider: string
   adapter: string
+  baseUrl?: string | null
   models: string[]
   status: 'active' | 'degraded' | 'exhausted' | 'paused' | 'disabled' | 'revoked'
   priority: number
@@ -163,6 +172,8 @@ export interface GatewayStore {
     resolvedBy: string
     now: string
   }): Promise<{ record: CreditRequestRecord; ok: true } | { record: CreditRequestRecord; ok: false; reason: 'already_resolved' }>
+  recordAdminAudit(record: AdminAuditRecord): Promise<AdminAuditRecord>
+  listAdminAudit(input: { limit?: number; since?: string; actorFilter?: string }): Promise<AdminAuditRecord[]>
 }
 
 export class InMemoryGatewayStore implements GatewayStore {
@@ -178,6 +189,7 @@ export class InMemoryGatewayStore implements GatewayStore {
   readonly priceBook: PriceBookRow[]
   readonly creditRequests: CreditRequestRecord[]
   readonly ledger: Array<{ id: string; accountId: string; type: string; amountMicroUsd: number; createdAt: string }>
+  readonly auditLog: AdminAuditRecord[]
   readonly baseUrl: string
 
   constructor(input: {
@@ -207,6 +219,7 @@ export class InMemoryGatewayStore implements GatewayStore {
     this.priceBook = input.priceBook ?? []
     this.creditRequests = input.creditRequests ?? []
     this.ledger = []
+    this.auditLog = []
   }
 
   async findApiKeyByHash(hash: string): Promise<ApiKeyRecord | null> {
@@ -397,6 +410,7 @@ export class InMemoryGatewayStore implements GatewayStore {
       label: input.token.label,
       provider: input.token.provider,
       adapter: input.token.adapter,
+      baseUrl: input.token.baseUrl ?? null,
       models: input.models,
       status: mapChannelStatus(input.token.status),
       priority: input.priority ?? 1,
@@ -529,6 +543,24 @@ export class InMemoryGatewayStore implements GatewayStore {
     record.resolvedAt = input.now
     record.resolvedBy = input.resolvedBy
     return { record, ok: true }
+  }
+
+  async recordAdminAudit(record: AdminAuditRecord): Promise<AdminAuditRecord> {
+    this.auditLog.push(record)
+    return record
+  }
+
+  async listAdminAudit(input: {
+    limit?: number
+    since?: string
+    actorFilter?: string
+  }): Promise<AdminAuditRecord[]> {
+    const limit = input.limit ?? 100
+    return this.auditLog
+      .filter((row) => (input.actorFilter ? row.actor === input.actorFilter : true))
+      .filter((row) => (input.since ? Date.parse(row.createdAt) >= Date.parse(input.since) : true))
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      .slice(0, limit)
   }
 }
 
@@ -904,6 +936,7 @@ export class D1GatewayStore implements GatewayStore {
       provider: stringValue(row.provider),
       label: stringValue(row.label),
       adapter: stringValue(row.adapter),
+      baseUrl: optionalString(row.base_url) ?? null,
       status: mapProviderTokenStatus(stringValue(row.status)),
       exhaustedUntil: optionalString(row.exhausted_until) ?? null,
       successCount: numberValue(row.success_count),
@@ -927,13 +960,14 @@ export class D1GatewayStore implements GatewayStore {
   }): Promise<ChannelRecord> {
     await this.db
       .prepare(
-        'INSERT OR REPLACE INTO compute_provider_tokens (id, provider, label, adapter, models_json, status, scope_json, secret_ref, ciphertext, nonce, key_version, derivation_fingerprint, success_count, failure_count, exhausted_until, last_error, last_response_ms, last_used_at, rotated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT OR REPLACE INTO compute_provider_tokens (id, provider, label, adapter, base_url, models_json, status, scope_json, secret_ref, ciphertext, nonce, key_version, derivation_fingerprint, success_count, failure_count, exhausted_until, last_error, last_response_ms, last_used_at, rotated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
       .bind(
         input.token.id,
         input.token.provider,
         input.token.label,
         input.token.adapter,
+        input.token.baseUrl ?? null,
         JSON.stringify(input.models),
         input.token.status,
         input.token.scopeJson ?? null,
@@ -959,6 +993,7 @@ export class D1GatewayStore implements GatewayStore {
       label: input.token.label,
       provider: input.token.provider,
       adapter: input.token.adapter,
+      baseUrl: input.token.baseUrl ?? null,
       models: input.models,
       status: mapChannelStatus(input.token.status),
       priority: input.priority ?? 1,
@@ -1100,6 +1135,7 @@ export class D1GatewayStore implements GatewayStore {
       label: stringValue(row.label),
       provider: stringValue(row.provider),
       adapter: stringValue(row.adapter),
+      baseUrl: optionalString(row.base_url) ?? null,
       models: parseJsonArray(row.models_json),
       status: mapChannelStatus(stringValue(row.status)),
       priority: 1,
@@ -1269,6 +1305,56 @@ export class D1GatewayStore implements GatewayStore {
     }
   }
 
+  async recordAdminAudit(record: AdminAuditRecord): Promise<AdminAuditRecord> {
+    await this.db
+      .prepare(
+        'INSERT INTO compute_admin_audit_log (id, actor, action, target_type, target_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      )
+      .bind(
+        record.id,
+        record.actor,
+        record.action,
+        record.targetType,
+        record.targetId,
+        JSON.stringify(record.metadata ?? {}),
+        record.createdAt
+      )
+      .run()
+    return record
+  }
+
+  async listAdminAudit(input: {
+    limit?: number
+    since?: string
+    actorFilter?: string
+  }): Promise<AdminAuditRecord[]> {
+    const conditions: string[] = []
+    const binds: unknown[] = []
+    if (input.actorFilter) {
+      conditions.push('actor = ?')
+      binds.push(input.actorFilter)
+    }
+    if (input.since) {
+      conditions.push('created_at >= ?')
+      binds.push(input.since)
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+    const limit = input.limit ?? 100
+    const rows = await this.db
+      .prepare(`SELECT * FROM compute_admin_audit_log ${where} ORDER BY created_at DESC LIMIT ?`)
+      .bind(...binds, limit)
+      .all<Record<string, unknown>>()
+    return rows.results.map((row) => ({
+      id: stringValue(row.id),
+      actor: stringValue(row.actor),
+      action: stringValue(row.action),
+      targetType: stringValue(row.target_type),
+      targetId: stringValue(row.target_id),
+      metadata: parseJsonObject(row.metadata_json),
+      createdAt: stringValue(row.created_at),
+    }))
+  }
+
   private async listModelQuality(): Promise<ModelQualityRecord[]> {
     const channels = await this.listChannels()
     return channels.flatMap((channel) =>
@@ -1295,6 +1381,16 @@ function parseJsonArray(value: unknown): string[] {
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
   } catch {
     return []
+  }
+}
+
+function parseJsonObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'string' || value.length === 0) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {}
+  } catch {
+    return {}
   }
 }
 

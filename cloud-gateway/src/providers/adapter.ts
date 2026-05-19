@@ -22,6 +22,7 @@ export interface ProviderAdapter {
     body: Record<string, unknown>
     model: string
     upstreamApiKey: string
+    baseUrl?: string | null
     stream: boolean
   }): AdapterUpstreamRequest
 

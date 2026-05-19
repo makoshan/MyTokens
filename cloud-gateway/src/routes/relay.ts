@@ -55,6 +55,7 @@ export async function relayCompletion(adapter: ProviderAdapter, input: RelayComm
     body: input.body,
     model,
     upstreamApiKey: input.upstreamApiKey,
+    baseUrl: input.routing.providerToken.baseUrl,
     stream: false,
   })
 
@@ -157,6 +158,7 @@ export async function relayCompletionStream(
     body: input.body,
     model,
     upstreamApiKey: input.upstreamApiKey,
+    baseUrl: input.routing.providerToken.baseUrl,
     stream: true,
   })
 

@@ -15,7 +15,7 @@ enabled = true
 binding = "DB"
 database_name = "mykey-compute-gateway"
 # Replace after running: wrangler d1 create mykey-compute-gateway
-database_id = "replace-with-cloudflare-d1-id"
+database_id = "d9cfa3b8-b84d-44ff-9e69-2a2b7da179ed"
 migrations_dir = "migrations"
 
 [[durable_objects.bindings]]

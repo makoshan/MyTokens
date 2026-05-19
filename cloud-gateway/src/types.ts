@@ -42,6 +42,7 @@ export interface ProviderTokenSummary {
   id: string
   provider: string
   adapter: string
+  baseUrl?: string | null
   status: ProviderTokenStatus
   exhaustedUntil: string | null
   successCount?: number
@@ -66,6 +67,16 @@ export interface ResolvedRoute {
   routingRule: RoutingRule
   providerToken: ProviderTokenSummary
   actualProviderModel: string
+}
+
+export interface AdminAuditRecord {
+  id: string
+  actor: string
+  action: string
+  targetType: string
+  targetId: string
+  metadata: Record<string, unknown>
+  createdAt: string
 }
 
 export type CreditRequestStatus = 'pending' | 'approved' | 'rejected'

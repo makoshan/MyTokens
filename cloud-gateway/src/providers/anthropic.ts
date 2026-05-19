@@ -71,12 +71,13 @@ export function parseAnthropicStreamEventUsage(eventBlock: string): PartialProvi
 export const anthropicAdapter: ProviderAdapter = {
   name: 'anthropic',
   endpoint: '/v1/messages',
-  buildUpstreamRequest({ body, model, upstreamApiKey, stream }) {
+  buildUpstreamRequest({ body, model, upstreamApiKey, baseUrl, stream }) {
     const upstreamBody: Record<string, unknown> = { ...body, model }
     if (stream) upstreamBody.stream = true
     if (upstreamBody.max_tokens === undefined) upstreamBody.max_tokens = 1024
+    const host = (baseUrl ?? 'https://api.anthropic.com').replace(/\/$/, '')
     return {
-      url: 'https://api.anthropic.com/v1/messages',
+      url: `${host}/v1/messages`,
       headers: {
         'x-api-key': upstreamApiKey,
         'anthropic-version': ANTHROPIC_VERSION,

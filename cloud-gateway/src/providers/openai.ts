@@ -84,11 +84,12 @@ function maxOutputTokens(body: Record<string, unknown>): number {
 export const openAIAdapter: ProviderAdapter = {
   name: 'openai',
   endpoint: '/v1/responses',
-  buildUpstreamRequest({ body, model, upstreamApiKey, stream }) {
+  buildUpstreamRequest({ body, model, upstreamApiKey, baseUrl, stream }) {
     const upstreamBody: Record<string, unknown> = { ...body, model }
     if (stream) upstreamBody.stream = true
+    const host = (baseUrl ?? 'https://api.openai.com').replace(/\/$/, '')
     return {
-      url: 'https://api.openai.com/v1/responses',
+      url: `${host}/v1/responses`,
       headers: {
         authorization: `Bearer ${upstreamApiKey}`,
         'content-type': 'application/json',

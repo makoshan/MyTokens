@@ -33,6 +33,7 @@ const displayName = args['display-name'] ?? 'Default Account'
 const accountGroup = args['account-group'] ?? 'friends'
 const openaiKey = args['openai-key']
 const anthropicKey = args['anthropic-key']
+const kimiKey = args['kimi-key']
 const initialCredit = Number(args['initial-credit-micro-usd'] ?? 5_000_000)
 
 if (!gatewayUrl || !adminToken) {
@@ -41,8 +42,8 @@ if (!gatewayUrl || !adminToken) {
   exit(1)
 }
 
-if (!openaiKey && !anthropicKey) {
-  console.error('Provide at least one of --openai-key or --anthropic-key.')
+if (!openaiKey && !anthropicKey && !kimiKey) {
+  console.error('Provide at least one of --openai-key, --anthropic-key, or --kimi-key.')
   exit(1)
 }
 
@@ -78,8 +79,12 @@ const account = await adminFetch('/admin/accounts', {
   body: JSON.stringify({
     display_name: displayName,
     account_group: accountGroup,
-    default_provider: openaiKey ? 'openai' : 'anthropic',
-    default_model: openaiKey ? 'gpt-4.1-mini' : 'claude-3-5-sonnet',
+    default_provider: openaiKey ? 'openai' : anthropicKey ? 'anthropic' : 'kimi',
+    default_model: openaiKey
+      ? 'gpt-4.1-mini'
+      : anthropicKey
+        ? 'claude-3-5-sonnet'
+        : 'kimi-for-coding',
   }),
 })
 const accountId = account.id
@@ -179,6 +184,53 @@ if (anthropicKey) {
   })
 }
 
+if (kimiKey) {
+  console.log('> Uploading Kimi provider token + price book + routing rule...')
+  await adminFetch('/admin/provider-tokens', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: 'tok-kimi-default',
+      provider: 'kimi',
+      adapter: 'anthropic',
+      base_url: 'https://api.kimi.com/coding',
+      label: 'kimi-bootstrap',
+      plaintext: kimiKey,
+      models: ['kimi-for-coding'],
+      priority: 1,
+      weight: 10,
+    }),
+  })
+  // Kimi Code is subscription-billed; upstream cost is sunk. Set sell price
+  // arbitrarily (here matches Anthropic Sonnet) so the gateway's reservation +
+  // settle paths still work for friends sharing the subscription.
+  await adminFetch('/admin/price-book', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: 'price-kimi-for-coding',
+      provider: 'kimi',
+      model: 'kimi-for-coding',
+      version: 1,
+      sell_input_micro_usd_per_1m_tokens: 4_500_000,
+      sell_output_micro_usd_per_1m_tokens: 22_500_000,
+      upstream_input_micro_usd_per_1m_tokens: 1,
+      upstream_output_micro_usd_per_1m_tokens: 1,
+    }),
+  })
+  await adminFetch('/admin/routing-rules', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: 'route-kimi-for-coding',
+      account_group: accountGroup,
+      requested_model: 'kimi-for-coding',
+      requested_provider: 'anthropic',
+      provider_token_id: 'tok-kimi-default',
+      actual_provider_model: 'kimi-for-coding',
+      priority: 1,
+      weight: 10,
+    }),
+  })
+}
+
 console.log('> Minting first API key...')
 const apiKey = await adminFetch(`/admin/accounts/${accountId}/api-keys`, {
   method: 'POST',
@@ -208,5 +260,12 @@ if (anthropicKey) {
     -H "authorization: Bearer ${apiKey.raw_key}" \\
     -H "content-type: application/json" \\
     -d '{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}],"max_tokens":64}'`)
+}
+if (kimiKey) {
+  console.log(`  curl ${gatewayUrl}/v1/messages \\
+    -H "authorization: Bearer ${apiKey.raw_key}" \\
+    -H "content-type: application/json" \\
+    -d '{"model":"kimi-for-coding","messages":[{"role":"user","content":"hi"}],"max_tokens":64}'`)
+  console.log(`\nFor Claude Code: ANTHROPIC_BASE_URL=${gatewayUrl} ANTHROPIC_API_KEY=${apiKey.raw_key} claude`)
 }
 console.log(`\nBalance:  curl ${gatewayUrl}/v1/balance -H "authorization: Bearer ${apiKey.raw_key}"`)
