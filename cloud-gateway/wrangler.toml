@@ -1,0 +1,17 @@
+name = "mykey-compute-gateway"
+main = "src/index.ts"
+compatibility_date = "2026-05-19"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mykey-compute-gateway"
+database_id = "replace-with-cloudflare-d1-id"
+
+[[durable_objects.bindings]]
+name = "ACCOUNT_DO"
+class_name = "AccountDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AccountDurableObject"]
