@@ -120,6 +120,39 @@ curl -N "$GATEWAY_URL/v1/responses" \
   -d '{"model":"gpt-4.1-mini","input":"hello","stream":true}'
 ```
 
+## 7b. Lock the admin control plane to your IPs
+
+By default `/admin/*` is reachable from anywhere with a valid `ADMIN_TOKEN`.
+A leaked token is then a full takeover. Lock down by setting
+`ADMIN_IP_ALLOWLIST` to a comma-separated list of IPv4 addresses or CIDR
+blocks before the next deploy:
+
+```bash
+# Single office IP
+npx wrangler deploy --var ADMIN_IP_ALLOWLIST:203.0.113.5
+
+# Office subnet + bastion
+npx wrangler deploy --var ADMIN_IP_ALLOWLIST:203.0.113.0/24,198.51.100.42
+```
+
+Or persist it in `wrangler.toml`'s `[vars]` block and redeploy.
+
+Behavior:
+- Empty / unset → no IP enforcement (dev convenience). Do not ship to
+  production this way.
+- Non-empty → request `cf-connecting-ip` (Cloudflare-provided) must match
+  one of the entries. Else the request returns `403 admin_ip_denied`
+  before the admin token is even checked, so the rejection does not leak
+  whether `ADMIN_TOKEN` is configured.
+- Falls back to `x-forwarded-for[0]` only when `cf-connecting-ip` is
+  absent. Behind Cloudflare this header is always set, so the fallback is
+  for self-hosted / local dev.
+
+**Emergency unlock** (if you allowlist yourself out): edit the var via
+`wrangler deploy --var ADMIN_IP_ALLOWLIST:""` from any network — the
+`wrangler` CLI uses Cloudflare API auth (your account token), not the
+gateway's `ADMIN_TOKEN`, so the lock cannot brick you.
+
 ## 8. Common operational actions
 
 ```bash

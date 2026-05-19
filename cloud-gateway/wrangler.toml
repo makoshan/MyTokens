@@ -8,6 +8,12 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 PUBLIC_GATEWAY_URL = "https://api.mykey.example"
 
+# Comma-separated IPv4 / CIDR list that may reach /admin/*. Empty value =
+# unrestricted (dev). Production deploys MUST narrow this — e.g.
+# "203.0.113.5,10.0.0.0/24" — so a leaked admin token alone cannot drive
+# the control plane.
+ADMIN_IP_ALLOWLIST = ""
+
 [observability]
 enabled = true
 

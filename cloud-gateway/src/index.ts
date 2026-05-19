@@ -1,3 +1,4 @@
+import { isAdminIpAllowed } from './admin-ip.js'
 import { recordAuditAdminAction } from './audit.js'
 import { createApiKey, registerApiKey, verifyApiKey } from './auth/api-keys.js'
 import { AccountBalance } from './billing/account-do.js'
@@ -24,6 +25,7 @@ export interface GatewayEnv {
   DB?: D1Database
   SERVER_PEPPER?: string
   ADMIN_TOKEN?: string
+  ADMIN_IP_ALLOWLIST?: string
   PUBLIC_GATEWAY_URL?: string
   MASTER_KEY_V1?: string
 }
@@ -32,6 +34,7 @@ export interface GatewayAppOptions {
   store?: GatewayStore
   pepper?: string
   adminToken?: string
+  adminIpAllowlist?: string[] | string
   baseUrl?: string
   now?: () => string
   masterKeys?: Record<string, Uint8Array>
@@ -118,7 +121,17 @@ async function authenticateBuyer(
   return { accountId: result.accountId, apiKeyId: result.apiKey.id }
 }
 
-async function requireAdmin(request: Request, adminToken: string | undefined): Promise<void> {
+async function requireAdmin(
+  request: Request,
+  adminToken: string | undefined,
+  allowlist: string[] | string | null | undefined
+): Promise<void> {
+  const ipCheck = isAdminIpAllowed({ request, allowlist: allowlist ?? null })
+  if (!ipCheck.allowed) {
+    // Fail fast on IP before touching token state so the rejection does not
+    // leak whether ADMIN_TOKEN is even configured.
+    throw new GatewayError('admin_ip_denied', 403)
+  }
   if (!adminToken) throw new GatewayError('admin_not_configured', 500)
   if (bearerToken(request) !== adminToken) throw new GatewayError('admin_auth_required', 401)
 }
@@ -327,6 +340,7 @@ async function handleRequest(
   const store = getStore(options, env)
   const pepper = options.pepper ?? env?.SERVER_PEPPER
   const adminToken = options.adminToken ?? env?.ADMIN_TOKEN
+  const adminIpAllowlist = options.adminIpAllowlist ?? env?.ADMIN_IP_ALLOWLIST ?? null
 
   if (url.pathname === '/health') {
     return json({ ok: true, service: 'mykey-compute-gateway' })
@@ -514,7 +528,7 @@ async function handleRequest(
   }
 
   if (url.pathname === '/admin/accounts' && request.method === 'GET') {
-    await requireAdmin(request, adminToken)
+    await requireAdmin(request, adminToken, adminIpAllowlist)
     const accounts = await store.listAccounts()
     return json({
       data: accounts.map((account) => ({
@@ -533,7 +547,7 @@ async function handleRequest(
   }
 
   if (url.pathname === '/admin/accounts' && request.method === 'POST') {
-    await requireAdmin(request, adminToken)
+    await requireAdmin(request, adminToken, adminIpAllowlist)
     const body = await readJsonObject(request)
     const account = await store.createAccount({
       id: optionalStringField(body, 'id') ?? `acct_${crypto.randomUUID()}`,
@@ -578,7 +592,7 @@ async function handleRequest(
 
   const manualCreditMatch = /^\/admin\/accounts\/([^/]+)\/manual-credit$/.exec(url.pathname)
   if (manualCreditMatch && request.method === 'POST') {
-    await requireAdmin(request, adminToken)
+    await requireAdmin(request, adminToken, adminIpAllowlist)
     const body = await readJsonObject(request)
     const amount = Number(body.amount_micro_usd)
     if (!Number.isInteger(amount) || amount <= 0) throw new GatewayError('invalid_credit_amount', 400)
@@ -599,7 +613,7 @@ async function handleRequest(
   }
 
   if (url.pathname === '/admin/credit-requests' && request.method === 'GET') {
-    await requireAdmin(request, adminToken)
+    await requireAdmin(request, adminToken, adminIpAllowlist)
     const statusParam = url.searchParams.get('status')
     const statusFilter: CreditRequestStatus | undefined =
       statusParam === 'pending' || statusParam === 'approved' || statusParam === 'rejected' ? statusParam : undefined
@@ -609,7 +623,7 @@ async function handleRequest(
 
   const approveCreditRequestMatch = /^\/admin\/credit-requests\/([^/]+)\/approve$/.exec(url.pathname)
   if (approveCreditRequestMatch && request.method === 'POST') {
-    await requireAdmin(request, adminToken)
+    await requireAdmin(request, adminToken, adminIpAllowlist)
     const existing = await store.getCreditRequest(approveCreditRequestMatch[1])
     if (!existing) throw new GatewayError('credit_request_not_found', 404)
     const result = await store.resolveCreditRequest({
@@ -638,7 +652,7 @@ async function handleRequest(
 
   const rejectCreditRequestMatch = /^\/admin\/credit-requests\/([^/]+)\/reject$/.exec(url.pathname)
   if (rejectCreditRequestMatch && request.method === 'POST') {
-    await requireAdmin(request, adminToken)
+    await requireAdmin(request, adminToken, adminIpAllowlist)
     const existing = await store.getCreditRequest(rejectCreditRequestMatch[1])
     if (!existing) throw new GatewayError('credit_request_not_found', 404)
     const result = await store.resolveCreditRequest({
@@ -667,7 +681,7 @@ async function handleRequest(
 
   const createInviteMatch = /^\/admin\/accounts\/([^/]+)\/invites$/.exec(url.pathname)
   if (createInviteMatch && request.method === 'POST') {
-    await requireAdmin(request, adminToken)
+    await requireAdmin(request, adminToken, adminIpAllowlist)
     const account = await store.getAccount(createInviteMatch[1])
     if (!account) throw new GatewayError('account_not_found', 404)
     const body = await readJsonObject(request).catch(() => ({}))
@@ -706,7 +720,7 @@ async function handleRequest(
 
   const revokeAdminKeyMatch = /^\/admin\/api-keys\/([^/]+)\/revoke$/.exec(url.pathname)
   if (revokeAdminKeyMatch && request.method === 'POST') {
-    await requireAdmin(request, adminToken)
+    await requireAdmin(request, adminToken, adminIpAllowlist)
     const revoked = await store.revokeApiKey(revokeAdminKeyMatch[1], now)
     if (!revoked) throw new GatewayError('api_key_not_found', 404)
     await recordAuditAdminAction(store, {
@@ -727,7 +741,7 @@ async function handleRequest(
 
   const createApiKeyMatch = /^\/admin\/accounts\/([^/]+)\/api-keys$/.exec(url.pathname)
   if (createApiKeyMatch && request.method === 'POST') {
-    await requireAdmin(request, adminToken)
+    await requireAdmin(request, adminToken, adminIpAllowlist)
     if (!pepper) throw new GatewayError('server_pepper_not_configured', 500)
     const account = await store.getAccount(createApiKeyMatch[1])
     if (!account) throw new GatewayError('account_not_found', 404)
@@ -769,7 +783,7 @@ async function handleRequest(
   }
 
   if (url.pathname === '/admin/provider-tokens' && request.method === 'POST') {
-    await requireAdmin(request, adminToken)
+    await requireAdmin(request, adminToken, adminIpAllowlist)
     const body = await readJsonObject(request)
     const id = optionalStringField(body, 'id') ?? `tok_${crypto.randomUUID()}`
     const provider = requireString(body, 'provider')
@@ -822,7 +836,7 @@ async function handleRequest(
   }
 
   if (url.pathname === '/admin/price-book' && request.method === 'POST') {
-    await requireAdmin(request, adminToken)
+    await requireAdmin(request, adminToken, adminIpAllowlist)
     const body = await readJsonObject(request)
     const row: PriceBookRow = {
       id: optionalStringField(body, 'id') ?? `price_${crypto.randomUUID()}`,
@@ -866,7 +880,7 @@ async function handleRequest(
   }
 
   if (url.pathname === '/admin/routing-rules' && request.method === 'POST') {
-    await requireAdmin(request, adminToken)
+    await requireAdmin(request, adminToken, adminIpAllowlist)
     const body = await readJsonObject(request)
     const rule: RoutingRule = {
       id: optionalStringField(body, 'id') ?? `route_${crypto.randomUUID()}`,
@@ -910,7 +924,7 @@ async function handleRequest(
   }
 
   if (url.pathname === '/admin/audit-log' && request.method === 'GET') {
-    await requireAdmin(request, adminToken)
+    await requireAdmin(request, adminToken, adminIpAllowlist)
     const limitParam = url.searchParams.get('limit')
     const sinceParam = url.searchParams.get('since')
     const actorParam = url.searchParams.get('actor')
