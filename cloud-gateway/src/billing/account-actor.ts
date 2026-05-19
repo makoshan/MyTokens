@@ -51,7 +51,14 @@ export interface AccountActor {
 }
 
 export class InProcessAccountActor implements AccountActor {
-  constructor(private readonly balance: AccountBalance) {}
+  constructor(
+    private readonly balance: AccountBalance,
+    options?: { rpmLimit?: number | null }
+  ) {
+    if (options?.rpmLimit !== undefined) {
+      balance.setRpmLimit(options.rpmLimit ?? null)
+    }
+  }
 
   async reserve(input: ReserveInput): Promise<Reservation> {
     return this.balance.reserve(input)

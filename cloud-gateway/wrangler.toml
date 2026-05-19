@@ -14,6 +14,10 @@ PUBLIC_GATEWAY_URL = "https://api.mykey.example"
 # the control plane.
 ADMIN_IP_ALLOWLIST = ""
 
+# Per-account rate limit (requests per minute) enforced inside the Account
+# Durable Object. Empty / unset = no limit. Counter survives DO hibernation.
+ACCOUNT_RPM_LIMIT = ""
+
 [observability]
 enabled = true
 

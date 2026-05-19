@@ -95,7 +95,13 @@ export class AccountDurableObject {
     if (!accountId) return failure('account_id_required', 400)
 
     try {
-      const balance = await this.ensureHydrated(accountId, body.bootstrap as { balanceMicroUsd: number } | undefined)
+      const bootstrap = body.bootstrap as
+        | { balanceMicroUsd: number; rpmLimit?: number | null }
+        | undefined
+      const balance = await this.ensureHydrated(accountId, bootstrap)
+      if (bootstrap && 'rpmLimit' in bootstrap) {
+        balance.setRpmLimit(bootstrap.rpmLimit ?? null)
+      }
       switch (method) {
         case 'reserve': {
           const input = body as unknown as ReserveDOInput
@@ -138,7 +144,10 @@ export class AccountDurableObject {
     }
   }
 
-  private async ensureHydrated(accountId: string, bootstrap: { balanceMicroUsd: number } | undefined): Promise<AccountBalance> {
+  private async ensureHydrated(
+    accountId: string,
+    bootstrap: { balanceMicroUsd: number; rpmLimit?: number | null } | undefined
+  ): Promise<AccountBalance> {
     if (this.balance) return this.balance
     if (this.hydrationLock) await this.hydrationLock
     if (this.balance) return this.balance

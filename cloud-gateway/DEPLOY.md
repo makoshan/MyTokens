@@ -153,6 +153,27 @@ Behavior:
 `wrangler` CLI uses Cloudflare API auth (your account token), not the
 gateway's `ADMIN_TOKEN`, so the lock cannot brick you.
 
+## 7c. Per-account rate limit
+
+The Account Durable Object enforces a sliding 60-second window on
+reserve calls so a single account cannot drown the relay path. Set the
+ceiling globally:
+
+```bash
+# 60 requests per minute per account
+npx wrangler deploy --var ACCOUNT_RPM_LIMIT:60
+```
+
+- Empty / unset → no limit (default).
+- Counter survives DO hibernation (persisted in storage alongside
+  balance), so restart cannot accidentally let a flood through.
+- `429` responses are OpenAI-compatible
+  (`{ "error": { "code": "account_rate_limited", "type": "rate_limit_error" } }`)
+  so SDKs that auto-retry on 429 already behave correctly.
+- Per-account overrides (different limit per buyer) are a follow-up
+  needing a new D1 column; for v1 alpha a single global ceiling is
+  enough.
+
 ## 8. Common operational actions
 
 ```bash

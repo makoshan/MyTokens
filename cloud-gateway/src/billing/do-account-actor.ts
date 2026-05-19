@@ -15,6 +15,7 @@ export interface DurableObjectAccountActorInput {
   stub: DurableObjectAccountStub
   accountId: string
   bootstrapBalanceMicroUsd: number
+  rpmLimit?: number | null
 }
 
 /**
@@ -29,11 +30,13 @@ export class DurableObjectAccountActor implements AccountActor {
   private readonly stub: DurableObjectAccountStub
   private readonly accountId: string
   private readonly bootstrapBalanceMicroUsd: number
+  private readonly rpmLimit: number | null
 
   constructor(input: DurableObjectAccountActorInput) {
     this.stub = input.stub
     this.accountId = input.accountId
     this.bootstrapBalanceMicroUsd = input.bootstrapBalanceMicroUsd
+    this.rpmLimit = input.rpmLimit ?? null
   }
 
   async reserve(input: ReserveInput): Promise<Reservation> {
@@ -63,7 +66,10 @@ export class DurableObjectAccountActor implements AccountActor {
   private async call<T>(method: string, payload: object): Promise<T> {
     const body = {
       accountId: this.accountId,
-      bootstrap: { balanceMicroUsd: this.bootstrapBalanceMicroUsd },
+      bootstrap: {
+        balanceMicroUsd: this.bootstrapBalanceMicroUsd,
+        rpmLimit: this.rpmLimit,
+      },
       ...payload,
     }
     const response = await this.stub.fetch(`https://account-do/${method}`, {

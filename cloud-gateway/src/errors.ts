@@ -10,6 +10,13 @@ export class GatewayError extends Error {
   }
 }
 
+function errorTypeForStatus(status: number, code: string): string {
+  if (status === 429) return 'rate_limit_error'
+  if (status === 402) return 'insufficient_quota'
+  if (status === 401 || status === 403) return code === 'admin_ip_denied' ? 'permission_denied' : 'authentication_error'
+  return 'mykey_gateway_error'
+}
+
 export function toErrorResponse(error: unknown): Response {
   if (error instanceof GatewayError) {
     return Response.json(
@@ -17,7 +24,7 @@ export function toErrorResponse(error: unknown): Response {
         error: {
           code: error.code,
           message: error.message,
-          type: 'mykey_gateway_error',
+          type: errorTypeForStatus(error.status, error.code),
         },
       },
       { status: error.status }

@@ -38,6 +38,7 @@ export interface GatewayEnv {
   PUBLIC_GATEWAY_URL?: string
   MASTER_KEY_V1?: string
   ACCOUNT_DO?: GatewayDurableObjectNamespace
+  ACCOUNT_RPM_LIMIT?: string
 }
 
 export interface GatewayAppOptions {
@@ -45,6 +46,7 @@ export interface GatewayAppOptions {
   pepper?: string
   adminToken?: string
   adminIpAllowlist?: string[] | string
+  accountRpmLimit?: number | null
   baseUrl?: string
   now?: () => string
   masterKeys?: Record<string, Uint8Array>
@@ -261,11 +263,19 @@ async function handleRelayRoute(
     throw new GatewayError('provider_token_unavailable', 503)
   }
 
+  const envRpmLimit = env?.ACCOUNT_RPM_LIMIT ? Number(env.ACCOUNT_RPM_LIMIT) : NaN
+  const rpmLimit =
+    options.accountRpmLimit !== undefined
+      ? options.accountRpmLimit
+      : Number.isFinite(envRpmLimit) && envRpmLimit > 0
+        ? envRpmLimit
+        : null
   const balance = new AccountBalance({
     accountId: accountRecord.id,
     balanceMicroUsd: accountRecord.balanceMicroUsd,
+    rpmLimit,
   })
-  const inProcessActor = new InProcessAccountActor(balance)
+  const inProcessActor = new InProcessAccountActor(balance, { rpmLimit })
   // env.ACCOUNT_DO is bound in production; tests pass options.store with no
   // env and stay on the in-process actor (no behavior change).
   const account: AccountActor = env?.ACCOUNT_DO
@@ -273,6 +283,7 @@ async function handleRelayRoute(
         stub: env.ACCOUNT_DO.get(env.ACCOUNT_DO.idFromName(accountRecord.id)),
         accountId: accountRecord.id,
         bootstrapBalanceMicroUsd: accountRecord.balanceMicroUsd,
+        rpmLimit,
       })
     : inProcessActor
   const requestId = `req_${crypto.randomUUID()}`

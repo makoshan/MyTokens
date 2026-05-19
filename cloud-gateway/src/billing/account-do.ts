@@ -32,7 +32,11 @@ export interface AccountBalanceState {
   reservations: Reservation[]
   idempotencyResults: Array<{ key: string; entry: LedgerEntry }>
   ledger: LedgerEntry[]
+  rpmWindowStartMs?: number
+  rpmCountInWindow?: number
 }
+
+export const RATE_LIMIT_WINDOW_MS = 60_000
 
 export class AccountBalance {
   private balanceMicroUsd: number
@@ -42,10 +46,22 @@ export class AccountBalance {
   private readonly reservations = new Map<string, Reservation>()
   private readonly idempotencyResults = new Map<string, LedgerEntry>()
   readonly ledger: LedgerEntry[] = []
+  private rpmLimit: number | null = null
+  private rpmWindowStartMs = 0
+  private rpmCountInWindow = 0
 
-  constructor(input: { accountId: string; balanceMicroUsd?: number }) {
+  constructor(input: { accountId: string; balanceMicroUsd?: number; rpmLimit?: number | null }) {
     this.accountId = input.accountId
     this.balanceMicroUsd = input.balanceMicroUsd ?? 0
+    this.rpmLimit = input.rpmLimit ?? null
+  }
+
+  /**
+   * Operators rotate the limit by updating env (no DO restart). The worker
+   * pushes the latest value on every RPC so the next reserve picks it up.
+   */
+  setRpmLimit(rpmLimit: number | null | undefined): void {
+    this.rpmLimit = rpmLimit ?? null
   }
 
   toState(): AccountBalanceState {
@@ -57,6 +73,8 @@ export class AccountBalance {
       reservations: [...this.reservations.values()],
       idempotencyResults: [...this.idempotencyResults.entries()].map(([key, entry]) => ({ key, entry })),
       ledger: [...this.ledger],
+      rpmWindowStartMs: this.rpmWindowStartMs,
+      rpmCountInWindow: this.rpmCountInWindow,
     }
   }
 
@@ -76,6 +94,8 @@ export class AccountBalance {
     for (const entry of state.ledger) {
       restored.ledger.push(entry)
     }
+    restored.rpmWindowStartMs = state.rpmWindowStartMs ?? 0
+    restored.rpmCountInWindow = state.rpmCountInWindow ?? 0
     return restored
   }
 
@@ -119,6 +139,18 @@ export class AccountBalance {
     }
     const existing = this.reservations.get(input.reservationId)
     if (existing) return existing
+
+    if (this.rpmLimit != null && this.rpmLimit > 0) {
+      const nowMs = input.now ? Date.parse(input.now) : Date.now()
+      if (nowMs - this.rpmWindowStartMs >= RATE_LIMIT_WINDOW_MS) {
+        this.rpmWindowStartMs = nowMs
+        this.rpmCountInWindow = 0
+      }
+      if (this.rpmCountInWindow >= this.rpmLimit) {
+        throw new GatewayError('account_rate_limited', 429)
+      }
+      this.rpmCountInWindow += 1
+    }
 
     const reservation: Reservation = {
       reservationId: input.reservationId,
