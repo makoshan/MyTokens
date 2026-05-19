@@ -24,6 +24,16 @@ export interface LedgerEntry {
   createdAt: string
 }
 
+export interface AccountBalanceState {
+  accountId: string
+  balanceMicroUsd: number
+  reservedMicroUsd: number
+  status: 'active' | 'paused'
+  reservations: Reservation[]
+  idempotencyResults: Array<{ key: string; entry: LedgerEntry }>
+  ledger: LedgerEntry[]
+}
+
 export class AccountBalance {
   private balanceMicroUsd: number
   private reservedMicroUsd = 0
@@ -36,6 +46,37 @@ export class AccountBalance {
   constructor(input: { accountId: string; balanceMicroUsd?: number }) {
     this.accountId = input.accountId
     this.balanceMicroUsd = input.balanceMicroUsd ?? 0
+  }
+
+  toState(): AccountBalanceState {
+    return {
+      accountId: this.accountId,
+      balanceMicroUsd: this.balanceMicroUsd,
+      reservedMicroUsd: this.reservedMicroUsd,
+      status: this.status,
+      reservations: [...this.reservations.values()],
+      idempotencyResults: [...this.idempotencyResults.entries()].map(([key, entry]) => ({ key, entry })),
+      ledger: [...this.ledger],
+    }
+  }
+
+  static fromState(state: AccountBalanceState): AccountBalance {
+    const restored = new AccountBalance({
+      accountId: state.accountId,
+      balanceMicroUsd: state.balanceMicroUsd,
+    })
+    restored.reservedMicroUsd = state.reservedMicroUsd
+    restored.status = state.status
+    for (const reservation of state.reservations) {
+      restored.reservations.set(reservation.reservationId, reservation)
+    }
+    for (const { key, entry } of state.idempotencyResults) {
+      restored.idempotencyResults.set(key, entry)
+    }
+    for (const entry of state.ledger) {
+      restored.ledger.push(entry)
+    }
+    return restored
   }
 
   snapshot() {
@@ -161,4 +202,3 @@ export class AccountBalance {
   }
 }
 
-export class AccountDurableObject extends AccountBalance {}

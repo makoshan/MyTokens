@@ -1,8 +1,11 @@
 import { isAdminIpAllowed } from './admin-ip.js'
 import { recordAuditAdminAction } from './audit.js'
 import { createApiKey, registerApiKey, verifyApiKey } from './auth/api-keys.js'
+import type { AccountActor } from './billing/account-actor.js'
 import { InProcessAccountActor } from './billing/account-actor.js'
 import { AccountBalance } from './billing/account-do.js'
+import { AccountDurableObject } from './billing/account-do-class.js'
+import { DurableObjectAccountActor } from './billing/do-account-actor.js'
 import { D1GatewayStore, type D1Database, type GatewayStore } from './db/store.js'
 import { GatewayError, toErrorResponse } from './errors.js'
 import { anthropicAdapter } from './providers/anthropic.js'
@@ -20,7 +23,12 @@ import type {
 } from './types.js'
 import { decryptProviderToken, encryptProviderToken } from './vault/provider-tokens.js'
 
-export class AccountDurableObject {}
+export { AccountDurableObject }
+
+export interface GatewayDurableObjectNamespace {
+  idFromName(name: string): { toString(): string } & object
+  get(id: object): { fetch(input: Request | string, init?: RequestInit): Promise<Response> }
+}
 
 export interface GatewayEnv {
   DB?: D1Database
@@ -29,6 +37,7 @@ export interface GatewayEnv {
   ADMIN_IP_ALLOWLIST?: string
   PUBLIC_GATEWAY_URL?: string
   MASTER_KEY_V1?: string
+  ACCOUNT_DO?: GatewayDurableObjectNamespace
 }
 
 export interface GatewayAppOptions {
@@ -256,7 +265,16 @@ async function handleRelayRoute(
     accountId: accountRecord.id,
     balanceMicroUsd: accountRecord.balanceMicroUsd,
   })
-  const account = new InProcessAccountActor(balance)
+  const inProcessActor = new InProcessAccountActor(balance)
+  // env.ACCOUNT_DO is bound in production; tests pass options.store with no
+  // env and stay on the in-process actor (no behavior change).
+  const account: AccountActor = env?.ACCOUNT_DO
+    ? new DurableObjectAccountActor({
+        stub: env.ACCOUNT_DO.get(env.ACCOUNT_DO.idFromName(accountRecord.id)),
+        accountId: accountRecord.id,
+        bootstrapBalanceMicroUsd: accountRecord.balanceMicroUsd,
+      })
+    : inProcessActor
   const requestId = `req_${crypto.randomUUID()}`
   const upstreamApiKey = await decryptProviderToken(providerToken, getMasterKeys(options, env))
   const priceBook = await store.listPriceBook()
@@ -277,9 +295,10 @@ async function handleRelayRoute(
         fetchImpl,
       })
       const finalizePersist = streamResult.finalize().then(async (final) => {
+        const snap = await account.snapshot()
         await store.persistRelayResult({
           accountId: accountRecord.id,
-          balanceMicroUsd: balance.snapshot().balanceMicroUsd,
+          balanceMicroUsd: snap.balanceMicroUsd,
           requestLog: final.log,
           now,
         })
@@ -305,9 +324,10 @@ async function handleRelayRoute(
       now,
       fetchImpl,
     })
+    const snap = await account.snapshot()
     await store.persistRelayResult({
       accountId: accountRecord.id,
-      balanceMicroUsd: balance.snapshot().balanceMicroUsd,
+      balanceMicroUsd: snap.balanceMicroUsd,
       requestLog: result.log,
       now,
     })
