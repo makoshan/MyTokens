@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { InProcessAccountActor } from '../src/billing/account-actor.js'
 import { AccountBalance } from '../src/billing/account-do.js'
 import { openAIAdapter } from '../src/providers/openai.js'
 import { relayCompletion } from '../src/routes/relay.js'
 
 test('OpenAI responses relay reserves before upstream and settles from returned usage', async () => {
-  const account = new AccountBalance({ accountId: 'acct-1', balanceMicroUsd: 10_000 })
+  const balance = new AccountBalance({ accountId: 'acct-1', balanceMicroUsd: 10_000 })
+  const account = new InProcessAccountActor(balance)
   const calls: Array<{ url: string; body: unknown; authorization: string | null }> = []
 
   const result = await relayCompletion(openAIAdapter, {
@@ -69,7 +71,7 @@ test('OpenAI responses relay reserves before upstream and settles from returned 
 
   assert.equal(result.status, 200)
   assert.equal(result.log.sellCostMicroUsd, 50)
-  assert.equal(account.snapshot().balanceMicroUsd, 9_950)
+  assert.equal(balance.snapshot().balanceMicroUsd, 9_950)
   assert.equal(calls[0].authorization, 'Bearer sk-upstream-secret')
   assert.deepEqual(calls[0].body, { model: 'gpt-4.1-mini', input: 'hello', max_output_tokens: 10 })
 })

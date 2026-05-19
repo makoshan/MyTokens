@@ -1,6 +1,7 @@
 import { isAdminIpAllowed } from './admin-ip.js'
 import { recordAuditAdminAction } from './audit.js'
 import { createApiKey, registerApiKey, verifyApiKey } from './auth/api-keys.js'
+import { InProcessAccountActor } from './billing/account-actor.js'
 import { AccountBalance } from './billing/account-do.js'
 import { D1GatewayStore, type D1Database, type GatewayStore } from './db/store.js'
 import { GatewayError, toErrorResponse } from './errors.js'
@@ -251,10 +252,11 @@ async function handleRelayRoute(
     throw new GatewayError('provider_token_unavailable', 503)
   }
 
-  const account = new AccountBalance({
+  const balance = new AccountBalance({
     accountId: accountRecord.id,
     balanceMicroUsd: accountRecord.balanceMicroUsd,
   })
+  const account = new InProcessAccountActor(balance)
   const requestId = `req_${crypto.randomUUID()}`
   const upstreamApiKey = await decryptProviderToken(providerToken, getMasterKeys(options, env))
   const priceBook = await store.listPriceBook()
@@ -277,7 +279,7 @@ async function handleRelayRoute(
       const finalizePersist = streamResult.finalize().then(async (final) => {
         await store.persistRelayResult({
           accountId: accountRecord.id,
-          balanceMicroUsd: account.snapshot().balanceMicroUsd,
+          balanceMicroUsd: balance.snapshot().balanceMicroUsd,
           requestLog: final.log,
           now,
         })
@@ -305,7 +307,7 @@ async function handleRelayRoute(
     })
     await store.persistRelayResult({
       accountId: accountRecord.id,
-      balanceMicroUsd: account.snapshot().balanceMicroUsd,
+      balanceMicroUsd: balance.snapshot().balanceMicroUsd,
       requestLog: result.log,
       now,
     })

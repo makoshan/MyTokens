@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { InProcessAccountActor } from '../src/billing/account-actor.js'
 import { AccountBalance } from '../src/billing/account-do.js'
 import { openAIAdapter } from '../src/providers/openai.js'
 import { relayCompletionStream } from '../src/routes/relay.js'
+
+function makeAccount(input: { accountId: string; balanceMicroUsd: number }) {
+  const balance = new AccountBalance(input)
+  const account = new InProcessAccountActor(balance)
+  return { balance, account }
+}
 
 const routing = {
   routingRule: {
@@ -71,7 +78,7 @@ async function readAllText(stream: ReadableStream<Uint8Array>): Promise<string> 
 }
 
 test('streaming relay forwards SSE bytes and settles using final usage event', async () => {
-  const account = new AccountBalance({ accountId: 'acct-1', balanceMicroUsd: 10_000 })
+  const { balance, account } = makeAccount({ accountId: 'acct-1', balanceMicroUsd: 10_000 })
   const upstreamChunks = [
     'event: response.created\n',
     'data: {"type":"response.created","response":{"id":"resp-1"}}\n\n',
@@ -113,12 +120,12 @@ test('streaming relay forwards SSE bytes and settles using final usage event', a
   assert.equal(final.settledWithEstimate, false)
   assert.deepEqual(final.usage, { inputTokens: 100, outputTokens: 200, totalTokens: 300 })
   assert.equal(final.log.sellCostMicroUsd, 50)
-  assert.equal(account.snapshot().balanceMicroUsd, 9_950)
-  assert.equal(account.snapshot().reservedMicroUsd, 0)
+  assert.equal(balance.snapshot().balanceMicroUsd, 9_950)
+  assert.equal(balance.snapshot().reservedMicroUsd, 0)
 })
 
 test('streaming relay fails closed and settles with the reservation estimate when no usage event is emitted', async () => {
-  const account = new AccountBalance({ accountId: 'acct-2', balanceMicroUsd: 10_000 })
+  const { balance, account } = makeAccount({ accountId: 'acct-2', balanceMicroUsd: 10_000 })
   const upstreamChunks = [
     'event: response.created\n',
     'data: {"type":"response.created","response":{"id":"resp-2"}}\n\n',
@@ -145,12 +152,12 @@ test('streaming relay fails closed and settles with the reservation estimate whe
   assert.equal(final.usage, null)
   assert.equal(final.log.errorCode, 'usage_unavailable')
   assert.ok(final.log.sellCostMicroUsd! > 0)
-  assert.equal(account.snapshot().reservedMicroUsd, 0)
-  assert.equal(account.snapshot().balanceMicroUsd, 10_000 - final.log.sellCostMicroUsd!)
+  assert.equal(balance.snapshot().reservedMicroUsd, 0)
+  assert.equal(balance.snapshot().balanceMicroUsd, 10_000 - final.log.sellCostMicroUsd!)
 })
 
 test('streaming relay refunds the reservation and throws when upstream returns a non-2xx status', async () => {
-  const account = new AccountBalance({ accountId: 'acct-3', balanceMicroUsd: 10_000 })
+  const { balance, account } = makeAccount({ accountId: 'acct-3', balanceMicroUsd: 10_000 })
 
   await assert.rejects(
     relayCompletionStream(openAIAdapter, {
@@ -175,12 +182,12 @@ test('streaming relay refunds the reservation and throws when upstream returns a
     }
   )
 
-  assert.equal(account.snapshot().reservedMicroUsd, 0)
-  assert.equal(account.snapshot().balanceMicroUsd, 10_000)
+  assert.equal(balance.snapshot().reservedMicroUsd, 0)
+  assert.equal(balance.snapshot().balanceMicroUsd, 10_000)
 })
 
 test('streaming relay reassembles SSE events split across chunk boundaries', async () => {
-  const account = new AccountBalance({ accountId: 'acct-4', balanceMicroUsd: 10_000 })
+  const { account } = makeAccount({ accountId: 'acct-4', balanceMicroUsd: 10_000 })
   const upstreamChunks = [
     'event: response.compl',
     'eted\ndata: {"type":"response.completed","response":{"id":"resp-4","usage":{"in',

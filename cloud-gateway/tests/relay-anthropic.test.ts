@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { InProcessAccountActor } from '../src/billing/account-actor.js'
 import { AccountBalance } from '../src/billing/account-do.js'
 import { anthropicAdapter } from '../src/providers/anthropic.js'
 import { relayCompletion, relayCompletionStream } from '../src/routes/relay.js'
+
+function makeAccount(input: { accountId: string; balanceMicroUsd: number }) {
+  const balance = new AccountBalance(input)
+  const account = new InProcessAccountActor(balance)
+  return { balance, account }
+}
 
 const routing = {
   routingRule: {
@@ -71,7 +78,7 @@ async function readAllText(stream: ReadableStream<Uint8Array>): Promise<string> 
 }
 
 test('Anthropic relay calls /v1/messages with x-api-key and settles from non-stream usage', async () => {
-  const account = new AccountBalance({ accountId: 'acct-1', balanceMicroUsd: 1_000_000 })
+  const { balance, account } = makeAccount({ accountId: 'acct-1', balanceMicroUsd: 1_000_000 })
   const calls: Array<{ url: string; xApiKey: string | null; version: string | null; body: Record<string, unknown> }> = []
 
   const result = await relayCompletion(anthropicAdapter, {
@@ -119,11 +126,11 @@ test('Anthropic relay calls /v1/messages with x-api-key and settles from non-str
   assert.equal(result.log.outputTokens, 25)
   // 40 input * 3 + 25 output * 15 = 120 + 375 = 495 micro-USD
   assert.equal(result.log.sellCostMicroUsd, 495)
-  assert.equal(account.snapshot().balanceMicroUsd, 1_000_000 - 495)
+  assert.equal(balance.snapshot().balanceMicroUsd, 1_000_000 - 495)
 })
 
 test('Anthropic streaming relay merges input_tokens from message_start and output_tokens from message_delta', async () => {
-  const account = new AccountBalance({ accountId: 'acct-2', balanceMicroUsd: 1_000_000 })
+  const { balance, account } = makeAccount({ accountId: 'acct-2', balanceMicroUsd: 1_000_000 })
   const upstreamChunks = [
     'event: message_start\n',
     'data: {"type":"message_start","message":{"id":"msg_2","model":"claude-3-5-sonnet","usage":{"input_tokens":50,"output_tokens":0}}}\n\n',
@@ -162,11 +169,11 @@ test('Anthropic streaming relay merges input_tokens from message_start and outpu
   // 50 * 3 + 30 * 15 = 150 + 450 = 600
   assert.equal(final.log.sellCostMicroUsd, 600)
   assert.equal(final.log.endpoint, '/v1/messages')
-  assert.equal(account.snapshot().balanceMicroUsd, 1_000_000 - 600)
+  assert.equal(balance.snapshot().balanceMicroUsd, 1_000_000 - 600)
 })
 
 test('Anthropic streaming relay fails closed when only one half of usage is reported', async () => {
-  const account = new AccountBalance({ accountId: 'acct-3', balanceMicroUsd: 1_000_000 })
+  const { account } = makeAccount({ accountId: 'acct-3', balanceMicroUsd: 1_000_000 })
   const upstreamChunks = [
     'event: message_start\n',
     'data: {"type":"message_start","message":{"id":"msg_3","usage":{"input_tokens":12,"output_tokens":0}}}\n\n',
@@ -200,7 +207,7 @@ test('Anthropic streaming relay fails closed when only one half of usage is repo
 })
 
 test('Anthropic relay refunds the reservation and throws when upstream returns non-2xx', async () => {
-  const account = new AccountBalance({ accountId: 'acct-4', balanceMicroUsd: 1_000_000 })
+  const { balance, account } = makeAccount({ accountId: 'acct-4', balanceMicroUsd: 1_000_000 })
 
   await assert.rejects(
     relayCompletion(anthropicAdapter, {
@@ -229,6 +236,6 @@ test('Anthropic relay refunds the reservation and throws when upstream returns n
     }
   )
 
-  assert.equal(account.snapshot().reservedMicroUsd, 0)
-  assert.equal(account.snapshot().balanceMicroUsd, 1_000_000)
+  assert.equal(balance.snapshot().reservedMicroUsd, 0)
+  assert.equal(balance.snapshot().balanceMicroUsd, 1_000_000)
 })

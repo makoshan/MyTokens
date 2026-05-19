@@ -1,4 +1,4 @@
-import { AccountBalance } from '../billing/account-do.js'
+import type { AccountActor } from '../billing/account-actor.js'
 import { estimateReservation, findPriceRow, priceUsage } from '../billing/pricing.js'
 import { reservationIdForRequest } from '../billing/reservations.js'
 import { GatewayError } from '../errors.js'
@@ -16,7 +16,7 @@ function ceilDiv(numerator: number, denominator: number): number {
 }
 
 interface RelayCommonInput {
-  account: AccountBalance
+  account: AccountActor
   apiKeyId: string
   requestId: string
   body: Record<string, unknown>
@@ -41,7 +41,7 @@ export async function relayCompletion(adapter: ProviderAdapter, input: RelayComm
   })
   const reservationId = reservationIdForRequest(input.requestId)
 
-  input.account.reserve({
+  await input.account.reserve({
     reservationId,
     requestId: input.requestId,
     estimatedMicroUsd: estimate.estimatedMicroUsd,
@@ -67,13 +67,13 @@ export async function relayCompletion(adapter: ProviderAdapter, input: RelayComm
       body: upstream.body,
     })
   } catch (error) {
-    input.account.refund({ reservationId, idempotencyKey: `refund:${input.requestId}`, now: input.now })
+    await input.account.refund({ reservationId, idempotencyKey: `refund:${input.requestId}`, now: input.now })
     throw error
   }
 
   const payload = await response.json().catch(() => null)
   if (!response.ok) {
-    input.account.refund({ reservationId, idempotencyKey: `refund:${input.requestId}`, now: input.now })
+    await input.account.refund({ reservationId, idempotencyKey: `refund:${input.requestId}`, now: input.now })
     throw new GatewayError(`provider_http_${response.status}`, response.status)
   }
 
@@ -86,16 +86,17 @@ export async function relayCompletion(adapter: ProviderAdapter, input: RelayComm
     outputTokens: usage.outputTokens,
     at: input.now,
   })
-  input.account.settle({
+  await input.account.settle({
     reservationId,
     actualMicroUsd: cost.sellCostMicroUsd,
     idempotencyKey: `settle:${input.requestId}`,
     now: input.now,
   })
 
+  const snap = await input.account.snapshot()
   const log: RequestLog = {
     id: input.requestId,
-    accountId: input.account.snapshot().accountId,
+    accountId: snap.accountId,
     apiKeyId: input.apiKeyId,
     providerTokenId: input.routing.providerToken.id,
     routingRuleId: input.routing.routingRule.id,
@@ -144,7 +145,7 @@ export async function relayCompletionStream(
   })
   const reservationId = reservationIdForRequest(input.requestId)
 
-  input.account.reserve({
+  await input.account.reserve({
     reservationId,
     requestId: input.requestId,
     estimatedMicroUsd: estimate.estimatedMicroUsd,
@@ -170,12 +171,12 @@ export async function relayCompletionStream(
       body: upstream.body,
     })
   } catch (error) {
-    input.account.refund({ reservationId, idempotencyKey: `refund:${input.requestId}`, now: input.now })
+    await input.account.refund({ reservationId, idempotencyKey: `refund:${input.requestId}`, now: input.now })
     throw error
   }
 
   if (!response.ok || !response.body) {
-    input.account.refund({ reservationId, idempotencyKey: `refund:${input.requestId}`, now: input.now })
+    await input.account.refund({ reservationId, idempotencyKey: `refund:${input.requestId}`, now: input.now })
     throw new GatewayError(`provider_http_${response.status}`, response.status)
   }
 
@@ -248,15 +249,16 @@ export async function relayCompletionStream(
         ceilDiv(inputTokens * row.upstreamInputMicroUsdPer1MTokens, 1_000_000) +
         ceilDiv(maxOutTokens * row.upstreamOutputMicroUsdPer1MTokens, 1_000_000)
     }
-    input.account.settle({
+    await input.account.settle({
       reservationId,
       actualMicroUsd: sellCostMicroUsd,
       idempotencyKey: `settle:${input.requestId}`,
       now: input.now,
     })
+    const snap = await input.account.snapshot()
     const log: RequestLog = {
       id: input.requestId,
-      accountId: input.account.snapshot().accountId,
+      accountId: snap.accountId,
       apiKeyId: input.apiKeyId,
       providerTokenId: input.routing.providerToken.id,
       routingRuleId: input.routing.routingRule.id,
