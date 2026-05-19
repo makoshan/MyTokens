@@ -2,18 +2,14 @@ import { AccountBalance } from '../billing/account-do.js'
 import { estimateReservation, findPriceRow, priceUsage } from '../billing/pricing.js'
 import { reservationIdForRequest } from '../billing/reservations.js'
 import { GatewayError } from '../errors.js'
-import { parseOpenAIStreamEventUsage, parseOpenAIUsage, type OpenAIUsage } from '../providers/openai.js'
+import {
+  finalizeUsage,
+  mergeUsage,
+  type PartialProviderUsage,
+  type ProviderAdapter,
+  type ProviderUsage,
+} from '../providers/adapter.js'
 import type { PriceBookRow, RequestLog, ResolvedRoute } from '../types.js'
-
-function roughInputTokens(body: Record<string, unknown>): number {
-  const input = body.input ?? body.messages ?? ''
-  return Math.max(1, Math.ceil(JSON.stringify(input).length / 4))
-}
-
-function maxOutputTokens(body: Record<string, unknown>): number {
-  const value = body.max_output_tokens ?? body.max_tokens ?? 256
-  return Math.max(1, Number(value) || 256)
-}
 
 function ceilDiv(numerator: number, denominator: number): number {
   return Math.ceil(numerator / denominator)
@@ -31,14 +27,14 @@ interface RelayCommonInput {
   fetchImpl?: typeof fetch
 }
 
-export async function relayOpenAIResponses(input: RelayCommonInput) {
+export async function relayCompletion(adapter: ProviderAdapter, input: RelayCommonInput) {
   const startedAt = Date.now()
   const provider = input.routing.providerToken.provider
   const model = input.routing.actualProviderModel
   const row = findPriceRow({ priceBook: input.priceBook, provider, model, at: input.now })
   const estimate = estimateReservation({
-    inputTokens: roughInputTokens(input.body),
-    maxOutputTokens: maxOutputTokens(input.body),
+    inputTokens: adapter.estimateInputTokens(input.body),
+    maxOutputTokens: adapter.estimateMaxOutputTokens(input.body),
     inputMicroUsdPer1MTokens: row.sellInputMicroUsdPer1MTokens,
     outputMicroUsdPer1MTokens: row.sellOutputMicroUsdPer1MTokens,
     minimumReserveMicroUsd: 1,
@@ -55,20 +51,19 @@ export async function relayOpenAIResponses(input: RelayCommonInput) {
   })
 
   const fetchImpl = input.fetchImpl ?? fetch
-  const upstreamBody = {
-    ...input.body,
+  const upstream = adapter.buildUpstreamRequest({
+    body: input.body,
     model,
-  }
+    upstreamApiKey: input.upstreamApiKey,
+    stream: false,
+  })
 
   let response: Response
   try {
-    response = await fetchImpl('https://api.openai.com/v1/responses', {
+    response = await fetchImpl(upstream.url, {
       method: 'POST',
-      headers: {
-        authorization: `Bearer ${input.upstreamApiKey}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(upstreamBody),
+      headers: upstream.headers,
+      body: upstream.body,
     })
   } catch (error) {
     input.account.refund({ reservationId, idempotencyKey: `refund:${input.requestId}`, now: input.now })
@@ -81,7 +76,7 @@ export async function relayOpenAIResponses(input: RelayCommonInput) {
     throw new GatewayError(`provider_http_${response.status}`, response.status)
   }
 
-  const usage = parseOpenAIUsage(payload)
+  const usage = adapter.parseUsage(payload)
   const cost = priceUsage({
     priceBook: input.priceBook,
     provider,
@@ -106,7 +101,7 @@ export async function relayOpenAIResponses(input: RelayCommonInput) {
     createdAt: input.now,
     provider,
     model,
-    endpoint: '/v1/responses',
+    endpoint: adapter.endpoint,
     statusCode: response.status,
     latencyMs: Math.max(0, Date.now() - startedAt),
     inputTokens: usage.inputTokens,
@@ -116,11 +111,7 @@ export async function relayOpenAIResponses(input: RelayCommonInput) {
     upstreamCostMicroUsd: cost.upstreamCostMicroUsd,
   }
 
-  return {
-    status: response.status,
-    payload,
-    log,
-  }
+  return { status: response.status, payload, log }
 }
 
 export interface RelayStreamResult {
@@ -128,18 +119,21 @@ export interface RelayStreamResult {
   response: Response
   finalize: () => Promise<{
     log: RequestLog
-    usage: OpenAIUsage | null
+    usage: ProviderUsage | null
     settledWithEstimate: boolean
   }>
 }
 
-export async function relayOpenAIResponsesStream(input: RelayCommonInput): Promise<RelayStreamResult> {
+export async function relayCompletionStream(
+  adapter: ProviderAdapter,
+  input: RelayCommonInput
+): Promise<RelayStreamResult> {
   const startedAt = Date.now()
   const provider = input.routing.providerToken.provider
   const model = input.routing.actualProviderModel
   const row = findPriceRow({ priceBook: input.priceBook, provider, model, at: input.now })
-  const inputTokens = roughInputTokens(input.body)
-  const maxOutTokens = maxOutputTokens(input.body)
+  const inputTokens = adapter.estimateInputTokens(input.body)
+  const maxOutTokens = adapter.estimateMaxOutputTokens(input.body)
   const estimate = estimateReservation({
     inputTokens,
     maxOutputTokens: maxOutTokens,
@@ -159,18 +153,19 @@ export async function relayOpenAIResponsesStream(input: RelayCommonInput): Promi
   })
 
   const fetchImpl = input.fetchImpl ?? fetch
-  const upstreamBody = { ...input.body, model, stream: true }
+  const upstream = adapter.buildUpstreamRequest({
+    body: input.body,
+    model,
+    upstreamApiKey: input.upstreamApiKey,
+    stream: true,
+  })
 
   let response: Response
   try {
-    response = await fetchImpl('https://api.openai.com/v1/responses', {
+    response = await fetchImpl(upstream.url, {
       method: 'POST',
-      headers: {
-        authorization: `Bearer ${input.upstreamApiKey}`,
-        'content-type': 'application/json',
-        accept: 'text/event-stream',
-      },
-      body: JSON.stringify(upstreamBody),
+      headers: upstream.headers,
+      body: upstream.body,
     })
   } catch (error) {
     input.account.refund({ reservationId, idempotencyKey: `refund:${input.requestId}`, now: input.now })
@@ -184,7 +179,7 @@ export async function relayOpenAIResponsesStream(input: RelayCommonInput): Promi
 
   const decoder = new TextDecoder()
   let buffer = ''
-  let finalUsage: OpenAIUsage | null = null
+  let usageState: PartialProviderUsage = {}
 
   const transform = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
@@ -194,16 +189,16 @@ export async function relayOpenAIResponsesStream(input: RelayCommonInput): Promi
       while (boundary >= 0) {
         const eventBlock = buffer.slice(0, boundary)
         buffer = buffer.slice(boundary + 2)
-        const usage = parseOpenAIStreamEventUsage(eventBlock)
-        if (usage) finalUsage = usage
+        const partial = adapter.parseStreamEventUsage(eventBlock)
+        if (partial) usageState = mergeUsage(usageState, partial)
         boundary = buffer.indexOf('\n\n')
       }
     },
     flush() {
       buffer += decoder.decode()
       if (buffer.trim().length > 0) {
-        const usage = parseOpenAIStreamEventUsage(buffer)
-        if (usage) finalUsage = usage
+        const partial = adapter.parseStreamEventUsage(buffer)
+        if (partial) usageState = mergeUsage(usageState, partial)
       }
       buffer = ''
     },
@@ -226,7 +221,8 @@ export async function relayOpenAIResponsesStream(input: RelayCommonInput): Promi
 
   const finalize: RelayStreamResult['finalize'] = async () => {
     await pipePromise
-    let usageForLog: OpenAIUsage
+    const finalUsage = finalizeUsage(usageState)
+    let usageForLog: ProviderUsage
     let sellCostMicroUsd: number
     let upstreamCostMicroUsd: number
     let settledWithEstimate = false
@@ -265,7 +261,7 @@ export async function relayOpenAIResponsesStream(input: RelayCommonInput): Promi
       createdAt: input.now,
       provider,
       model,
-      endpoint: '/v1/responses',
+      endpoint: adapter.endpoint,
       statusCode: response.status,
       latencyMs: Math.max(0, Date.now() - startedAt),
       inputTokens: usageForLog.inputTokens,

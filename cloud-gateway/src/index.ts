@@ -2,8 +2,11 @@ import { createApiKey, registerApiKey, verifyApiKey } from './auth/api-keys.js'
 import { AccountBalance } from './billing/account-do.js'
 import { D1GatewayStore, type D1Database, type GatewayStore } from './db/store.js'
 import { GatewayError, toErrorResponse } from './errors.js'
+import { anthropicAdapter } from './providers/anthropic.js'
+import type { ProviderAdapter } from './providers/adapter.js'
+import { openAIAdapter } from './providers/openai.js'
 import { createDashboardSession, createInviteToken, hashDashboardToken } from './routes/dashboard.js'
-import { relayOpenAIResponses, relayOpenAIResponsesStream } from './routes/openai.js'
+import { relayCompletion, relayCompletionStream } from './routes/relay.js'
 import { resolveRoutingRule } from './routing/router.js'
 import type { PriceBookRow, ProviderTokenSummary, RoutingRule } from './types.js'
 import { decryptProviderToken, encryptProviderToken } from './vault/provider-tokens.js'
@@ -180,6 +183,118 @@ function providerTokenSummariesFromChannels(
   }))
 }
 
+async function handleRelayRoute(
+  adapter: ProviderAdapter,
+  request: Request,
+  options: GatewayAppOptions,
+  env: GatewayEnv | undefined,
+  ctx: GatewayExecutionContext,
+  store: GatewayStore,
+  pepper: string | undefined,
+  now: string
+): Promise<Response> {
+  if (!pepper) throw new GatewayError('server_pepper_not_configured', 500)
+  const { accountId, apiKeyId } = await authenticateBuyer(request, store, pepper, now)
+  const accountRecord = requireActiveAccount(await store.getAccount(accountId))
+  const body = await readJsonObject(request)
+  const requestedModel =
+    typeof body.model === 'string' && body.model.length > 0 ? body.model : accountRecord.defaultModel
+  if (!requestedModel) throw new GatewayError('model_required', 400)
+
+  const routing = resolveRoutingRule({
+    accountGroup: accountRecord.accountGroup,
+    requestedModel,
+    requestedProvider: adapter.name,
+    rules: await store.listRoutingRules(),
+    providerTokens: providerTokenSummariesFromChannels(await store.listProviderTokenSummaries()),
+    now,
+  })
+  if (routing.providerToken.adapter !== adapter.name) {
+    throw new GatewayError('route_provider_adapter_mismatch', 503)
+  }
+  const providerToken = await store.getProviderToken(routing.providerToken.id)
+  if (!providerToken || providerToken.status !== 'active') {
+    throw new GatewayError('provider_token_unavailable', 503)
+  }
+
+  const account = new AccountBalance({
+    accountId: accountRecord.id,
+    balanceMicroUsd: accountRecord.balanceMicroUsd,
+  })
+  const requestId = `req_${crypto.randomUUID()}`
+  const upstreamApiKey = await decryptProviderToken(providerToken, getMasterKeys(options, env))
+  const priceBook = await store.listPriceBook()
+  const fetchImpl = options.fetchImpl ?? fetch
+  const isStream = body.stream === true
+
+  try {
+    if (isStream) {
+      const streamResult = await relayCompletionStream(adapter, {
+        account,
+        apiKeyId,
+        requestId,
+        body: { ...body, model: requestedModel },
+        routing,
+        upstreamApiKey,
+        priceBook,
+        now,
+        fetchImpl,
+      })
+      const finalizePersist = streamResult.finalize().then(async (final) => {
+        await store.persistRelayResult({
+          accountId: accountRecord.id,
+          balanceMicroUsd: account.snapshot().balanceMicroUsd,
+          requestLog: final.log,
+          now,
+        })
+        await store.updateProviderTokenRuntime({
+          providerTokenId: routing.providerToken.id,
+          statusCode: streamResult.status,
+          latencyMs: final.log.latencyMs,
+          now,
+        })
+      })
+      ctx.waitUntil(finalizePersist)
+      return streamResult.response
+    }
+
+    const result = await relayCompletion(adapter, {
+      account,
+      apiKeyId,
+      requestId,
+      body: { ...body, model: requestedModel },
+      routing,
+      upstreamApiKey,
+      priceBook,
+      now,
+      fetchImpl,
+    })
+    await store.persistRelayResult({
+      accountId: accountRecord.id,
+      balanceMicroUsd: account.snapshot().balanceMicroUsd,
+      requestLog: result.log,
+      now,
+    })
+    await store.updateProviderTokenRuntime({
+      providerTokenId: routing.providerToken.id,
+      statusCode: result.status,
+      latencyMs: result.log.latencyMs,
+      now,
+    })
+    return Response.json(result.payload, { status: result.status })
+  } catch (error) {
+    if (error instanceof GatewayError && error.code.startsWith('provider_http_')) {
+      await store.updateProviderTokenRuntime({
+        providerTokenId: routing.providerToken.id,
+        statusCode: error.status,
+        latencyMs: 0,
+        now,
+      })
+    }
+    throw error
+  }
+}
+
 async function handleRequest(
   request: Request,
   options: GatewayAppOptions,
@@ -347,100 +462,11 @@ async function handleRequest(
   }
 
   if (url.pathname === '/v1/responses' && request.method === 'POST') {
-    if (!pepper) throw new GatewayError('server_pepper_not_configured', 500)
-    const { accountId, apiKeyId } = await authenticateBuyer(request, store, pepper, now)
-    const accountRecord = requireActiveAccount(await store.getAccount(accountId))
-    const body = await readJsonObject(request)
-    const requestedModel =
-      typeof body.model === 'string' && body.model.length > 0 ? body.model : accountRecord.defaultModel
-    if (!requestedModel) throw new GatewayError('model_required', 400)
+    return handleRelayRoute(openAIAdapter, request, options, env, ctx, store, pepper, now)
+  }
 
-    const routing = resolveRoutingRule({
-      accountGroup: accountRecord.accountGroup,
-      requestedModel,
-      rules: await store.listRoutingRules(),
-      providerTokens: providerTokenSummariesFromChannels(await store.listProviderTokenSummaries()),
-      now,
-    })
-    const providerToken = await store.getProviderToken(routing.providerToken.id)
-    if (!providerToken || providerToken.status !== 'active') throw new GatewayError('provider_token_unavailable', 503)
-
-    const account = new AccountBalance({
-      accountId: accountRecord.id,
-      balanceMicroUsd: accountRecord.balanceMicroUsd,
-    })
-    const requestId = `req_${crypto.randomUUID()}`
-    const upstreamApiKey = await decryptProviderToken(providerToken, getMasterKeys(options, env))
-    const priceBook = await store.listPriceBook()
-    const fetchImpl = options.fetchImpl ?? fetch
-    const isStream = body.stream === true
-
-    try {
-      if (isStream) {
-        const streamResult = await relayOpenAIResponsesStream({
-          account,
-          apiKeyId,
-          requestId,
-          body: { ...body, model: requestedModel },
-          routing,
-          upstreamApiKey,
-          priceBook,
-          now,
-          fetchImpl,
-        })
-        const finalizePersist = streamResult.finalize().then(async (final) => {
-          await store.persistRelayResult({
-            accountId: accountRecord.id,
-            balanceMicroUsd: account.snapshot().balanceMicroUsd,
-            requestLog: final.log,
-            now,
-          })
-          await store.updateProviderTokenRuntime({
-            providerTokenId: routing.providerToken.id,
-            statusCode: streamResult.status,
-            latencyMs: final.log.latencyMs,
-            now,
-          })
-        })
-        ctx.waitUntil(finalizePersist)
-        return streamResult.response
-      }
-
-      const result = await relayOpenAIResponses({
-        account,
-        apiKeyId,
-        requestId,
-        body: { ...body, model: requestedModel },
-        routing,
-        upstreamApiKey,
-        priceBook,
-        now,
-        fetchImpl,
-      })
-      await store.persistRelayResult({
-        accountId: accountRecord.id,
-        balanceMicroUsd: account.snapshot().balanceMicroUsd,
-        requestLog: result.log,
-        now,
-      })
-      await store.updateProviderTokenRuntime({
-        providerTokenId: routing.providerToken.id,
-        statusCode: result.status,
-        latencyMs: result.log.latencyMs,
-        now,
-      })
-      return json(result.payload, result.status)
-    } catch (error) {
-      if (error instanceof GatewayError && error.code.startsWith('provider_http_')) {
-        await store.updateProviderTokenRuntime({
-          providerTokenId: routing.providerToken.id,
-          statusCode: error.status,
-          latencyMs: 0,
-          now,
-        })
-      }
-      throw error
-    }
+  if (url.pathname === '/v1/messages' && request.method === 'POST') {
+    return handleRelayRoute(anthropicAdapter, request, options, env, ctx, store, pepper, now)
   }
 
   if (url.pathname === '/admin/accounts' && request.method === 'GET') {

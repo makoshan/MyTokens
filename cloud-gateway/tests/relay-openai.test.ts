@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { AccountBalance } from '../src/billing/account-do.js'
-import { relayOpenAIResponses } from '../src/routes/openai.js'
+import { openAIAdapter } from '../src/providers/openai.js'
+import { relayCompletion } from '../src/routes/relay.js'
 
 test('OpenAI responses relay reserves before upstream and settles from returned usage', async () => {
   const account = new AccountBalance({ accountId: 'acct-1', balanceMicroUsd: 10_000 })
   const calls: Array<{ url: string; body: unknown; authorization: string | null }> = []
 
-  const result = await relayOpenAIResponses({
+  const result = await relayCompletion(openAIAdapter, {
     account,
     apiKeyId: 'key-1',
     requestId: 'req-1',
@@ -49,7 +50,7 @@ test('OpenAI responses relay reserves before upstream and settles from returned 
       },
     ],
     now: '2026-05-19T00:00:00Z',
-    fetchImpl: async (url, init) => {
+    fetchImpl: async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({
         url: String(url),
         body: JSON.parse(String(init?.body)),

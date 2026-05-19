@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { AccountBalance } from '../src/billing/account-do.js'
-import { relayOpenAIResponsesStream } from '../src/routes/openai.js'
+import { openAIAdapter } from '../src/providers/openai.js'
+import { relayCompletionStream } from '../src/routes/relay.js'
 
 const routing = {
   routingRule: {
@@ -81,7 +82,7 @@ test('streaming relay forwards SSE bytes and settles using final usage event', a
   ]
 
   const fetchCalls: Array<{ url: string; body: unknown; accept: string | null }> = []
-  const result = await relayOpenAIResponsesStream({
+  const result = await relayCompletionStream(openAIAdapter, {
     account,
     apiKeyId: 'key-1',
     requestId: 'req-stream-1',
@@ -125,7 +126,7 @@ test('streaming relay fails closed and settles with the reservation estimate whe
     'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
   ]
 
-  const result = await relayOpenAIResponsesStream({
+  const result = await relayCompletionStream(openAIAdapter, {
     account,
     apiKeyId: 'key-2',
     requestId: 'req-stream-2',
@@ -152,7 +153,7 @@ test('streaming relay refunds the reservation and throws when upstream returns a
   const account = new AccountBalance({ accountId: 'acct-3', balanceMicroUsd: 10_000 })
 
   await assert.rejects(
-    relayOpenAIResponsesStream({
+    relayCompletionStream(openAIAdapter, {
       account,
       apiKeyId: 'key-3',
       requestId: 'req-stream-3',
@@ -186,7 +187,7 @@ test('streaming relay reassembles SSE events split across chunk boundaries', asy
     'put_tokens":50,"output_tokens":75,"total_tokens":125}}}\n\n',
   ]
 
-  const result = await relayOpenAIResponsesStream({
+  const result = await relayCompletionStream(openAIAdapter, {
     account,
     apiKeyId: 'key-4',
     requestId: 'req-stream-4',

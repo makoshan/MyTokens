@@ -313,6 +313,101 @@ test('POST /v1/responses decrypts provider token, relays upstream, settles usage
   assert.equal(lastLog?.sellCostMicroUsd, 50)
 })
 
+test('POST /v1/messages routes to anthropicAdapter, sends x-api-key, and settles using Messages usage', async () => {
+  const { store, pepper, apiKey } = seedStore()
+  const masterKeys = { v1: new Uint8Array(32).fill(11) }
+  store.providerTokens.push(
+    await encryptProviderToken({
+      id: 'tok-anth',
+      provider: 'anthropic',
+      label: 'official-anthropic',
+      adapter: 'anthropic',
+      plaintext: 'sk-ant-secret',
+      masterKeys,
+      keyVersion: 'v1',
+      now: '2026-05-19T00:00:00Z',
+    })
+  )
+  store.channels.push({
+    id: 'tok-anth',
+    label: 'official-anthropic',
+    provider: 'anthropic',
+    adapter: 'anthropic',
+    models: ['claude-3-5-sonnet'],
+    status: 'active',
+    priority: 1,
+    weight: 10,
+    latencyMs: 600,
+    errorRate: 0.0,
+    exhaustedUntil: null,
+  })
+  store.routingRules.push({
+    id: 'route-anth',
+    accountGroup: 'friends',
+    requestedModel: 'claude-3-5-sonnet',
+    providerTokenId: 'tok-anth',
+    actualProviderModel: 'claude-3-5-sonnet',
+    priority: 1,
+    weight: 10,
+    status: 'active',
+  })
+  store.priceBook.push({
+    id: 'price-anth',
+    version: 1,
+    provider: 'anthropic',
+    model: 'claude-3-5-sonnet',
+    sellInputMicroUsdPer1MTokens: 3_000_000,
+    sellOutputMicroUsdPer1MTokens: 15_000_000,
+    upstreamInputMicroUsdPer1MTokens: 3_000_000,
+    upstreamOutputMicroUsdPer1MTokens: 15_000_000,
+    validFrom: '2026-05-01T00:00:00Z',
+    validTo: null,
+    enabled: true,
+  })
+
+  let receivedXApiKey: string | null = null
+  const app = createGatewayApp({
+    store,
+    pepper,
+    adminToken: 'admin-secret',
+    masterKeys,
+    now: () => '2026-05-19T00:00:00Z',
+    fetchImpl: async (url: string | URL | Request, init?: RequestInit) => {
+      receivedXApiKey = new Headers(init?.headers).get('x-api-key')
+      assert.equal(String(url), 'https://api.anthropic.com/v1/messages')
+      return Response.json({
+        id: 'msg_e2e',
+        model: 'claude-3-5-sonnet',
+        content: [{ type: 'text', text: 'hi' }],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      })
+    },
+  })
+
+  const response = await app.fetch(
+    new Request('https://gateway.test/v1/messages', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-3-5-sonnet',
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 64,
+      }),
+    })
+  )
+  const payload = await response.json()
+  const lastLog = store.usage.at(-1)
+
+  assert.equal(response.status, 200)
+  assert.equal(payload.id, 'msg_e2e')
+  assert.equal(receivedXApiKey, 'sk-ant-secret')
+  assert.equal(lastLog?.endpoint, '/v1/messages')
+  assert.equal(lastLog?.providerTokenId, 'tok-anth')
+  assert.equal(lastLog?.routingRuleId, 'route-anth')
+  // 100 input * 3 + 50 output * 15 = 300 + 750 = 1050
+  assert.equal(lastLog?.sellCostMicroUsd, 1050)
+})
+
 test('POST /v1/responses with stream:true forwards SSE upstream and settles via ctx.waitUntil after the stream completes', async () => {
   const { store, pepper, apiKey } = seedStore()
   const masterKeys = { v1: new Uint8Array(32).fill(9) }

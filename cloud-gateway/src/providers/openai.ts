@@ -1,18 +1,19 @@
-export interface OpenAIUsage {
-  inputTokens: number
-  outputTokens: number
-  totalTokens: number
-}
+import type { PartialProviderUsage, ProviderAdapter, ProviderUsage } from './adapter.js'
+
+export type OpenAIUsage = ProviderUsage
 
 export function parseOpenAIUsage(payload: unknown): OpenAIUsage {
-  const usage = typeof payload === 'object' && payload !== null ? (payload as { usage?: Record<string, unknown> }).usage : undefined
+  const usage =
+    typeof payload === 'object' && payload !== null
+      ? (payload as { usage?: Record<string, unknown> }).usage
+      : undefined
   const inputTokens = Number(usage?.input_tokens ?? usage?.prompt_tokens ?? 0)
   const outputTokens = Number(usage?.output_tokens ?? usage?.completion_tokens ?? 0)
   const totalTokens = Number(usage?.total_tokens ?? inputTokens + outputTokens)
   return { inputTokens, outputTokens, totalTokens }
 }
 
-function usageFromObject(value: unknown): OpenAIUsage | null {
+function usageFromObject(value: unknown): PartialProviderUsage | null {
   if (!value || typeof value !== 'object') return null
   const record = value as Record<string, unknown>
   if (
@@ -24,13 +25,20 @@ function usageFromObject(value: unknown): OpenAIUsage | null {
   ) {
     return null
   }
-  const inputTokens = Number(record.input_tokens ?? record.prompt_tokens ?? 0)
-  const outputTokens = Number(record.output_tokens ?? record.completion_tokens ?? 0)
-  const totalTokens = Number(record.total_tokens ?? inputTokens + outputTokens)
-  return { inputTokens, outputTokens, totalTokens }
+  const result: PartialProviderUsage = {}
+  if (record.input_tokens !== undefined || record.prompt_tokens !== undefined) {
+    result.inputTokens = Number(record.input_tokens ?? record.prompt_tokens)
+  }
+  if (record.output_tokens !== undefined || record.completion_tokens !== undefined) {
+    result.outputTokens = Number(record.output_tokens ?? record.completion_tokens)
+  }
+  if (record.total_tokens !== undefined) {
+    result.totalTokens = Number(record.total_tokens)
+  }
+  return result
 }
 
-export function parseOpenAIStreamEventUsage(eventBlock: string): OpenAIUsage | null {
+export function parseOpenAIStreamEventUsage(eventBlock: string): PartialProviderUsage | null {
   const dataLines: string[] = []
   for (const rawLine of eventBlock.split('\n')) {
     const line = rawLine.trimEnd()
@@ -61,4 +69,44 @@ export function normalizeProviderError(status: number, payload: unknown): { stat
     code: maybeError?.code ?? `provider_http_${status}`,
     message: maybeError?.message ?? `Provider returned HTTP ${status}`,
   }
+}
+
+function roughInputTokens(body: Record<string, unknown>): number {
+  const input = body.input ?? body.messages ?? ''
+  return Math.max(1, Math.ceil(JSON.stringify(input).length / 4))
+}
+
+function maxOutputTokens(body: Record<string, unknown>): number {
+  const value = body.max_output_tokens ?? body.max_tokens ?? 256
+  return Math.max(1, Number(value) || 256)
+}
+
+export const openAIAdapter: ProviderAdapter = {
+  name: 'openai',
+  endpoint: '/v1/responses',
+  buildUpstreamRequest({ body, model, upstreamApiKey, stream }) {
+    const upstreamBody: Record<string, unknown> = { ...body, model }
+    if (stream) upstreamBody.stream = true
+    return {
+      url: 'https://api.openai.com/v1/responses',
+      headers: {
+        authorization: `Bearer ${upstreamApiKey}`,
+        'content-type': 'application/json',
+        ...(stream ? { accept: 'text/event-stream' } : {}),
+      },
+      body: JSON.stringify(upstreamBody),
+    }
+  },
+  estimateInputTokens(body) {
+    return roughInputTokens(body)
+  },
+  estimateMaxOutputTokens(body) {
+    return maxOutputTokens(body)
+  },
+  parseUsage(payload) {
+    return parseOpenAIUsage(payload)
+  },
+  parseStreamEventUsage(eventBlock) {
+    return parseOpenAIStreamEventUsage(eventBlock)
+  },
 }
