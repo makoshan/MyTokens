@@ -37,6 +37,7 @@ export interface AccountBalanceState {
 }
 
 export const RATE_LIMIT_WINDOW_MS = 60_000
+export const RESERVATION_MAX_AGE_MS = 5 * 60 * 1000
 
 export class AccountBalance {
   private balanceMicroUsd: number
@@ -220,6 +221,41 @@ export class AccountBalance {
     })
     this.idempotencyResults.set(input.idempotencyKey, entry)
     return entry
+  }
+
+  /**
+   * Refund every open reservation whose `createdAt` is older than now-maxAgeMs.
+   * Called by AccountDurableObject.alarm() so streams that were abandoned (the
+   * worker died between reserve and settle) don't keep balance reserved
+   * indefinitely. Idempotency keys are derived from the reservation id so a
+   * subsequent settle for the same reservation safely returns the stored
+   * refund entry instead of mutating state again.
+   */
+  expireStaleReservations(now: string, maxAgeMs: number): LedgerEntry[] {
+    const cutoffMs = Date.parse(now) - maxAgeMs
+    const refunded: LedgerEntry[] = []
+    for (const reservation of this.reservations.values()) {
+      if (reservation.status !== 'open') continue
+      if (Date.parse(reservation.createdAt) > cutoffMs) continue
+      const entry = this.refund({
+        reservationId: reservation.reservationId,
+        idempotencyKey: `expire:${reservation.reservationId}`,
+        now,
+      })
+      refunded.push(entry)
+    }
+    return refunded
+  }
+
+  /**
+   * True when any reservation is still in `open` state. Used by the DO to
+   * decide whether to keep scheduling an alarm tick.
+   */
+  hasOpenReservations(): boolean {
+    for (const reservation of this.reservations.values()) {
+      if (reservation.status === 'open') return true
+    }
+    return false
   }
 
   private pushLedger(input: Omit<LedgerEntry, 'id' | 'accountId' | 'balanceAfterMicroUsd'>): LedgerEntry {

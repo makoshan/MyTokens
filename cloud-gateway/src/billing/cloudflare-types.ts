@@ -14,6 +14,9 @@ export interface DurableObjectStorage {
   get: DurableObjectStorageGet
   put<T>(key: string, value: T): Promise<void>
   delete(key: string): Promise<boolean>
+  setAlarm(scheduledTimeMs: number | Date): Promise<void>
+  getAlarm(): Promise<number | null>
+  deleteAlarm(): Promise<void>
 }
 
 export interface DurableObjectState {

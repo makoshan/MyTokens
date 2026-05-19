@@ -5,6 +5,7 @@ import type { DurableObjectState, DurableObjectStorage } from '../src/billing/cl
 
 class FakeStorage implements DurableObjectStorage {
   private readonly map = new Map<string, unknown>()
+  alarmAt: number | null = null
 
   async get<T = unknown>(key: string): Promise<T | undefined> {
     return this.map.get(key) as T | undefined
@@ -16,6 +17,18 @@ class FakeStorage implements DurableObjectStorage {
 
   async delete(key: string): Promise<boolean> {
     return this.map.delete(key)
+  }
+
+  async setAlarm(scheduledTimeMs: number | Date): Promise<void> {
+    this.alarmAt = typeof scheduledTimeMs === 'number' ? scheduledTimeMs : scheduledTimeMs.getTime()
+  }
+
+  async getAlarm(): Promise<number | null> {
+    return this.alarmAt
+  }
+
+  async deleteAlarm(): Promise<void> {
+    this.alarmAt = null
   }
 }
 

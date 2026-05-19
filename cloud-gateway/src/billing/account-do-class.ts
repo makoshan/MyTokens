@@ -1,5 +1,11 @@
 import { GatewayError } from '../errors.js'
-import { AccountBalance, type AccountBalanceState, type LedgerEntry, type Reservation } from './account-do.js'
+import {
+  AccountBalance,
+  RESERVATION_MAX_AGE_MS,
+  type AccountBalanceState,
+  type LedgerEntry,
+  type Reservation,
+} from './account-do.js'
 import type { DurableObjectState } from './cloudflare-types.js'
 
 /**
@@ -107,6 +113,7 @@ export class AccountDurableObject {
           const input = body as unknown as ReserveDOInput
           const result = balance.reserve(input)
           await this.persist()
+          await this.ensureExpiryAlarm(input.now)
           return success(result)
         }
         case 'settle': {
@@ -178,6 +185,48 @@ export class AccountDurableObject {
     if (!this.balance) return
     const payload: PersistedDOState = { version: 1, state: this.balance.toState() }
     await this.state.storage.put(STORAGE_KEY, payload)
+  }
+
+  /**
+   * Schedule (or extend) the auto-refund sweep. We use the reservation TTL as
+   * the schedule horizon so any reservation made now is checked exactly once
+   * after it could possibly expire. setAlarm is idempotent — only one alarm
+   * is pending at a time — so this is safe to call on every reserve.
+   */
+  private async ensureExpiryAlarm(nowIso: string): Promise<void> {
+    const nowMs = Date.parse(nowIso)
+    if (!Number.isFinite(nowMs)) return
+    const existing = await this.state.storage.getAlarm()
+    const target = nowMs + RESERVATION_MAX_AGE_MS
+    if (existing !== null && existing >= nowMs && existing <= target) return
+    await this.state.storage.setAlarm(target)
+  }
+
+  /**
+   * Lifecycle hook fired by workerd when the scheduled alarm time arrives.
+   * Sweeps reservations older than RESERVATION_MAX_AGE_MS and reschedules
+   * the alarm if there are still open reservations (e.g. one made shortly
+   * before the alarm fired).
+   */
+  async alarm(): Promise<void> {
+    await this.state.blockConcurrencyWhile(async () => {
+      if (!this.balance) {
+        const stored = await this.state.storage.get<PersistedDOState>(STORAGE_KEY)
+        if (!stored || stored.version !== 1) return
+        this.balance = AccountBalance.fromState(stored.state)
+      }
+    })
+    if (!this.balance) return
+    const nowIso = new Date().toISOString()
+    const refunded = this.balance.expireStaleReservations(nowIso, RESERVATION_MAX_AGE_MS)
+    if (refunded.length > 0) {
+      await this.persist()
+    }
+    if (this.balance.hasOpenReservations()) {
+      await this.state.storage.setAlarm(Date.parse(nowIso) + RESERVATION_MAX_AGE_MS)
+    } else {
+      await this.state.storage.deleteAlarm()
+    }
   }
 }
 

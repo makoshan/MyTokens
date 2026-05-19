@@ -7,6 +7,7 @@ import { DurableObjectAccountActor } from '../src/billing/do-account-actor.js'
 
 function makeState(): DurableObjectState {
   const map = new Map<string, unknown>()
+  let alarmAt: number | null = null
   return {
     id: { toString: () => 'stub' },
     storage: {
@@ -18,6 +19,15 @@ function makeState(): DurableObjectState {
       },
       async delete(key: string): Promise<boolean> {
         return map.delete(key)
+      },
+      async setAlarm(scheduledTimeMs: number | Date): Promise<void> {
+        alarmAt = typeof scheduledTimeMs === 'number' ? scheduledTimeMs : scheduledTimeMs.getTime()
+      },
+      async getAlarm(): Promise<number | null> {
+        return alarmAt
+      },
+      async deleteAlarm(): Promise<void> {
+        alarmAt = null
       },
     },
     blockConcurrencyWhile: async (cb) => cb(),

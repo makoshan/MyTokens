@@ -120,6 +120,7 @@ test('rate-limit counter survives DO hibernation through toState/fromState', () 
 
 test('Durable Object respects rpmLimit pushed via bootstrap and returns rate-limit envelope', async () => {
   const storage = new Map<string, unknown>()
+  let alarmAt: number | null = null
   const state: DurableObjectState = {
     id: { toString: () => 'fake' },
     storage: {
@@ -131,6 +132,15 @@ test('Durable Object respects rpmLimit pushed via bootstrap and returns rate-lim
       },
       async delete(key: string): Promise<boolean> {
         return storage.delete(key)
+      },
+      async setAlarm(scheduledTimeMs: number | Date): Promise<void> {
+        alarmAt = typeof scheduledTimeMs === 'number' ? scheduledTimeMs : scheduledTimeMs.getTime()
+      },
+      async getAlarm(): Promise<number | null> {
+        return alarmAt
+      },
+      async deleteAlarm(): Promise<void> {
+        alarmAt = null
       },
     },
     blockConcurrencyWhile: async (cb) => cb(),
@@ -279,6 +289,7 @@ test('POST /v1/responses returns 429 rate_limit_error after exceeding accountRpm
         if (!instance) {
           const storage = storages.get(accountId) ?? new Map<string, unknown>()
           storages.set(accountId, storage)
+          let alarmAt: number | null = null
           const state: DurableObjectState = {
             id: { toString: () => accountId },
             storage: {
@@ -290,6 +301,15 @@ test('POST /v1/responses returns 429 rate_limit_error after exceeding accountRpm
               },
               async delete(key: string): Promise<boolean> {
                 return storage.delete(key)
+              },
+              async setAlarm(scheduledTimeMs: number | Date): Promise<void> {
+                alarmAt = typeof scheduledTimeMs === 'number' ? scheduledTimeMs : scheduledTimeMs.getTime()
+              },
+              async getAlarm(): Promise<number | null> {
+                return alarmAt
+              },
+              async deleteAlarm(): Promise<void> {
+                alarmAt = null
               },
             },
             blockConcurrencyWhile: async (cb) => cb(),
