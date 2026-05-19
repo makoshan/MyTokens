@@ -3,10 +3,20 @@ main = "src/index.ts"
 compatibility_date = "2026-05-19"
 compatibility_flags = ["nodejs_compat"]
 
+# Public, non-secret variables. Secrets (SERVER_PEPPER, ADMIN_TOKEN,
+# MASTER_KEY_V1) are uploaded via `wrangler secret put` — never committed.
+[vars]
+PUBLIC_GATEWAY_URL = "https://api.mykey.example"
+
+[observability]
+enabled = true
+
 [[d1_databases]]
 binding = "DB"
 database_name = "mykey-compute-gateway"
+# Replace after running: wrangler d1 create mykey-compute-gateway
 database_id = "replace-with-cloudflare-d1-id"
+migrations_dir = "migrations"
 
 [[durable_objects.bindings]]
 name = "ACCOUNT_DO"

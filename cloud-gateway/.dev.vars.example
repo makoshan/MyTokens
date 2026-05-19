@@ -1,0 +1,17 @@
+# Local secrets for `wrangler dev`. Copy to .dev.vars (gitignored) and fill in.
+# Production secrets are uploaded via `wrangler secret put <NAME>` instead —
+# never put real secrets in this file.
+
+# 32 bytes hex/base64. Used as HMAC pepper for buyer API key hashing.
+# Rotating this invalidates every existing API key.
+SERVER_PEPPER=
+
+# Bearer token for /admin/* routes. Treat like a root password.
+ADMIN_TOKEN=
+
+# 32-byte base64 master key for provider-token envelope encryption.
+# Generate with: node scripts/gen-secrets.mjs
+MASTER_KEY_V1=
+
+# Public base URL the buyer dashboard prints in onboarding instructions.
+PUBLIC_GATEWAY_URL=http://127.0.0.1:8787

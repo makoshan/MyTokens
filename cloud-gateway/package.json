@@ -5,9 +5,16 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "rm -rf dist-tests && tsc -p tsconfig.test.json && node --test dist-tests/tests/*.test.js"
+    "test": "rm -rf dist-tests && tsc -p tsconfig.test.json && node --test dist-tests/tests/*.test.js",
+    "dev": "wrangler dev --local --persist-to .wrangler/state",
+    "deploy": "wrangler deploy",
+    "migrate:local": "wrangler d1 migrations apply mykey-compute-gateway --local --persist-to .wrangler/state",
+    "migrate:remote": "wrangler d1 migrations apply mykey-compute-gateway --remote",
+    "gen-secrets": "node scripts/gen-secrets.mjs",
+    "bootstrap": "node scripts/bootstrap.mjs"
   },
   "devDependencies": {
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "wrangler": "^4.93.0"
   }
 }
