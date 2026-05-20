@@ -20,5 +20,8 @@
     "typescript": "^5.9.3",
     "vitest": "^4.1.6",
     "wrangler": "^4.93.0"
+  },
+  "dependencies": {
+    "viem": "^2.50.3"
   }
 }

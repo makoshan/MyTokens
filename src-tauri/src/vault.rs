@@ -1,3 +1,7 @@
+use crate::vault_crypto::{
+    add_passkey_prf_unlock_method, create_vault_header, unlock_vault_key, PasskeyPrfDescriptor,
+    VaultHeader, VaultUnlockMethod, VaultUnlockRequest,
+};
 use crate::{
     provider_defaults, secret_store::config::SecretStoreProviderConfig, secret_store::Secret,
     secret_store::SecretManager, secret_store::SecretMetadata, secret_store::SecretStoreConfig,
@@ -24,6 +28,12 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+const VAULT_CRYPTO_HEADER_META_KEY: &str = "vault_crypto_header";
+
+fn is_watch_only_crypto_wallet(wallet_type: &str, secret_kind: &str) -> bool {
+    secret_kind.trim() == "watch_only" || wallet_type.trim().to_ascii_lowercase().contains("watch")
+}
 
 pub struct Vault {
     conn: Connection,
@@ -81,6 +91,23 @@ pub struct GatewayRequestLogInput {
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultUnlockState {
+    pub configured: bool,
+    pub passkeys: Vec<VaultPasskeyUnlockInfo>,
+    pub has_recovery_key: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultPasskeyUnlockInfo {
+    pub rp_id: String,
+    pub user_id: String,
+    pub credential_id: String,
+    pub prf_salt: String,
 }
 
 impl Vault {
@@ -168,6 +195,109 @@ impl Vault {
 
     pub fn is_password_set(&self) -> bool {
         self.master_password_hash.is_some()
+    }
+
+    pub fn initialize_vault_unlock_methods(
+        &mut self,
+        master_password: &str,
+    ) -> Result<Option<String>, String> {
+        if !self.authenticate(master_password) {
+            return Err("Invalid master password".to_string());
+        }
+        if self.load_vault_crypto_header()?.is_some() {
+            return Ok(None);
+        }
+
+        let (header, recovery_key) = create_vault_header(master_password)?;
+        self.save_vault_crypto_header(&header)?;
+        Ok(Some(recovery_key))
+    }
+
+    pub fn get_vault_unlock_state(&self) -> Result<VaultUnlockState, String> {
+        let Some(header) = self.load_vault_crypto_header()? else {
+            return Ok(VaultUnlockState {
+                configured: false,
+                passkeys: Vec::new(),
+                has_recovery_key: false,
+            });
+        };
+
+        let mut passkeys = Vec::new();
+        let mut has_recovery_key = false;
+        for method in header.unlock_methods {
+            match method {
+                VaultUnlockMethod::PasskeyPrf {
+                    rp_id,
+                    user_id,
+                    credential_id,
+                    prf_salt,
+                    ..
+                } => passkeys.push(VaultPasskeyUnlockInfo {
+                    rp_id,
+                    user_id,
+                    credential_id,
+                    prf_salt,
+                }),
+                VaultUnlockMethod::RecoveryKey { .. } => has_recovery_key = true,
+                VaultUnlockMethod::MasterPassword { .. } => {}
+            }
+        }
+
+        Ok(VaultUnlockState {
+            configured: true,
+            passkeys,
+            has_recovery_key,
+        })
+    }
+
+    pub fn add_passkey_prf_unlock(
+        &mut self,
+        master_password: &str,
+        descriptor: PasskeyPrfDescriptor,
+    ) -> Result<(), String> {
+        if !self.authenticate(master_password) {
+            return Err("Invalid master password".to_string());
+        }
+
+        let mut header = self.ensure_vault_crypto_header(master_password)?;
+        let vault_key =
+            unlock_vault_key(&header, VaultUnlockRequest::MasterPassword(master_password))?;
+        add_passkey_prf_unlock_method(&mut header, &vault_key, descriptor)?;
+        self.save_vault_crypto_header(&header)
+    }
+
+    pub fn authenticate_with_passkey_prf(&self, prf_key_hex: &str) -> Result<bool, String> {
+        let Some(header) = self.load_vault_crypto_header()? else {
+            return Ok(false);
+        };
+        Ok(unlock_vault_key(&header, VaultUnlockRequest::PasskeyPrfKeyHex(prf_key_hex)).is_ok())
+    }
+
+    pub fn authenticate_with_recovery_key(&self, recovery_key: &str) -> Result<bool, String> {
+        let Some(header) = self.load_vault_crypto_header()? else {
+            return Ok(false);
+        };
+        Ok(unlock_vault_key(&header, VaultUnlockRequest::RecoveryKey(recovery_key)).is_ok())
+    }
+
+    fn ensure_vault_crypto_header(&mut self, master_password: &str) -> Result<VaultHeader, String> {
+        if let Some(header) = self.load_vault_crypto_header()? {
+            return Ok(header);
+        }
+        let (header, _recovery_key) = create_vault_header(master_password)?;
+        self.save_vault_crypto_header(&header)?;
+        Ok(header)
+    }
+
+    fn load_vault_crypto_header(&self) -> Result<Option<VaultHeader>, String> {
+        self.meta_get(VAULT_CRYPTO_HEADER_META_KEY)?
+            .map(|raw| serde_json::from_str(&raw).map_err(|e| e.to_string()))
+            .transpose()
+    }
+
+    fn save_vault_crypto_header(&self, header: &VaultHeader) -> Result<(), String> {
+        let raw = serde_json::to_string(header).map_err(|e| e.to_string())?;
+        self.meta_set(VAULT_CRYPTO_HEADER_META_KEY, &raw)
     }
 
     fn hash_master_password(password: &str) -> Result<String, String> {
@@ -1383,6 +1513,43 @@ impl Vault {
                 FOREIGN KEY(credential_id) REFERENCES credentials(id) ON DELETE SET NULL,
                 UNIQUE(project_id, env, provider_id)
             );
+            CREATE TABLE IF NOT EXISTS crypto_wallets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                wallet_type TEXT NOT NULL,
+                secret_kind TEXT NOT NULL,
+                secret_key_id TEXT NOT NULL,
+                passkey_credential_id TEXT,
+                passkey_rp_id TEXT,
+                passkey_prf_salt TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                is_active INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS crypto_accounts (
+                id TEXT PRIMARY KEY,
+                wallet_id TEXT NOT NULL,
+                chain TEXT NOT NULL,
+                network TEXT NOT NULL,
+                address TEXT NOT NULL,
+                derivation_path TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(wallet_id) REFERENCES crypto_wallets(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS crypto_tokens (
+                id TEXT PRIMARY KEY,
+                wallet_id TEXT NOT NULL,
+                account_id TEXT,
+                chain TEXT NOT NULL,
+                network TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                contract_address TEXT,
+                decimals INTEGER,
+                balance TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(wallet_id) REFERENCES crypto_wallets(id) ON DELETE CASCADE,
+                FOREIGN KEY(account_id) REFERENCES crypto_accounts(id) ON DELETE SET NULL
+            );
             CREATE TABLE IF NOT EXISTS tool_items (
                 id TEXT PRIMARY KEY,
                 tool_type TEXT NOT NULL,
@@ -1473,6 +1640,9 @@ impl Vault {
         Self::ensure_column(conn, "gateway_request_logs", "input_tokens", "INTEGER")?;
         Self::ensure_column(conn, "gateway_request_logs", "output_tokens", "INTEGER")?;
         Self::ensure_column(conn, "gateway_request_logs", "total_tokens", "INTEGER")?;
+        Self::ensure_column(conn, "crypto_wallets", "passkey_credential_id", "TEXT")?;
+        Self::ensure_column(conn, "crypto_wallets", "passkey_rp_id", "TEXT")?;
+        Self::ensure_column(conn, "crypto_wallets", "passkey_prf_salt", "TEXT")?;
         conn.execute(
             "UPDATE providers SET details_json = '{}' WHERE details_json IS NULL OR TRIM(details_json) = ''",
             [],
@@ -1530,6 +1700,7 @@ impl Vault {
             "gemini",
             "kimi",
             "amp",
+            "bailian-token-plan",
         ];
         for provider in providers {
             let _ = self.conn.execute(
@@ -2125,7 +2296,10 @@ impl Vault {
         }
         let changed = self
             .conn
-            .execute("DELETE FROM voice_input_history WHERE id = ?1", params![trimmed])
+            .execute(
+                "DELETE FROM voice_input_history WHERE id = ?1",
+                params![trimmed],
+            )
             .map_err(|e| e.to_string())?;
         Ok(changed > 0)
     }
@@ -5375,6 +5549,513 @@ impl Vault {
         Ok(result)
     }
 
+    pub fn add_crypto_wallet(
+        &mut self,
+        name: String,
+        wallet_type: String,
+        secret_kind: String,
+        secret_material: String,
+        chain: String,
+        network: String,
+        address: String,
+        derivation_path: Option<String>,
+        passkey_credential_id: Option<String>,
+        passkey_rp_id: Option<String>,
+        passkey_prf_salt: Option<String>,
+    ) -> Result<crate::CryptoWallet, String> {
+        let name = name.trim().to_string();
+        let wallet_type = wallet_type.trim().to_string();
+        let secret_kind = secret_kind.trim().to_string();
+        let secret_material = secret_material.trim().to_string();
+        let chain = chain.trim().to_ascii_uppercase();
+        let network = network.trim().to_ascii_uppercase();
+        let address = address.trim().to_string();
+
+        if name.is_empty() {
+            return Err("Wallet name is required".to_string());
+        }
+        if wallet_type.is_empty() {
+            return Err("Wallet type is required".to_string());
+        }
+        if secret_kind.is_empty() {
+            return Err("Secret kind is required".to_string());
+        }
+        let is_watch_only = is_watch_only_crypto_wallet(&wallet_type, &secret_kind);
+        if !is_watch_only && secret_material.is_empty() {
+            return Err("Wallet secret material is required".to_string());
+        }
+        if chain.is_empty() || network.is_empty() || address.is_empty() {
+            return Err("Chain, network, and address are required".to_string());
+        }
+
+        let id = Uuid::new_v4().to_string();
+        let account_id = Uuid::new_v4().to_string();
+        let secret_key_id = format!("crypto_wallet:{id}");
+        let now = Local::now().to_rfc3339();
+        if !is_watch_only {
+            let secret = Secret {
+                value: secret_material,
+                metadata: SecretMetadata {
+                    provider: "crypto_wallet".to_string(),
+                    created_at: None,
+                    updated_at: None,
+                    tags: vec![wallet_type.clone(), secret_kind.clone()],
+                    note: Some("crypto_wallet_secret".to_string()),
+                },
+            };
+            self.secret_manager
+                .set(&secret_key_id, &secret)
+                .map_err(|e| e.to_string())?;
+        }
+
+        self.conn
+            .execute(
+                "INSERT INTO crypto_wallets
+                    (id, name, wallet_type, secret_kind, secret_key_id, passkey_credential_id, passkey_rp_id, passkey_prf_salt, created_at, updated_at, is_active)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)",
+                params![
+                    id,
+                    name,
+                    wallet_type,
+                    secret_kind,
+                    secret_key_id,
+                    passkey_credential_id,
+                    passkey_rp_id,
+                    passkey_prf_salt,
+                    now,
+                    now
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "INSERT INTO crypto_accounts
+                    (id, wallet_id, chain, network, address, derivation_path, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    account_id,
+                    id,
+                    chain,
+                    network,
+                    address,
+                    derivation_path,
+                    now
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+
+        Ok(self
+            .get_crypto_wallet(&id)?
+            .ok_or_else(|| "Wallet was not created".to_string())?)
+    }
+
+    pub fn get_crypto_wallets(&self) -> Result<Vec<crate::CryptoWallet>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, name, wallet_type, secret_kind, passkey_credential_id, passkey_rp_id, passkey_prf_salt, created_at, updated_at, is_active
+                 FROM crypto_wallets
+                 ORDER BY updated_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut wallets = Vec::new();
+        for row in rows {
+            let (
+                id,
+                name,
+                wallet_type,
+                secret_kind,
+                passkey_credential_id,
+                passkey_rp_id,
+                passkey_prf_salt,
+                created_at,
+                updated_at,
+                is_active,
+            ) = row.map_err(|e| e.to_string())?;
+            wallets.push(crate::CryptoWallet {
+                accounts: self.load_crypto_accounts(&id)?,
+                tokens: self.load_crypto_tokens(&id)?,
+                id,
+                name,
+                wallet_type,
+                secret_kind,
+                passkey_credential_id,
+                passkey_rp_id,
+                passkey_prf_salt,
+                created_at,
+                updated_at,
+                is_active: int_to_bool(is_active),
+            });
+        }
+        Ok(wallets)
+    }
+
+    pub fn get_crypto_wallet_secret(&self, id: &str) -> Result<String, String> {
+        let id = id.trim();
+        let secret_key_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT secret_key_id FROM crypto_wallets WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some(secret_key_id) = secret_key_id else {
+            return Err("Wallet not found".to_string());
+        };
+        let secret_kind: String = self
+            .conn
+            .query_row(
+                "SELECT secret_kind FROM crypto_wallets WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if secret_kind == "watch_only" {
+            return Err("Watch-only wallets do not have signing secret material".to_string());
+        }
+        self.secret_manager
+            .get(&secret_key_id)
+            .map(|secret| secret.value)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn add_crypto_token(
+        &mut self,
+        wallet_id: String,
+        account_id: Option<String>,
+        chain: String,
+        network: String,
+        symbol: String,
+        contract_address: Option<String>,
+        decimals: Option<i64>,
+        balance: Option<String>,
+    ) -> Result<crate::CryptoToken, String> {
+        let wallet_id = wallet_id.trim().to_string();
+        let chain = chain.trim().to_ascii_uppercase();
+        let network = network.trim().to_ascii_uppercase();
+        let symbol = symbol.trim().to_ascii_uppercase();
+        if self.get_crypto_wallet(&wallet_id)?.is_none() {
+            return Err("Wallet not found".to_string());
+        }
+        if chain.is_empty() || network.is_empty() || symbol.is_empty() {
+            return Err("Chain, network, and symbol are required".to_string());
+        }
+        if let Some(ref account_id) = account_id {
+            let exists = self
+                .load_crypto_accounts(&wallet_id)?
+                .iter()
+                .any(|account| &account.id == account_id);
+            if !exists {
+                return Err("Account not found for wallet".to_string());
+            }
+        }
+
+        let id = Uuid::new_v4().to_string();
+        let now = Local::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO crypto_tokens
+                    (id, wallet_id, account_id, chain, network, symbol, contract_address, decimals, balance, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    id,
+                    wallet_id,
+                    account_id,
+                    chain,
+                    network,
+                    symbol,
+                    contract_address,
+                    decimals,
+                    balance,
+                    now,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+
+        Ok(crate::CryptoToken {
+            id,
+            wallet_id,
+            account_id,
+            chain,
+            network,
+            symbol,
+            contract_address,
+            decimals,
+            balance,
+            updated_at: now,
+        })
+    }
+
+    pub fn update_crypto_token_balance(
+        &mut self,
+        token_id: &str,
+        balance: String,
+    ) -> Result<crate::CryptoToken, String> {
+        let token_id = token_id.trim();
+        if token_id.is_empty() {
+            return Err("Token id is required".to_string());
+        }
+        let now = Local::now().to_rfc3339();
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE crypto_tokens
+                 SET balance = ?1, updated_at = ?2
+                 WHERE id = ?3",
+                params![balance, now, token_id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err("Token not found".to_string());
+        }
+        self.get_crypto_token(token_id)?
+            .ok_or_else(|| "Token not found".to_string())
+    }
+
+    pub fn add_crypto_account(
+        &mut self,
+        wallet_id: String,
+        chain: String,
+        network: String,
+        address: String,
+        derivation_path: Option<String>,
+    ) -> Result<crate::CryptoAccount, String> {
+        let wallet_id = wallet_id.trim().to_string();
+        let chain = chain.trim().to_ascii_uppercase();
+        let network = network.trim().to_ascii_uppercase();
+        let address = address.trim().to_string();
+        if self.get_crypto_wallet(&wallet_id)?.is_none() {
+            return Err("Wallet not found".to_string());
+        }
+        if chain.is_empty() || network.is_empty() || address.is_empty() {
+            return Err("Chain, network, and address are required".to_string());
+        }
+
+        let id = Uuid::new_v4().to_string();
+        let now = Local::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO crypto_accounts
+                    (id, wallet_id, chain, network, address, derivation_path, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, wallet_id, chain, network, address, derivation_path, now],
+            )
+            .map_err(|e| e.to_string())?;
+
+        Ok(crate::CryptoAccount {
+            id,
+            wallet_id,
+            chain,
+            network,
+            address,
+            derivation_path,
+            created_at: now,
+        })
+    }
+
+    pub fn delete_crypto_wallet(&mut self, id: &str) -> Result<(), String> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err("Wallet id is required".to_string());
+        }
+        let secret_key_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT secret_key_id FROM crypto_wallets WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some(secret_key_id) = secret_key_id else {
+            return Err("Wallet not found".to_string());
+        };
+
+        self.conn
+            .execute(
+                "DELETE FROM crypto_tokens WHERE wallet_id = ?1",
+                params![id],
+            )
+            .map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "DELETE FROM crypto_accounts WHERE wallet_id = ?1",
+                params![id],
+            )
+            .map_err(|e| e.to_string())?;
+        self.conn
+            .execute("DELETE FROM crypto_wallets WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        let _ = self.secret_manager.delete(&secret_key_id);
+        Ok(())
+    }
+
+    fn get_crypto_wallet(&self, id: &str) -> Result<Option<crate::CryptoWallet>, String> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, name, wallet_type, secret_kind, passkey_credential_id, passkey_rp_id, passkey_prf_salt, created_at, updated_at, is_active
+                 FROM crypto_wallets WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, i64>(9)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        row.map(
+            |(
+                id,
+                name,
+                wallet_type,
+                secret_kind,
+                passkey_credential_id,
+                passkey_rp_id,
+                passkey_prf_salt,
+                created_at,
+                updated_at,
+                is_active,
+            )| {
+                Ok(crate::CryptoWallet {
+                    accounts: self.load_crypto_accounts(&id)?,
+                    tokens: self.load_crypto_tokens(&id)?,
+                    id,
+                    name,
+                    wallet_type,
+                    secret_kind,
+                    passkey_credential_id,
+                    passkey_rp_id,
+                    passkey_prf_salt,
+                    created_at,
+                    updated_at,
+                    is_active: int_to_bool(is_active),
+                })
+            },
+        )
+        .transpose()
+    }
+
+    fn load_crypto_accounts(&self, wallet_id: &str) -> Result<Vec<crate::CryptoAccount>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, wallet_id, chain, network, address, derivation_path, created_at
+                 FROM crypto_accounts
+                 WHERE wallet_id = ?1
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![wallet_id], |row| {
+                Ok(crate::CryptoAccount {
+                    id: row.get(0)?,
+                    wallet_id: row.get(1)?,
+                    chain: row.get(2)?,
+                    network: row.get(3)?,
+                    address: row.get(4)?,
+                    derivation_path: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut accounts = Vec::new();
+        for row in rows {
+            accounts.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(accounts)
+    }
+
+    fn load_crypto_tokens(&self, wallet_id: &str) -> Result<Vec<crate::CryptoToken>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, wallet_id, account_id, chain, network, symbol, contract_address, decimals, balance, updated_at
+                 FROM crypto_tokens
+                 WHERE wallet_id = ?1
+                 ORDER BY symbol ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![wallet_id], |row| {
+                Ok(crate::CryptoToken {
+                    id: row.get(0)?,
+                    wallet_id: row.get(1)?,
+                    account_id: row.get(2)?,
+                    chain: row.get(3)?,
+                    network: row.get(4)?,
+                    symbol: row.get(5)?,
+                    contract_address: row.get(6)?,
+                    decimals: row.get(7)?,
+                    balance: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut tokens = Vec::new();
+        for row in rows {
+            tokens.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(tokens)
+    }
+
+    fn get_crypto_token(&self, token_id: &str) -> Result<Option<crate::CryptoToken>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, wallet_id, account_id, chain, network, symbol, contract_address, decimals, balance, updated_at
+                 FROM crypto_tokens
+                 WHERE id = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(params![token_id]).map_err(|e| e.to_string())?;
+        if let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            return Ok(Some(crate::CryptoToken {
+                id: row.get(0).map_err(|e| e.to_string())?,
+                wallet_id: row.get(1).map_err(|e| e.to_string())?,
+                account_id: row.get(2).map_err(|e| e.to_string())?,
+                chain: row.get(3).map_err(|e| e.to_string())?,
+                network: row.get(4).map_err(|e| e.to_string())?,
+                symbol: row.get(5).map_err(|e| e.to_string())?,
+                contract_address: row.get(6).map_err(|e| e.to_string())?,
+                decimals: row.get(7).map_err(|e| e.to_string())?,
+                balance: row.get(8).map_err(|e| e.to_string())?,
+                updated_at: row.get(9).map_err(|e| e.to_string())?,
+            }));
+        }
+        Ok(None)
+    }
+
     pub fn update_project(
         &mut self,
         id: String,
@@ -5490,4 +6171,16 @@ fn mask_key(value: &str) -> String {
         .rev()
         .collect();
     format!("{}...{}", prefix, suffix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_watch_only_crypto_wallet;
+
+    #[test]
+    fn watch_only_crypto_wallet_does_not_require_secret_material() {
+        assert!(is_watch_only_crypto_wallet("hardware-watch", "watch_only"));
+        assert!(is_watch_only_crypto_wallet("watch-address", "keystore_json"));
+        assert!(!is_watch_only_crypto_wallet("tcx-wasm:password", "keystore_json"));
+    }
 }

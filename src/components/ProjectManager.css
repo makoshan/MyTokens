@@ -39,7 +39,7 @@
   font-size: 12px;
   color: var(--accent-dark);
   background: var(--accent-soft);
-  border: 1px solid rgba(255, 107, 61, 0.35);
+  border: 1px solid rgba(0, 127, 255, 0.34);
   border-radius: 10px;
   padding: 8px 10px;
 }
@@ -57,7 +57,7 @@
 .projects-search:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(255, 107, 61, 0.15);
+  box-shadow: 0 0 0 3px rgba(0, 127, 255, 0.14);
 }
 
 .projects-shell {
@@ -90,7 +90,7 @@
 }
 
 .projects-list-item.active {
-  border-color: rgba(255, 107, 61, 0.35);
+  border-color: rgba(0, 127, 255, 0.34);
   background: var(--accent-soft);
 }
 
@@ -160,7 +160,7 @@
   padding: 3px 7px;
   background: var(--accent-soft);
   color: var(--accent-dark);
-  border: 1px solid rgba(255, 107, 61, 0.35);
+  border: 1px solid rgba(0, 127, 255, 0.34);
   font-weight: 600;
 }
 

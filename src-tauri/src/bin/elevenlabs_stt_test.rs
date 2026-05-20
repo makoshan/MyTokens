@@ -6,7 +6,10 @@ use std::process::Command;
 use std::time::Duration;
 
 fn get_env(key: &str) -> Option<String> {
-    env::var(key).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn parse_flag_value(args: &[String], name: &str) -> Option<String> {
@@ -29,7 +32,15 @@ fn has_flag(args: &[String], name: &str) -> bool {
 
 fn run_ffmpeg_list_devices() -> Result<(), String> {
     let output = Command::new("ffmpeg")
-        .args(["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""]) 
+        .args([
+            "-hide_banner",
+            "-f",
+            "avfoundation",
+            "-list_devices",
+            "true",
+            "-i",
+            "",
+        ])
         .output()
         .map_err(|e| format!("Failed to run ffmpeg: {}", e))?;
     let mut text = String::new();
@@ -90,15 +101,17 @@ async fn async_main() -> Result<(), String> {
         return run_ffmpeg_list_devices();
     }
 
-    let api_key = get_env("ELEVENLABS_API_KEY").ok_or_else(|| "ELEVENLABS_API_KEY is required".to_string())?;
-    let base_url = get_env("ELEVENLABS_BASE_URL").unwrap_or_else(|| "https://api.elevenlabs.io/v1".to_string());
+    let api_key = get_env("ELEVENLABS_API_KEY")
+        .ok_or_else(|| "ELEVENLABS_API_KEY is required".to_string())?;
+    let base_url = get_env("ELEVENLABS_BASE_URL")
+        .unwrap_or_else(|| "https://api.elevenlabs.io/v1".to_string());
     let model_id = get_env("ELEVENLABS_MODEL_ID").unwrap_or_else(|| "scribe_v2".to_string());
     let language_code = get_env("ELEVENLABS_LANGUAGE_CODE").unwrap_or_else(|| "zh".to_string());
     let debug = has_flag(&args, "--debug");
 
     let file_arg = parse_flag_value(&args, "--file");
-    let record_seconds = parse_flag_value(&args, "--record-seconds")
-        .and_then(|v| v.trim().parse::<u64>().ok());
+    let record_seconds =
+        parse_flag_value(&args, "--record-seconds").and_then(|v| v.trim().parse::<u64>().ok());
     let device = parse_flag_value(&args, "--device").unwrap_or_else(|| ":0".to_string());
 
     let wav_path = if let Some(path) = file_arg {
@@ -118,7 +131,11 @@ async fn async_main() -> Result<(), String> {
     }
 
     if debug {
-        eprintln!("Using wav: {} ({} bytes)", wav_path.display(), audio_bytes.len());
+        eprintln!(
+            "Using wav: {} ({} bytes)",
+            wav_path.display(),
+            audio_bytes.len()
+        );
         eprintln!("Base URL: {}", base_url);
         eprintln!("Model: {}", model_id);
         eprintln!("Language: {}", language_code);

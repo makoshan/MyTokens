@@ -113,14 +113,14 @@
 }
 
 .provider-segment.active {
-  background: rgba(255, 107, 61, 0.12);
-  border-color: rgba(255, 107, 61, 0.35);
-  color: #9a3412;
+  background: var(--surface-blue);
+  border-color: rgba(0, 127, 255, 0.34);
+  color: var(--accent);
 }
 
 .provider-segment.active span {
-  color: #9a3412;
-  background: rgba(251, 146, 60, 0.2);
+  color: var(--accent);
+  background: rgba(0, 127, 255, 0.14);
 }
 
 .provider-group {
@@ -145,7 +145,7 @@
   gap: 10px;
   padding: 8px 10px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius-md);
   background: var(--panel);
   transition: all 0.2s ease;
 }
@@ -153,7 +153,7 @@
 .provider-row:hover {
   transform: translateY(-1px);
   box-shadow: var(--shadow-soft);
-  border-color: rgba(255, 107, 61, 0.4);
+  border-color: rgba(0, 127, 255, 0.36);
 }
 
 .provider-row.active {
@@ -343,9 +343,9 @@
   align-items: center;
   width: fit-content;
   font-size: 11px;
-  color: #7c2d12;
-  background: rgba(255, 237, 213, 0.8);
-  border: 1px solid rgba(249, 115, 22, 0.25);
+  color: var(--accent);
+  background: var(--surface-blue);
+  border: 1px solid rgba(0, 127, 255, 0.24);
   border-radius: 999px;
   padding: 2px 8px;
 }
@@ -600,8 +600,8 @@
 }
 
 .endpoint-badge.primary {
-  background: #ffedd5;
-  color: #9a3412;
+  background: var(--surface-blue);
+  color: var(--accent);
 }
 
 .endpoint-url {

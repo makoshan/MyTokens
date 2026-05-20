@@ -13,9 +13,9 @@ interface UsageDashboardProps {
     key: string
     label: string
     value: number
-    view: 'keys' | 'projects' | 'mcp' | 'skills' | 'apps'
+    view: 'keys' | 'crypto' | 'projects' | 'mcp' | 'skills' | 'apps'
   }>
-  onNavigate?: (view: 'providers' | 'keys' | 'projects' | 'mcp' | 'skills' | 'apps') => void
+  onNavigate?: (view: 'providers' | 'keys' | 'crypto' | 'projects' | 'mcp' | 'skills' | 'apps') => void
 }
 
 const integrationLabels: Record<string, string> = {
@@ -40,6 +40,7 @@ const GATEWAY_WINDOWS = [
   { label: '6 小时', value: 360 },
   { label: '24 小时', value: 1440 },
 ]
+const SHOW_GATEWAY_ANALYTICS = false
 
 interface GatewayOverviewProps {
   masterPassword: string
@@ -602,7 +603,7 @@ export default function UsageDashboard({
     key: string
     label: string
     value: number
-    view: 'providers' | 'keys' | 'projects' | 'mcp' | 'skills' | 'apps'
+    view: 'providers' | 'keys' | 'crypto' | 'projects' | 'mcp' | 'skills' | 'apps'
   }> = [
     { key: 'providers', label: '供应商', value: enabledStatuses.length, view: 'providers' },
     ...quickStats,
@@ -694,14 +695,16 @@ export default function UsageDashboard({
         </div>
       )}
 
-      <GatewayAnalyticsSection
-        masterPassword={masterPassword}
-        onError={(msg) => {
-          if (msg) {
-            console.error(msg)
-          }
-        }}
-      />
+      {SHOW_GATEWAY_ANALYTICS ? (
+        <GatewayAnalyticsSection
+          masterPassword={masterPassword}
+          onError={(msg) => {
+            if (msg) {
+              console.error(msg)
+            }
+          }}
+        />
+      ) : null}
     </div>
   );
 }

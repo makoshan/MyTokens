@@ -30,6 +30,7 @@ export function buildDashboardViewModel(snapshot: DashboardSnapshot) {
     { id: 'usage', label: '日志' },
     { id: 'quality', label: '模型检测' },
     { id: 'credits', label: '额度' },
+    { id: 'topup', label: '充值' },
     { id: 'docs', label: '文档' },
   ] as const
   const channelSummary = {

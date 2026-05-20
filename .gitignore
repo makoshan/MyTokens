@@ -6,6 +6,7 @@
 # Build outputs
 node_modules/
 dist/
+dist-tests/
 src-tauri/target/
 .tmp-tests/
 

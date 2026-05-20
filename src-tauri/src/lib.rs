@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
-use tauri::Manager;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
+use tauri::Manager;
 use tauri::WebviewUrl;
 use tauri::WebviewWindowBuilder;
 use tauri_plugin_global_shortcut::ShortcutState;
@@ -12,10 +12,11 @@ use tauri_plugin_log::{Target, TargetKind};
 mod commands;
 mod gateway;
 mod provider_defaults;
-pub mod stt;
 mod secret_store;
+pub mod stt;
 mod usage;
 mod vault;
+pub mod vault_crypto;
 mod voice_input;
 
 use vault::Vault;
@@ -57,7 +58,9 @@ fn toggle_voice_input(app: &tauri::AppHandle) {
         next
     };
 
-    if next.voice_input_enabled && commands::is_supported_voice_trigger_mode(&next.voice_trigger_mode) {
+    if next.voice_input_enabled
+        && commands::is_supported_voice_trigger_mode(&next.voice_trigger_mode)
+    {
         state.voice_runtime.stop_listener();
         let trigger = commands::normalize_voice_trigger_mode(&next.voice_trigger_mode)
             .unwrap_or_else(|| "fn_hold".to_string());
@@ -83,10 +86,7 @@ fn cycle_claude_code_model(app: &tauri::AppHandle) {
         Ok(v) => v,
         Err(_) => return,
     };
-    let current = routes
-        .iter()
-        .find(|r| r.app_type == "claude-code")
-        .cloned();
+    let current = routes.iter().find(|r| r.app_type == "claude-code").cloned();
     let provider = current
         .as_ref()
         .map(|r| r.provider.as_str())
@@ -111,7 +111,10 @@ fn cycle_claude_code_model(app: &tauri::AppHandle) {
     let next_model = match current_model.as_deref() {
         None => candidates.first().cloned(),
         Some(cur) => {
-            let idx = candidates.iter().position(|v| v == cur).unwrap_or(usize::MAX);
+            let idx = candidates
+                .iter()
+                .position(|v| v == cur)
+                .unwrap_or(usize::MAX);
             if idx == usize::MAX {
                 candidates.first().cloned()
             } else {
@@ -129,31 +132,49 @@ fn setup_tray(app: &tauri::App) -> Result<(), tauri::Error> {
     let handle = app.handle();
     let show = MenuItem::with_id(handle, "tray_show", "显示 MyKey", true, None::<&str>)?;
     let hide = MenuItem::with_id(handle, "tray_hide", "隐藏 MyKey", true, None::<&str>)?;
-    let toggle_voice =
-        MenuItem::with_id(handle, "tray_toggle_voice", "开关语音输入", true, None::<&str>)?;
-    let cycle_claude =
-        MenuItem::with_id(handle, "tray_cycle_claude", "Claude Code: 切换模型", true, None::<&str>)?;
+    let toggle_voice = MenuItem::with_id(
+        handle,
+        "tray_toggle_voice",
+        "开关语音输入",
+        true,
+        None::<&str>,
+    )?;
+    let cycle_claude = MenuItem::with_id(
+        handle,
+        "tray_cycle_claude",
+        "Claude Code: 切换模型",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(handle, "tray_quit", "退出", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(handle)?;
     let sep2 = PredefinedMenuItem::separator(handle)?;
 
     let menu = Menu::with_items(
         handle,
-        &[&show, &hide, &sep1, &toggle_voice, &cycle_claude, &sep2, &quit],
+        &[
+            &show,
+            &hide,
+            &sep1,
+            &toggle_voice,
+            &cycle_claude,
+            &sep2,
+            &quit,
+        ],
     )?;
 
     TrayIconBuilder::new()
         .menu(&menu)
-        .on_menu_event(|app, event: tauri::menu::MenuEvent| {
-            match event.id().as_ref() {
+        .on_menu_event(
+            |app, event: tauri::menu::MenuEvent| match event.id().as_ref() {
                 "tray_show" => show_main_window(app),
                 "tray_hide" => hide_main_window(app),
                 "tray_toggle_voice" => toggle_voice_input(app),
                 "tray_cycle_claude" => cycle_claude_code_model(app),
                 "tray_quit" => app.exit(0),
                 _ => {}
-            }
-        })
+            },
+        )
         .build(app)?;
     Ok(())
 }
@@ -596,6 +617,50 @@ pub struct Project {
     pub updated_at: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CryptoWallet {
+    pub id: String,
+    pub name: String,
+    pub wallet_type: String,
+    pub secret_kind: String,
+    pub passkey_credential_id: Option<String>,
+    pub passkey_rp_id: Option<String>,
+    pub passkey_prf_salt: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub is_active: bool,
+    pub accounts: Vec<CryptoAccount>,
+    pub tokens: Vec<CryptoToken>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CryptoAccount {
+    pub id: String,
+    pub wallet_id: String,
+    pub chain: String,
+    pub network: String,
+    pub address: String,
+    pub derivation_path: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CryptoToken {
+    pub id: String,
+    pub wallet_id: String,
+    pub account_id: Option<String>,
+    pub chain: String,
+    pub network: String,
+    pub symbol: String,
+    pub contract_address: Option<String>,
+    pub decimals: Option<i64>,
+    pub balance: Option<String>,
+    pub updated_at: String,
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let vault = Vault::new();
@@ -706,6 +771,12 @@ pub fn run() {
             commands::set_master_password,
             commands::authenticate,
             commands::is_password_set,
+            commands::initialize_vault_unlock_methods,
+            commands::get_vault_unlock_state,
+            commands::generate_passkey_prf_salt_command,
+            commands::add_passkey_prf_unlock_method,
+            commands::authenticate_with_passkey_prf,
+            commands::authenticate_with_recovery_key,
             commands::mykey_capabilities,
             commands::mykey_command,
             commands::add_credential,
@@ -720,6 +791,19 @@ pub fn run() {
             commands::generate_mykey_sync_config,
             commands::backup_scanned_projects_to_onepassword,
             commands::restore_scanned_projects_from_onepassword,
+            commands::add_crypto_wallet,
+            commands::get_crypto_wallets,
+            commands::get_crypto_wallet_secret,
+            commands::add_crypto_account,
+            commands::add_crypto_token,
+            commands::update_crypto_token_balance,
+            commands::delete_crypto_wallet,
+            commands::query_crypto_native_balance,
+            commands::get_crypto_evm_fee_defaults,
+            commands::query_crypto_erc20_balance,
+            commands::discover_alchemy_erc20_tokens,
+            commands::discover_oklink_address_assets,
+            commands::broadcast_crypto_raw_transaction,
             commands::get_providers,
             commands::upsert_provider,
             commands::set_provider_active,
@@ -795,6 +879,7 @@ pub fn run() {
             commands::update_project,
             commands::auto_scan_projects,
             commands::clear_project_data,
+            commands::compute_gateway_admin_request,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

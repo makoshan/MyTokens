@@ -13,6 +13,8 @@ import type { ProviderAdapter } from './providers/adapter.js'
 import { openAIAdapter } from './providers/openai.js'
 import { createDashboardSession, createInviteToken, hashDashboardToken } from './routes/dashboard.js'
 import { relayCompletion, relayCompletionStream } from './routes/relay.js'
+import { verifyAndCreditBurn, type TopupConfig } from './routes/topup.js'
+import { relayerTransfer, relayerBurnWithSig } from './routes/relayer.js'
 import { resolveRoutingRule } from './routing/router.js'
 import type {
   CreditRequestRecord,
@@ -40,6 +42,11 @@ export interface GatewayEnv {
   ACCOUNT_DO?: GatewayDurableObjectNamespace
   ACCOUNT_RPM_LIMIT?: string
   ASSETS?: { fetch(request: Request): Promise<Response> }
+  TEMPO_RPC_URL?: string
+  TEMPO_CHAIN_ID?: string
+  MYC_TOKEN_ADDRESS?: string
+  MYC_MICRO_USD_PER_TOKEN?: string
+  RELAYER_PRIVATE_KEY?: string
 }
 
 export interface GatewayAppOptions {
@@ -106,6 +113,23 @@ function getMasterKeys(options: GatewayAppOptions, env?: GatewayEnv): Record<str
   if (options.masterKeys) return options.masterKeys
   if (env?.MASTER_KEY_V1) return { v1: base64ToBytes(env.MASTER_KEY_V1) }
   throw new GatewayError('master_key_not_configured', 500)
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input))
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+function getTopupConfig(env?: GatewayEnv): TopupConfig {
+  const tokenAddress = env?.MYC_TOKEN_ADDRESS
+  if (!tokenAddress) throw new GatewayError('topup_not_configured', 500)
+  return {
+    rpcUrl: env?.TEMPO_RPC_URL ?? 'https://rpc.tempo.xyz',
+    chainId: env?.TEMPO_CHAIN_ID ? Number(env.TEMPO_CHAIN_ID) : 4217,
+    tokenAddress,
+    // 1 MYC = $1 by default (1,000,000 µUSD per whole 6-decimal MYC).
+    microUsdPerToken: env?.MYC_MICRO_USD_PER_TOKEN ? Number(env.MYC_MICRO_USD_PER_TOKEN) : 1_000_000,
+  }
 }
 
 async function authenticateDashboard(request: Request, store: GatewayStore, now: string): Promise<string> {
@@ -413,9 +437,15 @@ async function handleRequest(
       'SameSite=Strict',
       `Expires=${new Date(session.expiresAt).toUTCString()}`,
     ].join('; ')
+    // Preserve the red-packet claim code through the redirect so the SPA can
+    // auto-open the claim overlay once the session cookie is set. Without this
+    // the combined `/accept?token=...&redpacket=...` invite link logs the
+    // friend in but the overlay never appears (the query is dropped).
+    const redpacketCode = url.searchParams.get('redpacket')
+    const location = redpacketCode ? `/?redpacket=${encodeURIComponent(redpacketCode)}` : '/'
     return new Response(null, {
       status: 302,
-      headers: { location: '/', 'set-cookie': cookie },
+      headers: { location, 'set-cookie': cookie },
     })
   }
 
@@ -538,6 +568,65 @@ async function handleRequest(
   if (url.pathname === '/dashboard/usage' && request.method === 'GET') {
     const accountId = await authenticateDashboard(request, store, now)
     return json({ data: await store.listUsage(accountId) })
+  }
+
+  // Red-packet claim: buyer submits a claim code + their wallet address. The
+  // relayer transfers MYC from its pool to the address. User mints nothing,
+  // pays no gas.
+  if (url.pathname === '/dashboard/claim' && request.method === 'POST') {
+    const accountId = await authenticateDashboard(request, store, now)
+    const body = await readJsonObject(request)
+    const code = requireString(body, 'code')
+    const toAddress = requireString(body, 'to_address')
+    if (!/^0x[0-9a-fA-F]{40}$/.test(toAddress)) throw new GatewayError('invalid_address', 400)
+    const packet = await store.getRedpacketByCodeHash(await sha256Hex(code))
+    if (!packet) throw new GatewayError('redpacket_not_found', 404)
+    if (packet.status !== 'unclaimed') throw new GatewayError('redpacket_already_claimed', 409)
+    const txHash = await relayerTransfer(env, toAddress, BigInt(packet.amountRaw))
+    await store.markRedpacketClaimed({ id: packet.id, account: accountId, toAddress, txHash, now })
+    return json({ tx_hash: txHash, amount_myc: Number(packet.amountRaw) / 1e6, to_address: toAddress })
+  }
+
+  // Gasless redeem: buyer signs a burnWithSig authorization (no gas). The
+  // relayer submits it on-chain (pays gas); then we verify the burn and credit.
+  if (url.pathname === '/dashboard/redeem-gasless' && request.method === 'POST') {
+    const accountId = await authenticateDashboard(request, store, now)
+    const body = await readJsonObject(request)
+    const from = requireString(body, 'from')
+    const value = BigInt(requireString(body, 'value'))
+    const memo = requireString(body, 'memo') as `0x${string}`
+    const deadline = BigInt(requireString(body, 'deadline'))
+    const sig = requireString(body, 'sig') as `0x${string}`
+    const txHash = await relayerBurnWithSig(env, { from, value, memo, deadline, sig })
+    const result = await verifyAndCreditBurn({ store, config: getTopupConfig(env), txHash, accountId, now, fetchImpl: options.fetchImpl })
+    return json({
+      tx_hash: txHash,
+      credited_micro_usd: result.creditedMicroUsd,
+      balance_micro_usd: result.balanceMicroUsd,
+      burned_myc: Number(result.burn.amountRaw) / 1e6,
+    })
+  }
+
+  // Self-service MYC top-up: buyer burns MYC on Tempo, then submits the tx hash
+  // here. We verify the burn on-chain (read-only) and credit their balance.
+  if (url.pathname === '/dashboard/topup' && request.method === 'POST') {
+    const accountId = await authenticateDashboard(request, store, now)
+    const body = await readJsonObject(request)
+    const txHash = requireString(body, 'tx_hash')
+    const result = await verifyAndCreditBurn({
+      store,
+      config: getTopupConfig(env),
+      txHash,
+      accountId,
+      now,
+      fetchImpl: options.fetchImpl,
+    })
+    return json({
+      tx_hash: txHash,
+      credited_micro_usd: result.creditedMicroUsd,
+      balance_micro_usd: result.balanceMicroUsd,
+      burned_myc_raw: result.burn.amountRaw.toString(),
+    })
   }
 
   if (url.pathname === '/dashboard/credit-requests' && request.method === 'POST') {
@@ -682,6 +771,38 @@ async function handleRequest(
       account_id: account.id,
       balance_micro_usd: account.balanceMicroUsd,
       updated_at: account.updatedAt,
+    })
+  }
+
+  const creditFromBurnMatch = /^\/admin\/accounts\/([^/]+)\/credit-from-burn$/.exec(url.pathname)
+  if (creditFromBurnMatch && request.method === 'POST') {
+    await requireAdmin(request, adminToken, adminIpAllowlist)
+    const body = await readJsonObject(request)
+    const txHash = requireString(body, 'tx_hash')
+    const result = await verifyAndCreditBurn({
+      store,
+      config: getTopupConfig(env),
+      txHash,
+      accountId: creditFromBurnMatch[1],
+      now,
+      fetchImpl: options.fetchImpl,
+    })
+    await recordAuditAdminAction(store, {
+      action: 'admin.account.credit_from_burn',
+      targetType: 'account',
+      targetId: creditFromBurnMatch[1],
+      body,
+      statusCode: 200,
+      now,
+      extra: { credited_micro_usd: result.creditedMicroUsd, burned_myc_raw: result.burn.amountRaw.toString() },
+    })
+    return json({
+      account_id: creditFromBurnMatch[1],
+      tx_hash: txHash,
+      credited_micro_usd: result.creditedMicroUsd,
+      balance_micro_usd: result.balanceMicroUsd,
+      burned_myc_raw: result.burn.amountRaw.toString(),
+      memo: result.burn.memo,
     })
   }
 
@@ -1051,6 +1172,60 @@ async function handleRequest(
         valid_from: row.validFrom,
         valid_to: row.validTo,
         enabled: row.enabled,
+      })),
+    })
+  }
+
+  if (url.pathname === '/admin/redpackets' && request.method === 'POST') {
+    await requireAdmin(request, adminToken, adminIpAllowlist)
+    const body = await readJsonObject(request)
+    const mycAmount = Number(body.amount_myc)
+    if (!Number.isFinite(mycAmount) || mycAmount <= 0) throw new GatewayError('invalid_amount_myc', 400)
+    const amountRaw = BigInt(Math.round(mycAmount * 1e6))
+    const code = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '').slice(0, 8)
+    const codeHash = await sha256Hex(code)
+    const id = `rp_${crypto.randomUUID()}`
+    await store.createRedpacket({ id, codeHash, amountRaw: amountRaw.toString(), label: optionalStringField(body, 'label'), status: 'unclaimed', createdAt: now })
+    const origin = new URL(request.url).origin
+    return json({ id, code, claim_url: `${origin}/?redpacket=${code}`, amount_myc: mycAmount, status: 'unclaimed' }, 201)
+  }
+
+  if (url.pathname === '/admin/redpackets' && request.method === 'GET') {
+    await requireAdmin(request, adminToken, adminIpAllowlist)
+    const rows = await store.listRedpackets({ limit: 200 })
+    return json({
+      data: rows.map((r) => ({
+        id: r.id,
+        amount_myc: Number(r.amountRaw) / 1e6,
+        label: r.label ?? null,
+        status: r.status,
+        claimed_by_account: r.claimedByAccount ?? null,
+        claimed_to_address: r.claimedToAddress ?? null,
+        claim_tx_hash: r.claimTxHash ?? null,
+        created_at: r.createdAt,
+        claimed_at: r.claimedAt ?? null,
+      })),
+    })
+  }
+
+  if (url.pathname === '/admin/topups' && request.method === 'GET') {
+    await requireAdmin(request, adminToken, adminIpAllowlist)
+    const limitParam = url.searchParams.get('limit')
+    const limit = limitParam ? Math.max(1, Math.min(500, Number(limitParam) || 100)) : 100
+    const rows = await store.listOnchainTopups({ limit })
+    return json({
+      data: rows.map((r) => ({
+        id: r.id,
+        chain_id: r.chainId,
+        tx_hash: r.txHash,
+        log_index: r.logIndex,
+        account_id: r.accountId,
+        token_address: r.tokenAddress,
+        from_address: r.fromAddress,
+        amount_raw: r.amountRaw,
+        burned_myc: Number(r.amountRaw) / 1e6,
+        credited_micro_usd: r.creditedMicroUsd,
+        created_at: r.createdAt,
       })),
     })
   }

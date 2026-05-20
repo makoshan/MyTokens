@@ -23,7 +23,7 @@
 .key-list-search:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(255, 107, 61, 0.15);
+  box-shadow: 0 0 0 3px rgba(0, 127, 255, 0.14);
 }
 
 .group-mode-switch {
@@ -31,7 +31,7 @@
   align-self: flex-start;
   background: var(--panel-alt);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-pill);
   padding: 4px;
   gap: 4px;
 }
@@ -39,7 +39,7 @@
 .group-mode-btn {
   border: none;
   background: transparent;
-  border-radius: 8px;
+  border-radius: var(--radius-pill);
   padding: 6px 10px;
   font-size: 12px;
   font-weight: 600;
@@ -74,7 +74,7 @@
 .provider-badge {
   display: inline-block;
   padding: 4px 12px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: white;
   font-size: 12px;
   font-weight: 600;
@@ -108,14 +108,14 @@
   padding: 12px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
 .key-item:hover {
   background: var(--panel-alt);
-  border-color: rgba(255, 107, 61, 0.4);
+  border-color: rgba(0, 127, 255, 0.36);
   box-shadow: var(--shadow-soft);
 }
 
@@ -157,10 +157,10 @@
 
 .key-item-status {
   font-size: 10px;
-  color: #b45309;
-  border: 1px solid #fcd34d;
-  background: #fef3c7;
-  border-radius: 999px;
+  color: var(--status-warning);
+  border: 1px solid #f6a87c;
+  background: var(--status-warning-bg);
+  border-radius: var(--radius-pill);
   padding: 2px 7px;
 }
 
@@ -175,7 +175,7 @@
 .key-provider-tag {
   display: inline-flex;
   align-items: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 2px 8px;
   font-size: 11px;
   font-weight: 600;
@@ -190,7 +190,7 @@
 }
 
 .key-provider-tag-btn:hover {
-  background: rgba(255, 107, 61, 0.2);
+  background: rgba(0, 127, 255, 0.14);
 }
 
 .key-source-path {
@@ -224,7 +224,7 @@
 }
 
 .action-btn:hover {
-  background: rgba(255, 107, 61, 0.12);
+  background: rgba(0, 127, 255, 0.12);
 }
 
 .copy-btn:hover {

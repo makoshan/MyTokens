@@ -114,7 +114,11 @@ pub async fn transcribe(
     let parsed = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
     if !status.is_success() {
         let detail = extract_error_message(&parsed).unwrap_or_else(|| truncate_text(&body, 220));
-        return Err(format!("ElevenLabs STT HTTP {}: {}", status.as_u16(), detail));
+        return Err(format!(
+            "ElevenLabs STT HTTP {}: {}",
+            status.as_u16(),
+            detail
+        ));
     }
 
     if let Some(text) = parsed

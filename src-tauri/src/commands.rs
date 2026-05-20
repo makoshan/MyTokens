@@ -1,12 +1,13 @@
 use crate::{
     usage,
+    vault_crypto::{generate_passkey_prf_salt, PasskeyPrfDescriptor},
     voice_input::{VoiceInputDiagnostics, VoiceInputSettings},
-    AppRoute, AppState, Credential, ExternalLibraryMcp, ExternalLibrarySkill,
-    GatewayAccessCredentials, GatewayPolicySettings, GatewayRequestLog, GatewayTrafficMetrics,
-    GlobalSettingsPayload, IntegrationConfigSnapshot, OpencodeConfigSnapshot, Project,
-    PromptTemplate, ProviderAppBindingInput, ProviderConfig, ProviderDetails,
-    ProviderEndpointInput, ProviderEnvVarInput, QuickActionHistoryRecord, QuickActionResult,
-    QuickActionSettings, VoiceInputHistoryRecord,
+    AppRoute, AppState, Credential, CryptoAccount, CryptoToken, CryptoWallet, ExternalLibraryMcp,
+    ExternalLibrarySkill, GatewayAccessCredentials, GatewayPolicySettings, GatewayRequestLog,
+    GatewayTrafficMetrics, GlobalSettingsPayload, IntegrationConfigSnapshot,
+    OpencodeConfigSnapshot, Project, PromptTemplate, ProviderAppBindingInput, ProviderConfig,
+    ProviderDetails, ProviderEndpointInput, ProviderEnvVarInput, QuickActionHistoryRecord,
+    QuickActionResult, QuickActionSettings, VoiceInputHistoryRecord,
 };
 use base64::Engine as _;
 use regex::Regex;
@@ -25,6 +26,65 @@ use tauri::{Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use walkdir::WalkDir;
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultUnlockBootstrap {
+    pub created: bool,
+    pub recovery_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CryptoBalanceResult {
+    pub address: String,
+    pub balance_wei: String,
+    pub balance_eth: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CryptoBroadcastResult {
+    pub tx_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CryptoEvmFeeDefaults {
+    pub nonce: String,
+    pub gas_limit: String,
+    pub gas_price: String,
+    pub max_priority_fee_per_gas: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CryptoErc20BalanceResult {
+    pub contract_address: String,
+    pub owner_address: String,
+    pub balance_raw: String,
+    pub balance: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlchemyDiscoveredToken {
+    pub contract_address: String,
+    pub symbol: String,
+    pub decimals: i64,
+    pub balance_raw: String,
+    pub balance: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OklinkDiscoveredToken {
+    pub contract_address: Option<String>,
+    pub symbol: String,
+    pub balance: String,
+    pub value_usd: Option<String>,
+    pub price_usd: Option<String>,
+}
+
 #[tauri::command]
 pub fn set_master_password(password: String, state: State<'_, AppState>) -> Result<bool, String> {
     let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
@@ -42,6 +102,74 @@ pub fn authenticate(password: String, state: State<'_, AppState>) -> Result<bool
 pub fn is_password_set(state: State<'_, AppState>) -> Result<bool, String> {
     let vault = state.vault.lock().map_err(|e| e.to_string())?;
     Ok(vault.is_password_set())
+}
+
+#[tauri::command]
+pub fn initialize_vault_unlock_methods(
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<VaultUnlockBootstrap, String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    let recovery_key = vault.initialize_vault_unlock_methods(&master_password)?;
+    Ok(VaultUnlockBootstrap {
+        created: recovery_key.is_some(),
+        recovery_key,
+    })
+}
+
+#[tauri::command]
+pub fn get_vault_unlock_state(
+    state: State<'_, AppState>,
+) -> Result<crate::vault::VaultUnlockState, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    vault.get_vault_unlock_state()
+}
+
+#[tauri::command]
+pub fn generate_passkey_prf_salt_command() -> Result<String, String> {
+    Ok(generate_passkey_prf_salt())
+}
+
+#[tauri::command]
+pub fn add_passkey_prf_unlock_method(
+    master_password: String,
+    rp_id: String,
+    user_id: String,
+    credential_id: String,
+    prf_salt: String,
+    prf_key_hex: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    vault.add_passkey_prf_unlock(
+        &master_password,
+        PasskeyPrfDescriptor {
+            rp_id,
+            user_id,
+            credential_id,
+            prf_salt,
+            prf_key_hex,
+        },
+    )?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn authenticate_with_passkey_prf(
+    prf_key_hex: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    vault.authenticate_with_passkey_prf(&prf_key_hex)
+}
+
+#[tauri::command]
+pub fn authenticate_with_recovery_key(
+    recovery_key: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    vault.authenticate_with_recovery_key(&recovery_key)
 }
 
 #[tauri::command]
@@ -392,7 +520,10 @@ pub(crate) fn resolve_quick_endpoint(provider: &ProviderConfig) -> String {
     provider.base_url.trim().to_string()
 }
 
-pub(crate) fn resolve_provider_auth(vault: &crate::vault::Vault, provider: &ProviderConfig) -> String {
+pub(crate) fn resolve_provider_auth(
+    vault: &crate::vault::Vault,
+    provider: &ProviderConfig,
+) -> String {
     if !provider.api_key.trim().is_empty() {
         return provider.api_key.trim().to_string();
     }
@@ -1068,9 +1199,7 @@ pub fn set_voice_input_settings(
     };
 
     // Apply listener lifecycle immediately.
-    if next.voice_input_enabled
-        && is_supported_voice_trigger_mode(&next.voice_trigger_mode)
-    {
+    if next.voice_input_enabled && is_supported_voice_trigger_mode(&next.voice_trigger_mode) {
         // Restart to apply updated thresholds deterministically.
         state.voice_runtime.stop_listener();
         let trigger = normalize_voice_trigger_mode(&next.voice_trigger_mode)
@@ -1102,8 +1231,7 @@ pub fn initialize_voice_input_listener(
         }
         vault.get_voice_input_settings()?
     };
-    if settings.voice_input_enabled
-        && is_supported_voice_trigger_mode(&settings.voice_trigger_mode)
+    if settings.voice_input_enabled && is_supported_voice_trigger_mode(&settings.voice_trigger_mode)
     {
         let trigger = normalize_voice_trigger_mode(&settings.voice_trigger_mode)
             .unwrap_or_else(|| "fn_hold".to_string());
@@ -5474,6 +5602,42 @@ pub fn get_gateway_access_credentials(
     vault.get_gateway_access_credentials(&app_type)
 }
 
+/// Proxy an authenticated request to the cloud compute-gateway admin API
+/// (`<gateway_url><path>` with `Authorization: Bearer <admin_token>`). Lets the
+/// native operator console manage accounts / channels / red packets / top-ups.
+#[tauri::command]
+pub async fn compute_gateway_admin_request(
+    gateway_url: String,
+    admin_token: String,
+    method: String,
+    path: String,
+    body: Option<String>,
+) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = format!("{}{}", gateway_url.trim_end_matches('/'), path);
+    let mut req = match method.to_uppercase().as_str() {
+        "GET" => client.get(&url),
+        "POST" => client.post(&url),
+        other => return Err(format!("unsupported method: {}", other)),
+    };
+    req = req
+        .header("Authorization", format!("Bearer {}", admin_token.trim()))
+        .header("Content-Type", "application/json");
+    if let Some(payload) = body {
+        req = req.body(payload);
+    }
+    let response = req.send().await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("gateway HTTP {}: {}", status.as_u16(), text));
+    }
+    Ok(text)
+}
+
 #[tauri::command]
 pub fn backup_now(
     target_dir: Option<String>,
@@ -5594,6 +5758,691 @@ pub fn get_projects(
         return Err("Invalid master password".to_string());
     }
     vault.get_projects()
+}
+
+#[tauri::command]
+pub fn add_crypto_wallet(
+    name: String,
+    wallet_type: String,
+    secret_kind: String,
+    secret_material: String,
+    chain: String,
+    network: String,
+    address: String,
+    derivation_path: Option<String>,
+    passkey_credential_id: Option<String>,
+    passkey_rp_id: Option<String>,
+    passkey_prf_salt: Option<String>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<CryptoWallet, String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.add_crypto_wallet(
+        name,
+        wallet_type,
+        secret_kind,
+        secret_material,
+        chain,
+        network,
+        address,
+        derivation_path,
+        passkey_credential_id,
+        passkey_rp_id,
+        passkey_prf_salt,
+    )
+}
+
+#[tauri::command]
+pub fn get_crypto_wallets(
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<CryptoWallet>, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.get_crypto_wallets()
+}
+
+#[tauri::command]
+pub fn get_crypto_wallet_secret(
+    id: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.get_crypto_wallet_secret(&id)
+}
+
+#[tauri::command]
+pub fn add_crypto_token(
+    wallet_id: String,
+    account_id: Option<String>,
+    chain: String,
+    network: String,
+    symbol: String,
+    contract_address: Option<String>,
+    decimals: Option<i64>,
+    balance: Option<String>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<CryptoToken, String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.add_crypto_token(
+        wallet_id,
+        account_id,
+        chain,
+        network,
+        symbol,
+        contract_address,
+        decimals,
+        balance,
+    )
+}
+
+#[tauri::command]
+pub fn update_crypto_token_balance(
+    token_id: String,
+    balance: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<CryptoToken, String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.update_crypto_token_balance(&token_id, balance)
+}
+
+#[tauri::command]
+pub fn add_crypto_account(
+    wallet_id: String,
+    chain: String,
+    network: String,
+    address: String,
+    derivation_path: Option<String>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<CryptoAccount, String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.add_crypto_account(wallet_id, chain, network, address, derivation_path)
+}
+
+#[tauri::command]
+pub fn delete_crypto_wallet(
+    id: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.delete_crypto_wallet(&id)?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn query_crypto_native_balance(
+    rpc_url: String,
+    address: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<CryptoBalanceResult, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let address = normalize_evm_address(&address)?;
+    let response = call_evm_rpc(&rpc_url, "eth_getBalance", json!([address, "latest"])).await?;
+    let balance_hex = response
+        .get("result")
+        .and_then(Value::as_str)
+        .ok_or_else(|| rpc_error_message(&response))?
+        .to_string();
+    Ok(CryptoBalanceResult {
+        address,
+        balance_wei: hex_quantity_to_decimal(&balance_hex)?,
+        balance_eth: format_wei_decimal(&hex_quantity_to_decimal(&balance_hex)?),
+    })
+}
+
+#[tauri::command]
+pub async fn get_crypto_evm_fee_defaults(
+    rpc_url: String,
+    from_address: String,
+    to_address: Option<String>,
+    value_wei: Option<String>,
+    data: Option<String>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<CryptoEvmFeeDefaults, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let from_address = normalize_evm_address(&from_address)?;
+    let to_address = match to_address {
+        Some(value) if !value.trim().is_empty() => Some(normalize_evm_address(&value)?),
+        _ => None,
+    };
+    let data = match data {
+        Some(value) if !value.trim().is_empty() => {
+            Some(normalize_hex_payload(&value, "transaction data")?)
+        }
+        _ => None,
+    };
+    let value_wei = value_wei
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("0");
+
+    let nonce_response = call_evm_rpc(
+        &rpc_url,
+        "eth_getTransactionCount",
+        json!([from_address, "pending"]),
+    )
+    .await?;
+    let nonce_hex = nonce_response
+        .get("result")
+        .and_then(Value::as_str)
+        .ok_or_else(|| rpc_error_message(&nonce_response))?;
+    let nonce = hex_quantity_to_decimal(nonce_hex)?;
+
+    let gas_price_response = call_evm_rpc(&rpc_url, "eth_gasPrice", json!([])).await?;
+    let gas_price_hex = gas_price_response
+        .get("result")
+        .and_then(Value::as_str)
+        .ok_or_else(|| rpc_error_message(&gas_price_response))?;
+    let gas_price = hex_quantity_to_decimal(gas_price_hex)?;
+
+    let max_priority_fee_per_gas =
+        match call_evm_rpc(&rpc_url, "eth_maxPriorityFeePerGas", json!([])).await {
+            Ok(response) => response
+                .get("result")
+                .and_then(Value::as_str)
+                .and_then(|value| hex_quantity_to_decimal(value).ok()),
+            Err(_) => None,
+        };
+
+    let mut tx = serde_json::Map::new();
+    tx.insert("from".to_string(), json!(from_address));
+    if let Some(to) = to_address {
+        tx.insert("to".to_string(), json!(to));
+    }
+    if value_wei != "0" {
+        tx.insert(
+            "value".to_string(),
+            json!(decimal_to_hex_quantity(value_wei)?),
+        );
+    }
+    if let Some(data) = data {
+        tx.insert("data".to_string(), json!(data));
+    }
+
+    let gas_limit =
+        match call_evm_rpc(&rpc_url, "eth_estimateGas", json!([Value::Object(tx)])).await {
+            Ok(response) => response
+                .get("result")
+                .and_then(Value::as_str)
+                .map(hex_quantity_to_decimal)
+                .transpose()?
+                .unwrap_or_else(|| "21000".to_string()),
+            Err(_) => "21000".to_string(),
+        };
+
+    Ok(CryptoEvmFeeDefaults {
+        nonce,
+        gas_limit,
+        gas_price,
+        max_priority_fee_per_gas,
+    })
+}
+
+#[tauri::command]
+pub async fn query_crypto_erc20_balance(
+    rpc_url: String,
+    contract_address: String,
+    owner_address: String,
+    decimals: i64,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<CryptoErc20BalanceResult, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let contract_address = normalize_evm_address(&contract_address)?;
+    let owner_address = normalize_evm_address(&owner_address)?;
+    let data = encode_erc20_balance_of(&owner_address)?;
+    let response = call_evm_rpc(
+        &rpc_url,
+        "eth_call",
+        json!([{ "to": contract_address, "data": data }, "latest"]),
+    )
+    .await?;
+    let balance_hex = response
+        .get("result")
+        .and_then(Value::as_str)
+        .ok_or_else(|| rpc_error_message(&response))?
+        .to_string();
+    let balance_raw = hex_quantity_to_decimal(&balance_hex)?;
+    Ok(CryptoErc20BalanceResult {
+        contract_address,
+        owner_address,
+        balance: format_base_unit_decimal(&balance_raw, decimals),
+        balance_raw,
+    })
+}
+
+#[tauri::command]
+pub async fn discover_alchemy_erc20_tokens(
+    rpc_url: String,
+    owner_address: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<AlchemyDiscoveredToken>, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let owner_address = normalize_evm_address(&owner_address)?;
+    let response = call_evm_rpc(
+        &rpc_url,
+        "alchemy_getTokenBalances",
+        json!([owner_address, "erc20"]),
+    )
+    .await?;
+    let balances = response
+        .get("result")
+        .and_then(|result| result.get("tokenBalances"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| rpc_error_message(&response))?;
+
+    let mut discovered = Vec::new();
+    for item in balances.iter().take(80) {
+        let Some(contract_address) = item
+            .get("contractAddress")
+            .and_then(Value::as_str)
+            .and_then(|value| normalize_evm_address(value).ok())
+        else {
+            continue;
+        };
+        let Some(balance_hex) = item.get("tokenBalance").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(balance_raw) = hex_quantity_to_decimal(balance_hex) else {
+            continue;
+        };
+        if balance_raw == "0" {
+            continue;
+        }
+
+        let metadata_response = call_evm_rpc(
+            &rpc_url,
+            "alchemy_getTokenMetadata",
+            json!([contract_address.clone()]),
+        )
+        .await
+        .unwrap_or_else(|_| json!({}));
+        let metadata = metadata_response.get("result").unwrap_or(&Value::Null);
+        let symbol = metadata
+            .get("symbol")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("TOKEN")
+            .to_ascii_uppercase();
+        let decimals = metadata
+            .get("decimals")
+            .and_then(Value::as_i64)
+            .unwrap_or(18)
+            .clamp(0, 36);
+
+        discovered.push(AlchemyDiscoveredToken {
+            contract_address,
+            symbol,
+            decimals,
+            balance: format_base_unit_decimal(&balance_raw, decimals),
+            balance_raw,
+        });
+    }
+    Ok(discovered)
+}
+
+#[tauri::command]
+pub async fn discover_oklink_address_assets(
+    api_key: String,
+    chain_short_name: String,
+    owner_address: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<OklinkDiscoveredToken>, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err("OKLink API key is required".to_string());
+    }
+    let chain_short_name = chain_short_name.trim().to_ascii_uppercase();
+    if chain_short_name.is_empty() {
+        return Err("OKLink chain short name is required".to_string());
+    }
+    let owner_address = normalize_evm_address(&owner_address)?;
+
+    let summary = call_oklink_explorer_get(
+        "/api/v5/explorer/address/address-summary",
+        &[
+            ("chainShortName", chain_short_name.as_str()),
+            ("address", owner_address.as_str()),
+        ],
+        api_key,
+    )
+    .await?;
+    let mut discovered = Vec::new();
+    if let Some(item) = oklink_first_data_item(&summary) {
+        let balance = item
+            .get("balance")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if !balance.is_empty() && balance != "0" {
+            let symbol = item
+                .get("balanceSymbol")
+                .and_then(Value::as_str)
+                .unwrap_or(chain_short_name.as_str())
+                .trim()
+                .to_ascii_uppercase();
+            discovered.push(OklinkDiscoveredToken {
+                contract_address: None,
+                symbol,
+                balance: balance.to_string(),
+                value_usd: item
+                    .get("totalTokenValue")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                price_usd: None,
+            });
+        }
+    }
+
+    let token_response = call_oklink_explorer_get(
+        "/api/v5/explorer/address/token-balance",
+        &[
+            ("chainShortName", chain_short_name.as_str()),
+            ("address", owner_address.as_str()),
+            ("protocolType", "token_20"),
+            ("page", "1"),
+            ("limit", "50"),
+        ],
+        api_key,
+    )
+    .await?;
+    if let Some(item) = oklink_first_data_item(&token_response) {
+        if let Some(tokens) = item.get("tokenList").and_then(Value::as_array) {
+            for token in tokens {
+                let balance = token
+                    .get("holdingAmount")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                if balance.is_empty() || balance == "0" {
+                    continue;
+                }
+                let symbol = token
+                    .get("symbol")
+                    .and_then(Value::as_str)
+                    .unwrap_or("TOKEN")
+                    .trim()
+                    .to_ascii_uppercase();
+                let contract_address = token
+                    .get("tokenContractAddress")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                discovered.push(OklinkDiscoveredToken {
+                    contract_address,
+                    symbol,
+                    balance: balance.to_string(),
+                    value_usd: token
+                        .get("valueUsd")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    price_usd: token
+                        .get("priceUsd")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+            }
+        }
+    }
+
+    Ok(discovered)
+}
+
+#[tauri::command]
+pub async fn broadcast_crypto_raw_transaction(
+    rpc_url: String,
+    signed_raw_tx: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<CryptoBroadcastResult, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let signed_raw_tx = normalize_hex_payload(&signed_raw_tx, "signed raw transaction")?;
+    let response = call_evm_rpc(&rpc_url, "eth_sendRawTransaction", json!([signed_raw_tx])).await?;
+    let tx_hash = response
+        .get("result")
+        .and_then(Value::as_str)
+        .ok_or_else(|| rpc_error_message(&response))?
+        .to_string();
+    Ok(CryptoBroadcastResult { tx_hash })
+}
+
+async fn call_evm_rpc(rpc_url: &str, method: &str, params: Value) -> Result<Value, String> {
+    let rpc_url = rpc_url.trim();
+    if !(rpc_url.starts_with("https://") || rpc_url.starts_with("http://")) {
+        return Err("RPC URL must start with http:// or https://".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .post(rpc_url)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("RPC HTTP error {status}: {body}"));
+    }
+    serde_json::from_str(&body).map_err(|e| format!("Invalid RPC response: {e}"))
+}
+
+async fn call_oklink_explorer_get(
+    path: &str,
+    params: &[(&str, &str)],
+    api_key: &str,
+) -> Result<Value, String> {
+    if !path.starts_with("/api/v5/explorer/") {
+        return Err("OKLink API path must start with /api/v5/explorer/".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = reqwest::Url::parse_with_params(
+        &format!("https://www.oklink.com{path}"),
+        params.iter().copied(),
+    )
+    .map_err(|e| e.to_string())?;
+    let response = client
+        .get(url)
+        .header("Ok-Access-Key", api_key)
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("OKLink HTTP error {status}: {body}"));
+    }
+    let parsed: Value =
+        serde_json::from_str(&body).map_err(|e| format!("Invalid OKLink response: {e}"))?;
+    if parsed.get("code").and_then(Value::as_str) != Some("0") {
+        return Err(format!(
+            "OKLink error: {}",
+            parsed
+                .get("msg")
+                .and_then(Value::as_str)
+                .unwrap_or("request failed")
+        ));
+    }
+    Ok(parsed)
+}
+
+fn oklink_first_data_item(response: &Value) -> Option<&Value> {
+    response
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+}
+
+fn normalize_evm_address(address: &str) -> Result<String, String> {
+    let address = normalize_hex_payload(address, "address")?;
+    if address.len() != 42 {
+        return Err("EVM address must be 20 bytes".to_string());
+    }
+    Ok(address)
+}
+
+fn normalize_hex_payload(value: &str, label: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if !trimmed.starts_with("0x") {
+        return Err(format!("{label} must start with 0x"));
+    }
+    if trimmed.len() <= 2 || !trimmed[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("{label} must be hex encoded"));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn hex_quantity_to_decimal(value: &str) -> Result<String, String> {
+    let trimmed = value.strip_prefix("0x").unwrap_or(value);
+    let parsed = u128::from_str_radix(if trimmed.is_empty() { "0" } else { trimmed }, 16)
+        .map_err(|_| "RPC balance is too large to display".to_string())?;
+    Ok(parsed.to_string())
+}
+
+fn decimal_to_hex_quantity(value: &str) -> Result<String, String> {
+    let parsed = value
+        .trim()
+        .parse::<u128>()
+        .map_err(|_| "Quantity must be a non-negative decimal integer".to_string())?;
+    Ok(format!("0x{parsed:x}"))
+}
+
+fn encode_erc20_balance_of(address: &str) -> Result<String, String> {
+    let address = normalize_evm_address(address)?;
+    Ok(format!(
+        "0x70a08231{:0>64}",
+        address.trim_start_matches("0x").to_ascii_lowercase()
+    ))
+}
+
+fn format_wei_decimal(value: &str) -> String {
+    let Ok(wei) = value.parse::<u128>() else {
+        return value.to_string();
+    };
+    let base = 1_000_000_000_000_000_000u128;
+    let whole = wei / base;
+    let fraction = wei % base;
+    if fraction == 0 {
+        return whole.to_string();
+    }
+    let mut fraction_text = format!("{fraction:018}");
+    while fraction_text.ends_with('0') {
+        fraction_text.pop();
+    }
+    if fraction_text.len() > 8 {
+        fraction_text.truncate(8);
+    }
+    format!("{whole}.{fraction_text}")
+}
+
+fn format_base_unit_decimal(value: &str, decimals: i64) -> String {
+    let Ok(amount) = value.parse::<u128>() else {
+        return value.to_string();
+    };
+    if decimals <= 0 {
+        return amount.to_string();
+    }
+    let decimals = decimals.min(36) as u32;
+    let base = 10u128.saturating_pow(decimals);
+    if base == 0 {
+        return value.to_string();
+    }
+    let whole = amount / base;
+    let fraction = amount % base;
+    if fraction == 0 {
+        return whole.to_string();
+    }
+    let mut fraction_text = format!("{fraction:0width$}", width = decimals as usize);
+    while fraction_text.ends_with('0') {
+        fraction_text.pop();
+    }
+    if fraction_text.len() > 8 {
+        fraction_text.truncate(8);
+    }
+    format!("{whole}.{fraction_text}")
+}
+
+fn rpc_error_message(response: &Value) -> String {
+    response
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .map(|message| format!("RPC error: {message}"))
+        .unwrap_or_else(|| "RPC response did not include a result".to_string())
 }
 
 #[tauri::command]

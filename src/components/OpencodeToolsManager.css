@@ -76,9 +76,9 @@
 }
 
 .tool-filter-chip.active {
-  border-color: rgba(249, 115, 22, 0.35);
-  background: rgba(249, 115, 22, 0.12);
-  color: #9a3412;
+  border-color: rgba(0, 127, 255, 0.34);
+  background: var(--surface-blue);
+  color: var(--accent);
 }
 
 .tool-grid {

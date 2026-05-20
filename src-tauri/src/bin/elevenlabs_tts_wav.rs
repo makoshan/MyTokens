@@ -102,8 +102,10 @@ async fn main() -> Result<(), String> {
 
     let api_key = get_env("ELEVENLABS_API_KEY")
         .ok_or_else(|| "ELEVENLABS_API_KEY is required".to_string())?;
-    let base_url = get_env("ELEVENLABS_BASE_URL").unwrap_or_else(|| "https://api.elevenlabs.io".to_string());
-    let model_id = get_env("ELEVENLABS_TTS_MODEL_ID").unwrap_or_else(|| "eleven_multilingual_v2".to_string());
+    let base_url =
+        get_env("ELEVENLABS_BASE_URL").unwrap_or_else(|| "https://api.elevenlabs.io".to_string());
+    let model_id =
+        get_env("ELEVENLABS_TTS_MODEL_ID").unwrap_or_else(|| "eleven_multilingual_v2".to_string());
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
@@ -123,7 +125,11 @@ async fn main() -> Result<(), String> {
         if !status.is_success() {
             let parsed = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
             let detail = extract_error_message(&parsed).unwrap_or(body);
-            return Err(format!("List voices failed (HTTP {}): {}", status.as_u16(), detail));
+            return Err(format!(
+                "List voices failed (HTTP {}): {}",
+                status.as_u16(),
+                detail
+            ));
         }
         println!("{}", body);
         return Ok(());
@@ -133,15 +139,16 @@ async fn main() -> Result<(), String> {
         .or_else(|| get_env("ELEVENLABS_VOICE_ID"))
         .ok_or_else(|| "Missing --voice-id (or set ELEVENLABS_VOICE_ID)".to_string())?;
 
-    let text = parse_flag_value(&args, "--text").unwrap_or_else(|| {
-        "语音输入测试，我说的是语音输入测试。".to_string()
-    });
+    let text = parse_flag_value(&args, "--text")
+        .unwrap_or_else(|| "语音输入测试，我说的是语音输入测试。".to_string());
 
-    let out = parse_flag_value(&args, "--out").map(PathBuf::from).unwrap_or_else(|| {
-        let mut path = env::temp_dir();
-        path.push("mykey-elevenlabs-tts.wav");
-        path
-    });
+    let out = parse_flag_value(&args, "--out")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut path = env::temp_dir();
+            path.push("mykey-elevenlabs-tts.wav");
+            path
+        });
 
     let output_format = "pcm_16000";
     let sample_rate = output_format

@@ -18,8 +18,27 @@ ADMIN_IP_ALLOWLIST = ""
 # Durable Object. Empty / unset = no limit. Counter survives DO hibernation.
 ACCOUNT_RPM_LIMIT = ""
 
+# MYC on-chain top-up. Buyers burn MYC and submit the tx hash; the gateway
+# verifies the burn via RPC and credits balance. 1 MYC = $1.
+# Currently pointed at Ethereum Sepolia (validation). For production, switch to
+# the chosen chain (e.g. Base mainnet) + that chain's MYC address.
+# (Var names keep the TEMPO_ prefix for code compat; values are chain-neutral.)
+TEMPO_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com"
+TEMPO_CHAIN_ID = "11155111"
+MYC_TOKEN_ADDRESS = "0x826fc283d2007A261347Cf4c0ff316e486506eBb"
+MYC_MICRO_USD_PER_TOKEN = "1000000"
+
 [observability]
 enabled = true
+
+# Static SPA assets (buyer dashboard at /, admin console at /manage). Worker
+# handles all API and the /accept invite landing; everything else falls
+# through to the bundled assets. `not_found_handling = "none"` prevents an
+# SPA fallback from swallowing API 404s.
+[assets]
+directory = "./static"
+binding = "ASSETS"
+not_found_handling = "none"
 
 [[d1_databases]]
 binding = "DB"

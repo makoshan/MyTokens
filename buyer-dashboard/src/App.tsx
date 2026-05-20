@@ -5,20 +5,35 @@ import { Credits } from './components/Credits.js'
 import { Docs } from './components/Docs.js'
 import { ModelQuality } from './components/ModelQuality.js'
 import { Overview } from './components/Overview.js'
+import { RedpacketClaim } from './components/RedpacketClaim.js'
+import { Topup } from './components/Topup.js'
 import { Usage } from './components/Usage.js'
 import { buildDashboardViewModel } from './dashboardViewModel.js'
 import { Button } from './token-ui.js'
 import type { DashboardSnapshot } from './types.js'
 import './styles.css'
 
-type Tab = 'overview' | 'channels' | 'keys' | 'usage' | 'quality' | 'credits' | 'docs'
+type Tab = 'overview' | 'channels' | 'keys' | 'usage' | 'quality' | 'credits' | 'topup' | 'docs'
 
 export function App({ snapshot }: { snapshot: DashboardSnapshot }) {
   const [activeTab, setActiveTab] = useState<Tab>('overview')
   const model = useMemo(() => buildDashboardViewModel(snapshot), [snapshot])
+  const [redpacketCode, setRedpacketCode] = useState<string>(
+    () => new URLSearchParams(window.location.search).get('redpacket') ?? ''
+  )
+
+  function dismissRedpacket() {
+    setRedpacketCode('')
+    const url = new URL(window.location.href)
+    url.searchParams.delete('redpacket')
+    window.history.replaceState({}, '', url.toString())
+  }
 
   return (
     <main className="console-shell">
+      {redpacketCode && (
+        <RedpacketClaim code={redpacketCode} accountId={snapshot.account.id} onClose={dismissRedpacket} />
+      )}
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">M</div>
@@ -84,6 +99,9 @@ export function App({ snapshot }: { snapshot: DashboardSnapshot }) {
         {activeTab === 'quality' && <ModelQuality rows={snapshot.modelQuality} />}
         {activeTab === 'credits' && (
           <Credits balanceMicroUsd={snapshot.balanceMicroUsd} creditRequests={snapshot.creditRequests} />
+        )}
+        {activeTab === 'topup' && (
+          <Topup balanceMicroUsd={snapshot.balanceMicroUsd} accountId={snapshot.account.id} />
         )}
         {activeTab === 'docs' && <Docs snapshot={snapshot} />}
       </section>

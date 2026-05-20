@@ -396,7 +396,10 @@ pub fn ensure_voice_overlay_window(app: &AppHandle) -> Result<(), String> {
                 .title("MyKey Voice Overlay")
                 .position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
                 .level(PanelLevel::Status)
-                .size(tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }))
+                .size(tauri::Size::Logical(tauri::LogicalSize {
+                    width: w,
+                    height: h,
+                }))
                 .has_shadow(false)
                 .transparent(true)
                 .no_activate(true)
@@ -649,13 +652,11 @@ fn begin_transcribe_session(
                     let (gateway_base_url, gateway_api_key, gateway_open_responses, model_name) = {
                         let vault = state.vault.lock().ok();
                         if let Some(vault) = vault.as_ref() {
-                            let open_responses = vault.gateway_open_responses_enabled().unwrap_or(false);
+                            let open_responses =
+                                vault.gateway_open_responses_enabled().unwrap_or(false);
                             match vault.get_gateway_access_credentials("codex") {
                                 Ok(creds) => {
-                                    let model_name = settings
-                                        .voice_ai_model
-                                        .trim()
-                                        .to_string();
+                                    let model_name = settings.voice_ai_model.trim().to_string();
                                     let model_name = if !model_name.is_empty() {
                                         model_name
                                     } else {
@@ -666,7 +667,12 @@ fn begin_transcribe_session(
                                             .filter(|v| !v.is_empty())
                                             .unwrap_or_else(|| "gpt-5-mini".to_string())
                                     };
-                                    (Some(creds.base_url), Some(creds.api_key), open_responses, model_name)
+                                    (
+                                        Some(creds.base_url),
+                                        Some(creds.api_key),
+                                        open_responses,
+                                        model_name,
+                                    )
                                 }
                                 Err(_err) => (None, None, open_responses, String::new()),
                             }
@@ -699,7 +705,9 @@ fn begin_transcribe_session(
                             }
                         }
                     } else {
-                        post_error = Some("AI 自动编辑不可用：未配置或无法启动 Gateway/codex 路由".to_string());
+                        post_error = Some(
+                            "AI 自动编辑不可用：未配置或无法启动 Gateway/codex 路由".to_string(),
+                        );
                     }
                 }
 
@@ -737,7 +745,11 @@ fn begin_transcribe_session(
                     id: uuid::Uuid::new_v4().to_string(),
                     session_id: Some(session_id_task.clone()),
                     trigger_mode: trigger_mode_task.clone(),
-                    raw_text: if raw_text.is_empty() { None } else { Some(raw_text) },
+                    raw_text: if raw_text.is_empty() {
+                        None
+                    } else {
+                        Some(raw_text)
+                    },
                     final_text: if final_text.trim().is_empty() {
                         None
                     } else {

@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "test:gateway": "node scripts/test-codex-gateway.mjs",
-    "test:linkage": "rm -rf .tmp-tests && tsc -p tsconfig.tests.json && printf '{\"type\":\"commonjs\"}\\n' > .tmp-tests/package.json && node --test tests/linkage.test.cjs",
+    "test:linkage": "rm -rf .tmp-tests && tsc -p tsconfig.tests.json && printf '{\"type\":\"commonjs\"}\\n' > .tmp-tests/package.json && node --test tests/linkage.test.cjs .tmp-tests/tests/*.js",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
@@ -17,6 +17,7 @@
     "tauri:build:arm": "tauri build --target aarch64-apple-darwin"
   },
   "dependencies": {
+    "@consenlabs/tcx-wasm": "^0.9.1",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-dialog": "^2.6.0"
   },

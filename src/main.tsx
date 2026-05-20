@@ -26,7 +26,7 @@ const renderFatal = (title: string, error: unknown) => {
     <div style="font-family: ui-sans-serif, system-ui; padding: 32px; color: #1f2937;">
       <h1 style="font-size: 20px; margin-bottom: 12px;">${escapeHtml(title)}</h1>
       <p style="margin-bottom: 16px; color: #6b7280;">应用启动失败，请将以下错误反馈给开发者。</p>
-      <pre style="white-space: pre-wrap; background: #fff7ed; border: 1px solid #fed7aa; padding: 16px; border-radius: 12px; color: #9a3412;">${escapeHtml(detail)}</pre>
+      <pre style="white-space: pre-wrap; background: #e7f1fc; border: 1px solid #cfe4fa; padding: 16px; border-radius: 12px; color: #0052a5;">${escapeHtml(detail)}</pre>
     </div>
   `
 }

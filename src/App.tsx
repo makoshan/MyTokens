@@ -9,11 +9,13 @@ import ProjectManager from './components/ProjectManager'
 import PromptManager, { PromptTemplate } from './components/PromptManager'
 import UsageDashboard from './components/UsageDashboard'
 import GlobalSettings from './components/GlobalSettings'
+import { ComputeGatewayManager } from './components/ComputeGatewayManager'
 import ApplicationManager from './components/ApplicationManager'
 import OpencodeMcpManager from './components/OpencodeMcpManager'
 import OpencodeSkillManager from './components/OpencodeSkillManager'
 import ClippyAssistant from './components/ClippyAssistant'
 import VoiceInputController from './components/VoiceInputController'
+import CryptoWalletManager, { CryptoWallet } from './components/CryptoWalletManager'
 import type { VoiceInputHistoryRecord } from './types/settings'
 import {
   DEFAULT_PROVIDER_DETAILS,
@@ -58,11 +60,13 @@ type View =
   | 'keys'
   | 'projects'
   | 'providers'
+  | 'crypto'
   | 'apps'
   | 'mcp'
   | 'skills'
   | 'prompts'
   | 'history'
+  | 'gateway'
   | 'settings'
 
 const VIEW_META: Record<View, { title: string; description: string }> = {
@@ -81,6 +85,10 @@ const VIEW_META: Record<View, { title: string; description: string }> = {
   providers: {
     title: '提供商设置',
     description: '统一维护模型与 API 的接入配置。',
+  },
+  crypto: {
+    title: 'Crypto 钱包',
+    description: '管理本地钱包、链上地址与 Token 跟踪。',
   },
   apps: {
     title: '应用配置',
@@ -102,6 +110,10 @@ const VIEW_META: Record<View, { title: string; description: string }> = {
     title: '历史记录',
     description: '查看语音输入的转写、复制与取消记录。',
   },
+  gateway: {
+    title: '算力网关',
+    description: '管理云端网关账户、渠道、红包与兑换记录。',
+  },
   settings: {
     title: '全局设置',
     description: '统一管理服务、集成、诊断与备份。',
@@ -119,6 +131,7 @@ type UsageSnapshot = {
 
 type DashboardOverview = {
   keys: number
+  cryptoWallets: number
   projects: number
   apps: number
   mcps: number
@@ -231,6 +244,7 @@ async function sendSystemNotification(title: string, body: string) {
 function App() {
   const [credentials, setCredentials] = useState<Credential[]>([])
   const [providers, setProviders] = useState<ProviderConfig[]>([])
+  const [cryptoWallets, setCryptoWallets] = useState<CryptoWallet[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [prompts, setPrompts] = useState<PromptTemplateRecord[]>([])
   const [voiceHistory, setVoiceHistory] = useState<VoiceInputHistoryRecord[]>([])
@@ -246,6 +260,7 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [loadingKeys, setLoadingKeys] = useState(false)
   const [loadingProviders, setLoadingProviders] = useState(false)
+  const [loadingCryptoWallets, setLoadingCryptoWallets] = useState(false)
   const [loadingPrompts, setLoadingPrompts] = useState(false)
   const [loadingVoiceHistory, setLoadingVoiceHistory] = useState(false)
   const [voiceHistoryError, setVoiceHistoryError] = useState<string | null>(null)
@@ -254,6 +269,7 @@ function App() {
   const [projectFocus, setProjectFocus] = useState<{ name: string; token: number } | null>(null)
   const [dashboardOverview, setDashboardOverview] = useState<DashboardOverview>({
     keys: 0,
+    cryptoWallets: 0,
     projects: 0,
     apps: 0,
     mcps: 0,
@@ -352,6 +368,20 @@ function App() {
     }
   }
 
+  const loadCryptoWallets = async () => {
+    if (!masterPassword) return
+    try {
+      setLoadingCryptoWallets(true)
+      const result = await invoke<CryptoWallet[]>('get_crypto_wallets', { masterPassword })
+      setCryptoWallets(result)
+    } catch (error) {
+      console.error('Failed to load crypto wallets:', error)
+      setCryptoWallets([])
+    } finally {
+      setLoadingCryptoWallets(false)
+    }
+  }
+
   const loadProjects = async () => {
     if (!masterPassword) return
     try {
@@ -415,6 +445,7 @@ function App() {
       ).length
       setDashboardOverview({
         keys: credentials.length,
+        cryptoWallets: cryptoWallets.length,
         projects: projects.length,
         apps: appCount,
         mcps: mcps.length,
@@ -422,7 +453,7 @@ function App() {
       })
     } catch (error) {
       console.error('Failed to load dashboard overview:', error)
-      setDashboardOverview({ keys: 0, projects: 0, apps: 0, mcps: 0, skills: 0 })
+      setDashboardOverview({ keys: 0, cryptoWallets: 0, projects: 0, apps: 0, mcps: 0, skills: 0 })
     }
   }
 
@@ -438,6 +469,7 @@ function App() {
     if (isAuthenticated && masterPassword) {
       loadCredentials()
       loadProviders()
+      loadCryptoWallets()
       loadProjects()
       loadPrompts()
       loadDashboardOverview()
@@ -461,9 +493,10 @@ function App() {
     setDashboardOverview((prev) => ({
       ...prev,
       keys: credentials.length,
+      cryptoWallets: cryptoWallets.length,
       projects: projects.length,
     }))
-  }, [credentials.length, projects.length])
+  }, [credentials.length, cryptoWallets.length, projects.length])
 
   const providerContextById = useMemo(
     () => buildProviderContextMap(credentials, projectLabelsByCredential, projects),
@@ -938,6 +971,12 @@ function App() {
             提供商
           </button>
           <button
+            className={`nav-item ${view === 'crypto' ? 'active' : ''}`}
+            onClick={() => setView('crypto')}
+          >
+            Crypto
+          </button>
+          <button
             className={`nav-item ${view === 'apps' ? 'active' : ''}`}
             onClick={() => setView('apps')}
           >
@@ -966,6 +1005,12 @@ function App() {
             onClick={() => setView('history')}
           >
             历史记录
+          </button>
+          <button
+            className={`nav-item ${view === 'gateway' ? 'active' : ''}`}
+            onClick={() => setView('gateway')}
+          >
+            算力网关
           </button>
           <button
             className={`nav-item ${view === 'settings' ? 'active' : ''}`}
@@ -1013,6 +1058,7 @@ function App() {
               masterPassword={masterPassword}
               quickStats={[
                 { key: 'keys', label: '密钥', value: dashboardOverview.keys, view: 'keys' },
+                { key: 'crypto', label: '钱包', value: dashboardOverview.cryptoWallets, view: 'crypto' },
                 { key: 'projects', label: '项目', value: dashboardOverview.projects, view: 'projects' },
                 { key: 'mcp', label: 'MCP', value: dashboardOverview.mcps, view: 'mcp' },
                 { key: 'skills', label: '技能', value: dashboardOverview.skills, view: 'skills' },
@@ -1322,6 +1368,15 @@ function App() {
               projectLabelsByCredential={projectLabelsByCredential}
               loading={loadingProviders}
             />
+          ) : view === 'crypto' ? (
+            <CryptoWalletManager
+              masterPassword={masterPassword}
+              wallets={cryptoWallets}
+              loading={loadingCryptoWallets}
+              onWalletsChanged={setCryptoWallets}
+              onRefresh={loadCryptoWallets}
+              onError={(msg) => alert(msg)}
+            />
           ) : view === 'apps' ? (
             <ApplicationManager
               masterPassword={masterPassword}
@@ -1331,6 +1386,8 @@ function App() {
             <OpencodeMcpManager masterPassword={masterPassword} />
           ) : view === 'skills' ? (
             <OpencodeSkillManager masterPassword={masterPassword} />
+          ) : view === 'gateway' ? (
+            <ComputeGatewayManager />
           ) : view === 'settings' ? (
             <GlobalSettings
               masterPassword={masterPassword}

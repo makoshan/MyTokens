@@ -510,6 +510,71 @@ pub fn default_templates() -> Vec<ProviderTemplate> {
             }],
         },
         ProviderTemplate {
+            provider: "bailian-token-plan",
+            label: "百炼 Token Plan",
+            base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            models: vec![
+                "qwen3.6-plus",
+                "qwen3.6-flash",
+                "qwen-image-2.0",
+                "qwen-image-2.0-pro",
+                "wan2.7-image",
+                "wan2.7-image-pro",
+                "deepseek-v4-pro",
+                "deepseek-v4-flash",
+                "deepseek-v3.2",
+                "kimi-k2.6",
+                "kimi-k2.5",
+                "glm-5.1",
+                "glm-5",
+                "MiniMax-M2.5",
+            ],
+            env_vars: vec![
+                "LLM_API_KEY",
+                "LLM_BASE_URL",
+                "LLM_MODEL_NAME",
+                "BAILIAN_API_KEY",
+            ],
+            endpoints: vec![
+                EndpointTemplate {
+                    base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+                    headers: None,
+                    timeout_ms: Some(60000),
+                    proxy_url: None,
+                    is_primary: true,
+                },
+                EndpointTemplate {
+                    base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
+                    headers: None,
+                    timeout_ms: Some(60000),
+                    proxy_url: None,
+                    is_primary: false,
+                },
+            ],
+            app_bindings: vec![
+                AppBindingTemplate {
+                    app_type: "openai-compatible",
+                    config_path: "",
+                    enabled: true,
+                },
+                AppBindingTemplate {
+                    app_type: "codex",
+                    config_path: "",
+                    enabled: false,
+                },
+                AppBindingTemplate {
+                    app_type: "opencode",
+                    config_path: "",
+                    enabled: false,
+                },
+                AppBindingTemplate {
+                    app_type: "openclaw",
+                    config_path: "",
+                    enabled: false,
+                },
+            ],
+        },
+        ProviderTemplate {
             provider: "minimax",
             label: "MiniMax",
             base_url: "https://api.minimax.io/v1",
@@ -712,6 +777,21 @@ pub fn default_templates() -> Vec<ProviderTemplate> {
             endpoints: vec![EndpointTemplate {
                 base_url: "https://serpapi.com",
                 headers: None,
+                timeout_ms: Some(60000),
+                proxy_url: None,
+                is_primary: true,
+            }],
+            app_bindings: vec![],
+        },
+        ProviderTemplate {
+            provider: "serper",
+            label: "Serper",
+            base_url: "https://google.serper.dev",
+            models: vec![],
+            env_vars: vec!["SERPER_API_KEY"],
+            endpoints: vec![EndpointTemplate {
+                base_url: "https://google.serper.dev",
+                headers: Some("X-API-KEY: ${SERPER_API_KEY}"),
                 timeout_ms: Some(60000),
                 proxy_url: None,
                 is_primary: true,
@@ -1038,6 +1118,54 @@ pub fn default_templates() -> Vec<ProviderTemplate> {
             app_bindings: vec![],
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_templates_include_bailian_token_plan() {
+        let templates = default_templates();
+        let template = templates
+            .iter()
+            .find(|item| item.provider == "bailian-token-plan")
+            .expect("missing Bailian Token Plan template");
+
+        assert_eq!(template.label, "百炼 Token Plan");
+        assert_eq!(
+            template.base_url,
+            "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+        );
+        assert!(template.models.contains(&"qwen3.6-plus"));
+        assert!(template.models.contains(&"deepseek-v3.2"));
+        assert!(template.env_vars.contains(&"LLM_API_KEY"));
+        assert!(template.endpoints.iter().any(|endpoint| endpoint.is_primary
+            && endpoint.base_url
+                == "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"));
+        assert!(template
+            .app_bindings
+            .iter()
+            .any(|binding| binding.app_type == "openai-compatible" && binding.enabled));
+    }
+
+    #[test]
+    fn default_templates_include_serper_search_api() {
+        let templates = default_templates();
+        let template = templates
+            .iter()
+            .find(|item| item.provider == "serper")
+            .expect("missing Serper template");
+
+        assert_eq!(template.label, "Serper");
+        assert_eq!(template.base_url, "https://google.serper.dev");
+        assert!(template.models.is_empty());
+        assert_eq!(template.env_vars, vec!["SERPER_API_KEY"]);
+        assert!(template.endpoints.iter().any(|endpoint| endpoint.is_primary
+            && endpoint.base_url == "https://google.serper.dev"
+            && endpoint.headers == Some("X-API-KEY: ${SERPER_API_KEY}")));
+        assert!(template.app_bindings.is_empty());
+    }
 }
 
 pub fn template_to_provider_config(template: &ProviderTemplate) -> ProviderConfig {

@@ -1,5 +1,5 @@
 use crate::{AppState, ProviderConfig};
-use chrono::{DateTime, Datelike, Duration, SecondsFormat, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -25,11 +25,13 @@ pub async fn refresh_all_providers(
         gemini_config,
         opencode_config,
         openclaw_config,
+        bailian_config,
         openai_key,
         anthropic_key,
         gemini_key,
         opencode_key,
         openclaw_key,
+        bailian_key,
         claude_oauth_token,
         claude_cli_path,
         amp_cli_path,
@@ -56,6 +58,11 @@ pub async fn refresh_all_providers(
             .get_latest_credential_for_provider("openclaw")
             .map(|cred| cred.key)
             .or_else(|| find_credential_value(&credentials, "OPENCLAW_API_KEY"));
+        let bailian_key = vault
+            .get_latest_credential_for_provider("bailian-token-plan")
+            .map(|cred| cred.key)
+            .or_else(|| find_credential_value(&credentials, "BAILIAN_API_KEY"))
+            .or_else(|| find_credential_value(&credentials, "LLM_API_KEY"));
         let claude_oauth_token = find_credential_value(&credentials, "CLAUDE_OAUTH_ACCESS_TOKEN")
             .or_else(|| find_credential_value(&credentials, "CLAUDE_AUTH_TOKEN"))
             .or_else(|| find_credential_value(&credentials, "ANTHROPIC_AUTH_TOKEN"));
@@ -89,11 +96,13 @@ pub async fn refresh_all_providers(
             vault.get_provider_config("gemini"),
             vault.get_provider_config("opencode"),
             vault.get_provider_config("openclaw"),
+            vault.get_provider_config("bailian-token-plan"),
             openai_key,
             anthropic_key,
             gemini_key,
             opencode_key,
             openclaw_key,
+            bailian_key,
             claude_oauth_token,
             claude_cli_path,
             amp_cli_path,
@@ -129,6 +138,7 @@ pub async fn refresh_all_providers(
                 openclaw_config.as_ref(),
                 openclaw_key.as_deref().or(openai_key.as_deref()),
             ),
+            "bailian-token-plan" => (bailian_config.as_ref(), bailian_key.as_deref()),
             _ => (None, None),
         };
 
@@ -250,7 +260,7 @@ impl UsageState {
 
 mod cli;
 
-pub const KNOWN_PROVIDERS: [&str; 9] = [
+pub const KNOWN_PROVIDERS: [&str; 10] = [
     "openai",
     "anthropic",
     "antigravity",
@@ -260,6 +270,7 @@ pub const KNOWN_PROVIDERS: [&str; 9] = [
     "gemini",
     "kimi",
     "amp",
+    "bailian-token-plan",
 ];
 
 pub async fn probe(
@@ -288,6 +299,7 @@ pub async fn probe(
         "kimi" => cli::probe_kimi_cli("kimi", claude_cli_path_override),
         "antigravity" => probe_antigravity().await,
         "amp" => cli::probe_amp_cli("amp", claude_cli_path_override),
+        "bailian-token-plan" => probe_bailian_token_plan(config, api_key_override).await,
         _ => Err(format!("Unknown provider: {}", provider_id)),
     }
 }
@@ -1732,4 +1744,130 @@ async fn probe_antigravity() -> Result<UsageSnapshot, String> {
         account_tier,
         account_email,
     })
+}
+
+async fn probe_bailian_token_plan(
+    config: Option<&ProviderConfig>,
+    api_key_override: Option<&str>,
+) -> Result<UsageSnapshot, String> {
+    let _ = require_api_key(config, "百炼 Token Plan", api_key_override)?;
+    let config = config.ok_or("Missing 百炼 Token Plan provider settings".to_string())?;
+    let settings: Value =
+        serde_json::from_str(&config.details.settings_json).unwrap_or(Value::Null);
+    let usage = settings
+        .get("bailian_token_plan_usage")
+        .or_else(|| settings.get("token_plan_usage"))
+        .or_else(|| settings.get("usage"))
+        .unwrap_or(&settings);
+
+    let used_percent = numeric_by_keys(
+        usage,
+        &[
+            "percent_used",
+            "used_percent",
+            "total_percent_used",
+            "total_used_percent",
+            "used",
+        ],
+    )
+    .or_else(|| {
+        numeric_by_keys(
+            usage,
+            &[
+                "percent_remaining",
+                "remaining_percent",
+                "total_percent_remaining",
+            ],
+        )
+        .map(|remaining| 100.0 - remaining)
+    })
+    .ok_or(
+        "百炼 Token Plan usage is console-only today; add settings_json.bailian_token_plan_usage.percent_used from the Token Plan console".to_string(),
+    )?;
+
+    let captured_at = value_by_keys(
+        usage,
+        &[
+            "captured_at",
+            "last_captured_at",
+            "last_stat_time",
+            "last_statistics_time",
+        ],
+    )
+    .and_then(|value| value.as_str());
+    let account_tier = value_by_keys(usage, &["account_tier", "seat_summary", "tier"])
+        .and_then(|value| value.as_str());
+
+    snapshot_from_bailian_token_plan_usage(used_percent, captured_at, account_tier)
+}
+
+fn snapshot_from_bailian_token_plan_usage(
+    used_percent: f64,
+    captured_at_local: Option<&str>,
+    account_tier: Option<&str>,
+) -> Result<UsageSnapshot, String> {
+    if !used_percent.is_finite() {
+        return Err("百炼 Token Plan usage percent is not finite".to_string());
+    }
+
+    let captured_at = match captured_at_local
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => parse_bailian_local_datetime(value)
+            .ok_or_else(|| "百炼 Token Plan last statistics time is invalid".to_string())?,
+        None => Utc::now(),
+    };
+
+    Ok(UsageSnapshot {
+        provider_id: "bailian-token-plan".to_string(),
+        captured_at: captured_at.to_rfc3339(),
+        quotas: vec![UsageQuota {
+            quota_type: "total".to_string(),
+            label: "总额度".to_string(),
+            percent_remaining: (100.0 - used_percent).clamp(0.0, 100.0),
+            reset_at: None,
+            reset_text: None,
+        }],
+        cost_usage: None,
+        account_tier: account_tier
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string()),
+        account_email: None,
+    })
+}
+
+fn parse_bailian_local_datetime(value: &str) -> Option<DateTime<Utc>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    let naive = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()?;
+    Local
+        .from_local_datetime(&naive)
+        .single()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bailian_token_plan_snapshot_converts_used_percent_to_remaining_quota() {
+        let snapshot = snapshot_from_bailian_token_plan_usage(
+            6.0,
+            Some("2026-05-15 20:51:03"),
+            Some("标准席位: 1"),
+        )
+        .expect("valid Bailian Token Plan usage snapshot");
+
+        assert_eq!(snapshot.provider_id, "bailian-token-plan");
+        assert_eq!(snapshot.account_tier.as_deref(), Some("标准席位: 1"));
+        assert_eq!(snapshot.quotas.len(), 1);
+        assert_eq!(snapshot.quotas[0].quota_type, "total");
+        assert_eq!(snapshot.quotas[0].label, "总额度");
+        assert_eq!(snapshot.quotas[0].percent_remaining, 94.0);
+        assert_eq!(snapshot.captured_at, "2026-05-15T12:51:03+00:00");
+    }
 }

@@ -46,6 +46,33 @@ export interface ChannelRecord {
   exhaustedUntil: string | null
 }
 
+export interface OnchainTopupRecord {
+  id: string
+  chainId: number
+  txHash: string
+  logIndex: number
+  accountId: string
+  tokenAddress: string
+  fromAddress: string
+  toAddress: string
+  amountRaw: string
+  creditedMicroUsd: number
+  createdAt: string
+}
+
+export interface RedpacketRecord {
+  id: string
+  codeHash: string
+  amountRaw: string
+  label?: string
+  status: 'unclaimed' | 'claimed'
+  claimedByAccount?: string
+  claimedToAddress?: string
+  claimTxHash?: string
+  createdAt: string
+  claimedAt?: string
+}
+
 export interface ModelQualityRecord {
   model: string
   label: 'trusted' | 'mostly reliable' | 'degraded' | 'suspicious'
@@ -135,6 +162,13 @@ export interface GatewayStore {
   listUsage(accountId: string): Promise<RequestLog[]>
   listRecentRequestLogs(input?: { limit?: number }): Promise<RequestLog[]>
   setProviderTokenStatus(input: { id: string; status: 'active' | 'disabled'; now: string }): Promise<void>
+  isOnchainTopupConsumed(input: { chainId: number; txHash: string; logIndex: number }): Promise<boolean>
+  recordOnchainTopup(record: OnchainTopupRecord): Promise<void>
+  listOnchainTopups(input?: { limit?: number }): Promise<OnchainTopupRecord[]>
+  createRedpacket(record: RedpacketRecord): Promise<void>
+  getRedpacketByCodeHash(codeHash: string): Promise<RedpacketRecord | null>
+  markRedpacketClaimed(input: { id: string; account: string; toAddress: string; txHash: string; now: string }): Promise<void>
+  listRedpackets(input?: { limit?: number }): Promise<RedpacketRecord[]>
   listPriceBook(): Promise<PriceBookRow[]>
   listRoutingRules(): Promise<RoutingRule[]>
   listProviderTokenSummaries(): Promise<ChannelRecord[]>
@@ -190,6 +224,8 @@ export class InMemoryGatewayStore implements GatewayStore {
   readonly providerTokens: ProviderTokenRecord[]
   readonly priceBook: PriceBookRow[]
   readonly creditRequests: CreditRequestRecord[]
+  readonly onchainTopups: OnchainTopupRecord[] = []
+  readonly redpackets: RedpacketRecord[] = []
   readonly ledger: Array<{ id: string; accountId: string; type: string; amountMicroUsd: number; createdAt: string }>
   readonly auditLog: AdminAuditRecord[]
   readonly baseUrl: string
@@ -390,6 +426,45 @@ export class InMemoryGatewayStore implements GatewayStore {
     }
     const channel = this.channels.find((c) => c.id === input.id)
     if (channel) channel.status = input.status === 'active' ? 'active' : 'disabled'
+  }
+
+  async isOnchainTopupConsumed(input: { chainId: number; txHash: string; logIndex: number }): Promise<boolean> {
+    return this.onchainTopups.some(
+      (t) => t.chainId === input.chainId && t.txHash.toLowerCase() === input.txHash.toLowerCase() && t.logIndex === input.logIndex
+    )
+  }
+
+  async recordOnchainTopup(record: OnchainTopupRecord): Promise<void> {
+    this.onchainTopups.push(record)
+  }
+
+  async listOnchainTopups(input: { limit?: number } = {}): Promise<OnchainTopupRecord[]> {
+    const limit = Math.max(1, Math.min(500, input.limit ?? 100))
+    return [...this.onchainTopups].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)).slice(0, limit)
+  }
+
+  async createRedpacket(record: RedpacketRecord): Promise<void> {
+    this.redpackets.push(record)
+  }
+
+  async getRedpacketByCodeHash(codeHash: string): Promise<RedpacketRecord | null> {
+    return this.redpackets.find((r) => r.codeHash === codeHash) ?? null
+  }
+
+  async markRedpacketClaimed(input: { id: string; account: string; toAddress: string; txHash: string; now: string }): Promise<void> {
+    const r = this.redpackets.find((p) => p.id === input.id)
+    if (r) {
+      r.status = 'claimed'
+      r.claimedByAccount = input.account
+      r.claimedToAddress = input.toAddress
+      r.claimTxHash = input.txHash
+      r.claimedAt = input.now
+    }
+  }
+
+  async listRedpackets(input: { limit?: number } = {}): Promise<RedpacketRecord[]> {
+    const limit = Math.max(1, Math.min(500, input.limit ?? 100))
+    return [...this.redpackets].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)).slice(0, limit)
   }
 
   async listPriceBook(): Promise<PriceBookRow[]> {
@@ -882,6 +957,110 @@ export class D1GatewayStore implements GatewayStore {
       .prepare('UPDATE compute_provider_tokens SET status = ?, exhausted_until = NULL, last_error = NULL, updated_at = ? WHERE id = ?')
       .bind(input.status, input.now, input.id)
       .run()
+  }
+
+  async isOnchainTopupConsumed(input: { chainId: number; txHash: string; logIndex: number }): Promise<boolean> {
+    const row = await this.db
+      .prepare('SELECT id FROM compute_onchain_topups WHERE chain_id = ? AND tx_hash = ? AND log_index = ? LIMIT 1')
+      .bind(input.chainId, input.txHash.toLowerCase(), input.logIndex)
+      .first<Record<string, unknown>>()
+    return row != null
+  }
+
+  async recordOnchainTopup(record: OnchainTopupRecord): Promise<void> {
+    await this.db
+      .prepare(
+        'INSERT INTO compute_onchain_topups (id, chain_id, tx_hash, log_index, account_id, token_address, from_address, to_address, amount_raw, credited_micro_usd, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      )
+      .bind(
+        record.id,
+        record.chainId,
+        record.txHash.toLowerCase(),
+        record.logIndex,
+        record.accountId,
+        record.tokenAddress.toLowerCase(),
+        record.fromAddress.toLowerCase(),
+        record.toAddress.toLowerCase(),
+        record.amountRaw,
+        record.creditedMicroUsd,
+        record.createdAt
+      )
+      .run()
+  }
+
+  async listOnchainTopups(input: { limit?: number } = {}): Promise<OnchainTopupRecord[]> {
+    const limit = Math.max(1, Math.min(500, input.limit ?? 100))
+    const rows = await this.db
+      .prepare('SELECT * FROM compute_onchain_topups ORDER BY created_at DESC LIMIT ?')
+      .bind(limit)
+      .all<Record<string, unknown>>()
+    return rows.results.map((row) => ({
+      id: stringValue(row.id),
+      chainId: numberValue(row.chain_id),
+      txHash: stringValue(row.tx_hash),
+      logIndex: numberValue(row.log_index),
+      accountId: stringValue(row.account_id),
+      tokenAddress: stringValue(row.token_address),
+      fromAddress: stringValue(row.from_address),
+      toAddress: stringValue(row.to_address),
+      amountRaw: stringValue(row.amount_raw),
+      creditedMicroUsd: numberValue(row.credited_micro_usd),
+      createdAt: stringValue(row.created_at),
+    }))
+  }
+
+  async createRedpacket(record: RedpacketRecord): Promise<void> {
+    await this.db
+      .prepare('INSERT INTO compute_redpackets (id, code_hash, amount_raw, label, status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(record.id, record.codeHash, record.amountRaw, record.label ?? null, record.status, record.createdAt)
+      .run()
+  }
+
+  async getRedpacketByCodeHash(codeHash: string): Promise<RedpacketRecord | null> {
+    const row = await this.db
+      .prepare('SELECT * FROM compute_redpackets WHERE code_hash = ? LIMIT 1')
+      .bind(codeHash)
+      .first<Record<string, unknown>>()
+    if (!row) return null
+    return {
+      id: stringValue(row.id),
+      codeHash: stringValue(row.code_hash),
+      amountRaw: stringValue(row.amount_raw),
+      label: optionalString(row.label),
+      status: stringValue(row.status) === 'claimed' ? 'claimed' : 'unclaimed',
+      claimedByAccount: optionalString(row.claimed_by_account),
+      claimedToAddress: optionalString(row.claimed_to_address),
+      claimTxHash: optionalString(row.claim_tx_hash),
+      createdAt: stringValue(row.created_at),
+      claimedAt: optionalString(row.claimed_at),
+    }
+  }
+
+  async markRedpacketClaimed(input: { id: string; account: string; toAddress: string; txHash: string; now: string }): Promise<void> {
+    await this.db
+      .prepare("UPDATE compute_redpackets SET status='claimed', claimed_by_account=?, claimed_to_address=?, claim_tx_hash=?, claimed_at=? WHERE id=? AND status='unclaimed'")
+      .bind(input.account, input.toAddress.toLowerCase(), input.txHash.toLowerCase(), input.now, input.id)
+      .run()
+  }
+
+  async listRedpackets(input: { limit?: number } = {}): Promise<RedpacketRecord[]> {
+    const limit = Math.max(1, Math.min(500, input.limit ?? 100))
+    const rows = await this.db
+      .prepare('SELECT * FROM compute_redpackets ORDER BY created_at DESC LIMIT ?')
+      .bind(limit)
+      .all<Record<string, unknown>>()
+    return rows.results.map((row) => ({
+      id: stringValue(row.id),
+      codeHash: stringValue(row.code_hash),
+      amountRaw: stringValue(row.amount_raw),
+      label: optionalString(row.label),
+      status: stringValue(row.status) === 'claimed' ? 'claimed' : 'unclaimed',
+      claimedByAccount: optionalString(row.claimed_by_account),
+      claimedToAddress: optionalString(row.claimed_to_address),
+      claimTxHash: optionalString(row.claim_tx_hash),
+      createdAt: stringValue(row.created_at),
+      claimedAt: optionalString(row.claimed_at),
+    }))
   }
 
   async manualCredit(accountId: string, amountMicroUsd: number, now: string): Promise<GatewayAccountRecord> {
