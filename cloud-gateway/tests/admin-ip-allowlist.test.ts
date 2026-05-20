@@ -141,3 +141,60 @@ test('x-forwarded-for is honored when cf-connecting-ip is absent', async () => {
   )
   assert.equal(response.status, 200)
 })
+
+test('parseCidrList parses IPv6 CIDRs, :: compression, and IPv4-mapped addresses', () => {
+  const specs = parseCidrList('2001:db8::/32, ::1, ::ffff:10.0.0.0/104, fe80::1%eth0, not:valid:gibberish')
+  // 2001:db8::/32, ::1 (/128), ::ffff:10.0.0.0/104, fe80::1 (zone stripped) → 4 valid
+  assert.equal(specs.length, 4)
+  assert.equal(specs[0].family, 'v6')
+  assert.equal(specs[0].prefix, 32)
+  assert.equal(specs[1].prefix, 128)
+})
+
+test('matchesCidr handles IPv6 /64 boundaries', () => {
+  const [spec] = parseCidrList('2001:db8:abcd:1234::/64')
+  assert.equal(matchesCidr('2001:db8:abcd:1234::1', spec), true)
+  assert.equal(matchesCidr('2001:db8:abcd:1234:ffff:ffff:ffff:ffff', spec), true)
+  assert.equal(matchesCidr('2001:db8:abcd:1235::1', spec), false)
+  assert.equal(matchesCidr('10.0.0.1', spec), false) // wrong family
+})
+
+test('IPv4-mapped IPv6 matches its dotted-quad embedding', () => {
+  const [spec] = parseCidrList('::ffff:192.168.0.0/120')
+  assert.equal(matchesCidr('::ffff:192.168.0.42', spec), true)
+  assert.equal(matchesCidr('::ffff:192.168.1.1', spec), false)
+})
+
+test('mixed v4 + v6 allowlist matches each family independently and never cross-matches', () => {
+  const specs = parseCidrList('203.0.113.0/24, 2001:db8::/32')
+  assert.equal(matchesCidrList('203.0.113.7', specs), true)
+  assert.equal(matchesCidrList('2001:db8:1:2::5', specs), true)
+  assert.equal(matchesCidrList('198.51.100.1', specs), false)
+  assert.equal(matchesCidrList('2002:db8::1', specs), false)
+})
+
+test('admin route admits an IPv6 cf-connecting-ip that matches the v6 allowlist', async () => {
+  const store = seedStore()
+  const app = createGatewayApp({
+    store,
+    pepper: 'p',
+    adminToken: 'admin-secret',
+    adminIpAllowlist: ['2001:db8::/32'],
+    baseUrl: 'https://dashboard.mykey.example',
+    now: () => '2026-05-20T00:00:00Z',
+  })
+
+  const denied = await app.fetch(
+    new Request('https://gateway.test/admin/accounts', {
+      headers: { authorization: 'Bearer admin-secret', 'cf-connecting-ip': '2600:1700:abcd::1' },
+    })
+  )
+  assert.equal(denied.status, 403)
+
+  const allowed = await app.fetch(
+    new Request('https://gateway.test/admin/accounts', {
+      headers: { authorization: 'Bearer admin-secret', 'cf-connecting-ip': '2001:db8:1234:5678::9' },
+    })
+  )
+  assert.equal(allowed.status, 200)
+})
