@@ -133,6 +133,8 @@ export interface GatewayStore {
   getDashboardSnapshot(accountId: string): Promise<DashboardSnapshot>
   listModels(accountId: string): Promise<string[]>
   listUsage(accountId: string): Promise<RequestLog[]>
+  listRecentRequestLogs(input?: { limit?: number }): Promise<RequestLog[]>
+  setProviderTokenStatus(input: { id: string; status: 'active' | 'disabled'; now: string }): Promise<void>
   listPriceBook(): Promise<PriceBookRow[]>
   listRoutingRules(): Promise<RoutingRule[]>
   listProviderTokenSummaries(): Promise<ChannelRecord[]>
@@ -373,6 +375,21 @@ export class InMemoryGatewayStore implements GatewayStore {
 
   async listUsage(accountId: string): Promise<RequestLog[]> {
     return this.usage.filter((row) => row.accountId === accountId)
+  }
+
+  async listRecentRequestLogs(input: { limit?: number } = {}): Promise<RequestLog[]> {
+    const limit = Math.max(1, Math.min(500, input.limit ?? 100))
+    return [...this.usage].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)).slice(0, limit)
+  }
+
+  async setProviderTokenStatus(input: { id: string; status: 'active' | 'disabled'; now: string }): Promise<void> {
+    const token = this.providerTokens.find((t) => t.id === input.id)
+    if (token) {
+      token.status = input.status
+      token.updatedAt = input.now
+    }
+    const channel = this.channels.find((c) => c.id === input.id)
+    if (channel) channel.status = input.status === 'active' ? 'active' : 'disabled'
   }
 
   async listPriceBook(): Promise<PriceBookRow[]> {
@@ -848,24 +865,23 @@ export class D1GatewayStore implements GatewayStore {
       .prepare('SELECT * FROM compute_request_logs WHERE account_id = ? ORDER BY created_at DESC LIMIT 100')
       .bind(accountId)
       .all<Record<string, unknown>>()
-    return rows.results.map((row) => ({
-      id: stringValue(row.id),
-      accountId: stringValue(row.account_id),
-      apiKeyId: optionalString(row.api_key_id),
-      providerTokenId: optionalString(row.provider_token_id),
-      routingRuleId: optionalString(row.routing_rule_id),
-      createdAt: stringValue(row.created_at),
-      provider: stringValue(row.provider),
-      model: stringValue(row.model),
-      endpoint: stringValue(row.endpoint),
-      statusCode: numberValue(row.status_code),
-      latencyMs: numberValue(row.latency_ms),
-      inputTokens: numberValue(row.input_tokens),
-      outputTokens: numberValue(row.output_tokens),
-      totalTokens: numberValue(row.total_tokens),
-      sellCostMicroUsd: numberValue(row.sell_cost_micro_usd),
-      upstreamCostMicroUsd: numberValue(row.upstream_cost_micro_usd),
-    }))
+    return rows.results.map((row) => mapRequestLogRow(row))
+  }
+
+  async listRecentRequestLogs(input: { limit?: number } = {}): Promise<RequestLog[]> {
+    const limit = Math.max(1, Math.min(500, input.limit ?? 100))
+    const rows = await this.db
+      .prepare('SELECT * FROM compute_request_logs ORDER BY created_at DESC LIMIT ?')
+      .bind(limit)
+      .all<Record<string, unknown>>()
+    return rows.results.map((row) => mapRequestLogRow(row))
+  }
+
+  async setProviderTokenStatus(input: { id: string; status: 'active' | 'disabled'; now: string }): Promise<void> {
+    await this.db
+      .prepare('UPDATE compute_provider_tokens SET status = ?, exhausted_until = NULL, last_error = NULL, updated_at = ? WHERE id = ?')
+      .bind(input.status, input.now, input.id)
+      .run()
   }
 
   async manualCredit(accountId: string, amountMicroUsd: number, now: string): Promise<GatewayAccountRecord> {
@@ -1405,4 +1421,26 @@ function mapChannelStatus(status: string): ChannelRecord['status'] {
 function mapProviderTokenStatus(status: string): ProviderTokenRecord['status'] {
   if (status === 'active' || status === 'revoked') return status
   return 'disabled'
+}
+
+function mapRequestLogRow(row: Record<string, unknown>): RequestLog {
+  return {
+    id: stringValue(row.id),
+    accountId: stringValue(row.account_id),
+    apiKeyId: optionalString(row.api_key_id),
+    providerTokenId: optionalString(row.provider_token_id),
+    routingRuleId: optionalString(row.routing_rule_id),
+    createdAt: stringValue(row.created_at),
+    provider: stringValue(row.provider),
+    model: stringValue(row.model),
+    endpoint: stringValue(row.endpoint),
+    statusCode: numberValue(row.status_code),
+    latencyMs: numberValue(row.latency_ms),
+    inputTokens: numberValue(row.input_tokens),
+    outputTokens: numberValue(row.output_tokens),
+    totalTokens: numberValue(row.total_tokens),
+    sellCostMicroUsd: numberValue(row.sell_cost_micro_usd),
+    upstreamCostMicroUsd: numberValue(row.upstream_cost_micro_usd),
+    errorCode: optionalString(row.error_code),
+  }
 }

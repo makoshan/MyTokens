@@ -1055,6 +1055,56 @@ async function handleRequest(
     })
   }
 
+  if (url.pathname === '/admin/usage' && request.method === 'GET') {
+    await requireAdmin(request, adminToken, adminIpAllowlist)
+    const limitParam = url.searchParams.get('limit')
+    const limit = limitParam ? Math.max(1, Math.min(500, Number(limitParam) || 100)) : 100
+    const rows = await store.listRecentRequestLogs({ limit })
+    return json({
+      data: rows.map((row) => ({
+        id: row.id,
+        account_id: row.accountId,
+        api_key_id: row.apiKeyId ?? null,
+        provider_token_id: row.providerTokenId ?? null,
+        routing_rule_id: row.routingRuleId ?? null,
+        created_at: row.createdAt,
+        provider: row.provider,
+        model: row.model,
+        endpoint: row.endpoint,
+        status_code: row.statusCode,
+        latency_ms: row.latencyMs,
+        input_tokens: row.inputTokens ?? null,
+        output_tokens: row.outputTokens ?? null,
+        total_tokens: row.totalTokens ?? null,
+        sell_cost_micro_usd: row.sellCostMicroUsd ?? null,
+        upstream_cost_micro_usd: row.upstreamCostMicroUsd ?? null,
+        error_code: row.errorCode ?? null,
+      })),
+    })
+  }
+
+  const channelStatusMatch = /^\/admin\/provider-tokens\/([^/]+)\/status$/.exec(url.pathname)
+  if (channelStatusMatch && request.method === 'POST') {
+    await requireAdmin(request, adminToken, adminIpAllowlist)
+    const body = await readJsonObject(request)
+    const status = requireString(body, 'status')
+    if (status !== 'active' && status !== 'disabled') {
+      throw new GatewayError('invalid_status', 400)
+    }
+    const id = channelStatusMatch[1]
+    await store.setProviderTokenStatus({ id, status, now })
+    await recordAuditAdminAction(store, {
+      action: 'admin.provider_token.set_status',
+      targetType: 'provider_token',
+      targetId: id,
+      body,
+      statusCode: 200,
+      now,
+      extra: { status },
+    })
+    return json({ id, status })
+  }
+
   if (url.pathname === '/admin/audit-log' && request.method === 'GET') {
     await requireAdmin(request, adminToken, adminIpAllowlist)
     const limitParam = url.searchParams.get('limit')
