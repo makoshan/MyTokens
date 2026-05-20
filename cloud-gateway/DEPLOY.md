@@ -3,6 +3,17 @@
 End-to-end runbook for getting a fresh Cloudflare deploy live. All commands
 run from `cloud-gateway/`.
 
+## Test suites
+
+- `npm test` — node:test suite (fast, no runtime deps). Covers relay,
+  billing, auth, audit, rate-limit, and DO logic against an in-process
+  fake.
+- `npm run test:workers` — `@cloudflare/vitest-pool-workers` suite that
+  boots a real workerd and exercises the AccountDurableObject under
+  Cloudflare's genuine single-instance, storage, and alarm semantics
+  (concurrent-reserve serialization, persistence across stubs, alarm
+  auto-refund). Run before any deploy that touches DO code.
+
 ## 0. Prerequisites
 
 - A Cloudflare account with Workers + D1 enabled.

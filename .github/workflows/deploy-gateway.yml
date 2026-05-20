@@ -33,8 +33,10 @@ jobs:
           cache: npm
           cache-dependency-path: cloud-gateway/package-lock.json
       - run: npm ci
-      - name: Run tests
+      - name: Run node:test suite
         run: npm test
+      - name: Run workerd (vitest-pool-workers) suite
+        run: npm run test:workers
       - name: Type-check production build
         run: npm run build
 
