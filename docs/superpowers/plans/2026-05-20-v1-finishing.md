@@ -6,7 +6,7 @@
 
 **约束：**
 
-- 不引入 v2/v3 项（MPP、USDC、MYC、链上 indexer、translation 等）。
+- ~~不引入 v2/v3 项（MPP、USDC、MYC、链上 indexer、translation 等）。~~ **⚠️ 此约束已于 2026-05-20 晚被推翻——MYC 红包 / gasless redeem / burn-to-credit 已实现并成为产品核心。详见文末「计划外 pivot：MYC 红包共享」。**
 - 每块尽量一次 PR（< 500 行核心 diff）。
 - 不破现有 34 个测试。
 
@@ -416,3 +416,58 @@ jobs:
 - [ ] C4 CI 用 OIDC 而非长期 API token。
 - [ ] 部署 Block B 前先在 dev account 跑 7 天，监控 DO 冷启动延迟、storage 大小。
 - [ ] Rate limit 默认阈值宽松（避免误伤），且有 dashboard 可观测。
+
+---
+
+## 计划外 pivot：MYC 红包共享（2026-05-20 晚）
+
+> **状态：已实现并部署在 commit `5121af2`。** 本节记录一次**计划外的方向转变**——代码冲进了 [2026-05-19 计划](./2026-05-19-compute-credit-gateway.md) 明确 gate 在「法律意见之后」的 MYC/链上支付 territory。决定（2026-05-20）：**这是有意 pivot，红包 / MYC 支付是现在的产品核心，计划追代码**。本节的作用是让规划与代码一致，并**诚实记录 4 个 legal gate 仍未通过**——不假装已过。
+
+### 偏离的本质
+
+两份原计划的核心论点都是「先验证 Cloudflare 基建，把 MYC 叙事 defer 到 gate 通过之后」。代码做了相反的事：MYC 现在是支付与获客的中心。
+
+### 已实现（计划里属于 deferred / Advanced Beta / 非目标的部分）
+
+| 能力 | 文件 / 路由 | 原计划定位 |
+|------|-----------|-----------|
+| MYC burn-to-credit 充值 | `migrations/0002_onchain_topups.sql`、`src/routes/topup.ts`、`/dashboard/topup`、`/admin/topups` | Advanced Beta，Gate 2 之后 |
+| 红包（运营预建 + 朋友领取） | `migrations/0003_redpackets.sql`、`/dashboard/claim`、`/admin/redpackets`、`buyer-dashboard/.../RedpacketClaim.tsx` | 「Invite credits / airdrops」= Advanced Beta |
+| Relayer pool + gasless redeem | `src/routes/relayer.ts`（`relayerTransfer` / `relayerBurnWithSig`）、`/dashboard/redeem-gasless`、`RELAYER_PRIVATE_KEY` | **原计划无此项** |
+| MYC TIP-20 合约 | `contracts/src/MyKeyComputeCredit.sol` | Deferred，「前提是法律意见允许」 |
+| 买家浏览器 passkey 钱包 | `buyer-dashboard/src/wallet.ts`（WebAuthn PRF 派生密钥） | 原计划买家 dashboard **无钱包** |
+
+链上 indexer（计划的 `src/chain/indexer.ts`）**未建**——改用轻量的 `verifyAndCreditBurn`（请求时读链验证单笔 burn），是务实替换，不是遗漏。MPP adapter、Translation API 仍未做（仍 deferred）。
+
+### Legal gate 状态（诚实标注，无一通过）
+
+原计划 [Gate 1–4](./2026-05-19-compute-credit-gateway.md) 锁住的正是现在已上线的能力。截至 2026-05-20：
+
+| Gate | 内容 | 状态 |
+|------|------|------|
+| Gate 1 | Provider（百炼/Kimi/OpenAI/Anthropic）的 aggregator/reseller/managed-service 商务授权 | ❌ 未取得 |
+| Gate 2 | 法律意见：MYC 发行 / custody / money transmission / 证券风险边界 | ❌ 未取得 |
+| Gate 3 | MPP/Tempo payment verifier 稳定接口 + replay protection | ⚠️ 未走 MPP；burn-to-credit 自带 tx-hash 去重，但未做正式 replay 模型审查 |
+| Gate 4 | Cloudflare D1 对所需 partial index / 事务 / 限制的支持 | ✅ 实践中已验证（D1 + DO 已上线）|
+
+→ **公开拉新人前，Gate 1 + Gate 2 是真实法律风险**（reselling 百炼/Kimi 订阅算力可能违反 provider ToS，账号被封则所有朋友断供；自发 token 计费触及证券/汇兑监管）。pivot ≠ gate 已过；pivot 意味着「明知 gate 未过，alpha 阶段在受信朋友小圈子内先跑」。
+
+### 产品心智模型的变化
+
+原计划：「普通用户不需要理解 mint / burn / redeem / MYC」，只看 `API key / 余额 / 用量 / 账单`。
+
+现在（红包 UX，**有意**）：直接给朋友看 `20 MYC ≈ $20`、token 估算、「兑换」CTA。crypto 层从「藏起来」变成「拆礼品卡的仪式感卖点」。这是 pivot 的一部分，不是 bug——但要清楚它和原心智模型相反。
+
+### 链：Sepolia 测试网（alpha 决定 2026-05-20）
+
+`wrangler.toml` 配置 `TEMPO_CHAIN_ID=11155111`（Sepolia），与 project memory 里的「Tempo 主网」目标暂时不一致。**alpha 阶段有意留在 Sepolia**：红包领取 / gasless redeem 走测试网 MYC，不消耗真实价值。主网切换是后续动作，需同时确认 `MYC_TOKEN_ADDRESS` 在目标链上的部署与 relayer pool 充值。
+
+### 下一步工作
+
+1. **测试（已批准，最高优先级）**：红包后端 + 组件单测。
+   - `/dashboard/claim` 幂等（领取 → claimed；再领 → 409）+ 校验（非法地址 400、未知口令 404）。
+   - `/accept?token=X&redpacket=Y` → 302 必须带 `?redpacket=Y` 的**回归测试**（防止透传 bug 重现）。
+   - `RedpacketClaim` 组件状态机：`sealed → opening → revealed → redeeming → done` + `humanError` 映射。
+   - **前置改动**：`createGatewayApp` 需加一个 relayer 注入缝（与现有 `fetchImpl` 同款），让 claim/redeem 单测不打真 RPC。
+2. **部署 `/accept` 修复**：透传逻辑（`index.ts:444`）已在代码里，但线上 worker 未部署——合一邀请链接的红包覆盖层目前弹不出。需 `cd cloud-gateway && npm run build && wrangler deploy`（对外动作，需确认）。
+3. **运营文档**：原计划的 `docs/compute-gateway-operator-runbook.md` 等仍为零；红包/relayer 的运维（pool 充值、stale 退款、口令生成）需要 runbook。

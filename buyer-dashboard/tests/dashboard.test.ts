@@ -83,7 +83,7 @@ test('dashboard view model exposes balance, usage, model quality, and docs base 
   assert.equal(viewModel.quickStartCurl.includes('https://api.mykey.example/v1/responses'), true)
   assert.deepEqual(
     viewModel.navigation.map((item) => item.label),
-    ['总览', '渠道', '令牌', '日志', '模型检测', '额度', '文档']
+    ['总览', '渠道', '令牌', '日志', '模型检测', '额度', '充值', '文档']
   )
   assert.equal(viewModel.channelSummary.active, 1)
   assert.equal(viewModel.tokenSummary.active, 1)

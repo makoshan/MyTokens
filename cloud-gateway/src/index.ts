@@ -59,6 +59,13 @@ export interface GatewayAppOptions {
   now?: () => string
   masterKeys?: Record<string, Uint8Array>
   fetchImpl?: typeof fetch
+  // Injection seam for the on-chain relayer (red-packet transfer + gasless
+  // burnWithSig). Defaults to the real viem-backed functions; tests override
+  // these so claim/redeem can be exercised without hitting a live RPC.
+  relayer?: {
+    transfer?: typeof relayerTransfer
+    burnWithSig?: typeof relayerBurnWithSig
+  }
 }
 
 export interface GatewayExecutionContext {
@@ -582,8 +589,19 @@ async function handleRequest(
     const packet = await store.getRedpacketByCodeHash(await sha256Hex(code))
     if (!packet) throw new GatewayError('redpacket_not_found', 404)
     if (packet.status !== 'unclaimed') throw new GatewayError('redpacket_already_claimed', 409)
-    const txHash = await relayerTransfer(env, toAddress, BigInt(packet.amountRaw))
-    await store.markRedpacketClaimed({ id: packet.id, account: accountId, toAddress, txHash, now })
+    // Win the claim atomically BEFORE transferring, so two concurrent requests
+    // with the same code can't both pull from the relayer pool. The loser gets
+    // 409; if the on-chain transfer then fails we release it back to unclaimed.
+    const won = await store.claimRedpacket({ id: packet.id, account: accountId, toAddress, now })
+    if (!won) throw new GatewayError('redpacket_already_claimed', 409)
+    let txHash: string
+    try {
+      txHash = await (options.relayer?.transfer ?? relayerTransfer)(env, toAddress, BigInt(packet.amountRaw))
+    } catch (e) {
+      await store.revertRedpacketClaim({ id: packet.id })
+      throw e
+    }
+    await store.setRedpacketClaimTx({ id: packet.id, txHash })
     return json({ tx_hash: txHash, amount_myc: Number(packet.amountRaw) / 1e6, to_address: toAddress })
   }
 
@@ -597,7 +615,7 @@ async function handleRequest(
     const memo = requireString(body, 'memo') as `0x${string}`
     const deadline = BigInt(requireString(body, 'deadline'))
     const sig = requireString(body, 'sig') as `0x${string}`
-    const txHash = await relayerBurnWithSig(env, { from, value, memo, deadline, sig })
+    const txHash = await (options.relayer?.burnWithSig ?? relayerBurnWithSig)(env, { from, value, memo, deadline, sig })
     const result = await verifyAndCreditBurn({ store, config: getTopupConfig(env), txHash, accountId, now, fetchImpl: options.fetchImpl })
     return json({
       tx_hash: txHash,

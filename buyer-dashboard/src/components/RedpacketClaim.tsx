@@ -1,9 +1,7 @@
 import { useState } from 'react'
 import { claimRedpacket, redeemGasless } from '../api.js'
 import { createWallet, loadStoredWallet, signBurnAuth, prfSupported } from '../wallet.js'
-
-// Tokens a single MYC (≈ $1) buys at the current sell price, for guidance copy.
-const TOKENS_PER_MYC = 670_000
+import { redpacketReward, humanError } from '../redpacketRewards.js'
 
 type Stage = 'sealed' | 'opening' | 'revealed' | 'redeeming' | 'done' | 'error'
 
@@ -43,8 +41,7 @@ export function RedpacketClaim({ code, accountId, onClose }: { code: string; acc
     }
   }
 
-  const usd = myc // 1 MYC = $1
-  const tokens = Math.round(myc * TOKENS_PER_MYC)
+  const { usd, tokensWanLabel } = redpacketReward(myc)
 
   return (
     <div className="rp-overlay">
@@ -68,7 +65,7 @@ export function RedpacketClaim({ code, accountId, onClose }: { code: string; acc
           <div className="rp-amount">🎉 {myc} MYC</div>
           <div className="rp-usd">≈ ${usd} AI 算力</div>
           <div className="rp-guide">
-            <div>≈ <strong>{(tokens / 10000).toLocaleString()} 万</strong> tokens 用量</div>
+            <div>≈ <strong>{tokensWanLabel} 万</strong> tokens 用量</div>
             <div>可跑 <strong>qwen3.6-plus</strong> / <strong>kimi</strong> 等模型</div>
           </div>
           {stage === 'done' ? (
@@ -108,19 +105,6 @@ function Confetti() {
       ))}
     </div>
   )
-}
-
-function humanError(e: unknown): string {
-  const m = e instanceof Error ? e.message : String(e)
-  const map: Record<string, string> = {
-    prf_unsupported: '这个 passkey 不支持 PRF（换个浏览器/设备）',
-    passkey_create_cancelled: '已取消',
-    passkey_get_cancelled: '已取消签名',
-    redpacket_not_found: '红包口令无效',
-    redpacket_already_claimed: '这个红包已经被领过了',
-    relayer_pool_insufficient: '红包池不足，联系发红包的人',
-  }
-  return map[m] ?? m
 }
 
 const RP_CSS = `

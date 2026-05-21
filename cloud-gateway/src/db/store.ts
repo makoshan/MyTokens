@@ -167,7 +167,14 @@ export interface GatewayStore {
   listOnchainTopups(input?: { limit?: number }): Promise<OnchainTopupRecord[]>
   createRedpacket(record: RedpacketRecord): Promise<void>
   getRedpacketByCodeHash(codeHash: string): Promise<RedpacketRecord | null>
-  markRedpacketClaimed(input: { id: string; account: string; toAddress: string; txHash: string; now: string }): Promise<void>
+  /** Atomically transition unclaimed→claimed; returns true only for the caller
+   *  that wins. Guards against two concurrent claims of the same code both
+   *  triggering a relayer transfer. The tx hash is filled in afterwards. */
+  claimRedpacket(input: { id: string; account: string; toAddress: string; now: string }): Promise<boolean>
+  /** Backfill the on-chain tx hash once the relayer transfer has confirmed. */
+  setRedpacketClaimTx(input: { id: string; txHash: string }): Promise<void>
+  /** Release a won claim back to unclaimed when the relayer transfer fails. */
+  revertRedpacketClaim(input: { id: string }): Promise<void>
   listRedpackets(input?: { limit?: number }): Promise<RedpacketRecord[]>
   listPriceBook(): Promise<PriceBookRow[]>
   listRoutingRules(): Promise<RoutingRule[]>
@@ -451,14 +458,29 @@ export class InMemoryGatewayStore implements GatewayStore {
     return this.redpackets.find((r) => r.codeHash === codeHash) ?? null
   }
 
-  async markRedpacketClaimed(input: { id: string; account: string; toAddress: string; txHash: string; now: string }): Promise<void> {
+  async claimRedpacket(input: { id: string; account: string; toAddress: string; now: string }): Promise<boolean> {
+    const r = this.redpackets.find((p) => p.id === input.id)
+    if (!r || r.status !== 'unclaimed') return false
+    r.status = 'claimed'
+    r.claimedByAccount = input.account
+    r.claimedToAddress = input.toAddress.toLowerCase()
+    r.claimedAt = input.now
+    return true
+  }
+
+  async setRedpacketClaimTx(input: { id: string; txHash: string }): Promise<void> {
+    const r = this.redpackets.find((p) => p.id === input.id)
+    if (r) r.claimTxHash = input.txHash.toLowerCase()
+  }
+
+  async revertRedpacketClaim(input: { id: string }): Promise<void> {
     const r = this.redpackets.find((p) => p.id === input.id)
     if (r) {
-      r.status = 'claimed'
-      r.claimedByAccount = input.account
-      r.claimedToAddress = input.toAddress
-      r.claimTxHash = input.txHash
-      r.claimedAt = input.now
+      r.status = 'unclaimed'
+      r.claimedByAccount = undefined
+      r.claimedToAddress = undefined
+      r.claimedAt = undefined
+      r.claimTxHash = undefined
     }
   }
 
@@ -1036,10 +1058,25 @@ export class D1GatewayStore implements GatewayStore {
     }
   }
 
-  async markRedpacketClaimed(input: { id: string; account: string; toAddress: string; txHash: string; now: string }): Promise<void> {
+  async claimRedpacket(input: { id: string; account: string; toAddress: string; now: string }): Promise<boolean> {
+    const res = await this.db
+      .prepare("UPDATE compute_redpackets SET status='claimed', claimed_by_account=?, claimed_to_address=?, claimed_at=? WHERE id=? AND status='unclaimed'")
+      .bind(input.account, input.toAddress.toLowerCase(), input.now, input.id)
+      .run()
+    return (res.meta?.changes ?? 0) > 0
+  }
+
+  async setRedpacketClaimTx(input: { id: string; txHash: string }): Promise<void> {
     await this.db
-      .prepare("UPDATE compute_redpackets SET status='claimed', claimed_by_account=?, claimed_to_address=?, claim_tx_hash=?, claimed_at=? WHERE id=? AND status='unclaimed'")
-      .bind(input.account, input.toAddress.toLowerCase(), input.txHash.toLowerCase(), input.now, input.id)
+      .prepare('UPDATE compute_redpackets SET claim_tx_hash=? WHERE id=?')
+      .bind(input.txHash.toLowerCase(), input.id)
+      .run()
+  }
+
+  async revertRedpacketClaim(input: { id: string }): Promise<void> {
+    await this.db
+      .prepare("UPDATE compute_redpackets SET status='unclaimed', claimed_by_account=NULL, claimed_to_address=NULL, claimed_at=NULL, claim_tx_hash=NULL WHERE id=?")
+      .bind(input.id)
       .run()
   }
 
