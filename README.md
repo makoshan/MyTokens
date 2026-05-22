@@ -26,32 +26,28 @@
 
 ![MyKey 系统架构](./docs/images/architecture.svg)
 
-- **运营者**（你）在 MyKey Desktop 的「算力网关运营台」里用本地 EVM keypair 注册身份，上传加密的上游 AI Token，系统自动建好渠道、定价与路由。
-- **网关**（Cloudflare Worker）做 OpenAI/Anthropic 兼容的 relay，按 µUSD 余额 reserve/settle 计费，用 **Account Durable Object** 保证并发安全，并按 `operator_id` 做多租户隔离。
-- **朋友**在浏览器买家 Dashboard 里领红包、用 Passkey 钱包、免 gas 兑换额度，然后在「AI 对话」直接试用，或复制 `sk-mykey_*` 接入自己的客户端。
+> 运营者在桌面端共享自己授权的 AI 额度 → 网关计费/路由 → 朋友在浏览器领取、兑换、对话。
 
 ---
 
-## ✨ MyKey Desktop（桌面端）
+## ✨ 功能一览
 
-### 🔐 本地资产保险箱
-- **零信任**：数据仅存本地 SQLite，绝不上云。
-- **强加密**：敏感字段用 **Argon2** 派生密钥 + **AES-256-GCM** 加密。
-- **自动导入**：扫描项目目录下的 `.env` 一键导入 API Key。
+**🔐 保管三类 Token（桌面端，全部本地加密，绝不上云）**
+- **AI Token / API Token** — 密钥库：Argon2 + AES-256-GCM，扫 `.env` 一键导入，按 Provider 分组管理。
+- **Crypto Token** — 多链钱包：组合扫描（Alchemy / OKLink）、收款 QR、转账、Swap、NFT、活动记录。
+- **解锁** — 主密码，或实验性原生 Passkey（Apple AuthenticationServices + WebAuthn PRF）。
 
-### 🌐 算力网关运营台
-- 选择上游 Provider（百炼/Qwen、Kimi、OpenAI、Anthropic），填模型 ID 和上游 Token，自动创建 channel / price / routing。
-- 为朋友生成带红包的邀请链接 `/accept?token=...&redpacket=...`。
-- 查看红包 / 兑换 / 用量状态，可随时「取消」邀请彻底断开某个朋友。
+**🤝 分享用不完的额度（算力网关）**
+- **运营台** — 选 Provider（百炼/Qwen、Kimi、OpenAI、Anthropic），填上游 Token，自动建渠道/定价/路由。
+- **邀请** — 一键生成带算力红包的邀请链接，随时可撤销、彻底断开某个朋友。
+- **朋友端** — Passkey 钱包领红包 → 免 gas 兑换 → 「AI 对话」直接试用 → 需要时复制 API Key 接入自己的客户端。
+- **计费** — OpenAI/Anthropic 兼容 relay，µUSD 余额 reserve/settle，Account Durable Object 并发安全，多租户隔离。
 
-### 💰 Crypto 钱包
-- 多链组合扫描（Alchemy Portfolio + OKLink），支持收款 QR、转账、Swap、NFT、活动记录。
-- 通过 tcx-wasm keystore 管理；支持助记词 / keystore / 仅观察地址。
+**🤖 AI 友好**
+- headless `mykey` CLI（`--json` 输出）+ 内置 Claude Code skill，AI Agent 可直接驱动你的本地保险箱。
 
-### 📎 Clippy 助手 · 🎙 语音输入 · 🔑 Passkey
-- **Clippy**：本地规则分析用量与稳定性，可选 Codex 模式调大模型给建议。
-- **语音输入**：macOS 上用 Fn 键全局触发的语音转写。
-- **原生 Passkey**（实验）：Apple AuthenticationServices + WebAuthn **PRF** 派生密钥加密 vault；当前受限于 Apple Developer Associated Domains capability，默认回退到浏览器桥。
+**🧰 其他**
+- Clippy 助手（用量/稳定性分析）· Fn 全局语音输入 · 链上充值（MYC 红包 / gasless / USDT，跑 Sepolia 测试网）。
 
 ---
 
