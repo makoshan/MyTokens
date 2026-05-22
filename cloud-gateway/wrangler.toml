@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 # Public, non-secret variables. Secrets (SERVER_PEPPER, ADMIN_TOKEN,
 # MASTER_KEY_V1) are uploaded via `wrangler secret put` — never committed.
 [vars]
-PUBLIC_GATEWAY_URL = "https://api.mykey.example"
+PUBLIC_GATEWAY_URL = "https://mykey-compute-gateway.v2eth.workers.dev"
 
 # Comma-separated IPv4 / CIDR list that may reach /admin/*. Empty value =
 # unrestricted (dev). Production deploys MUST narrow this — e.g.
@@ -27,6 +27,18 @@ TEMPO_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com"
 TEMPO_CHAIN_ID = "11155111"
 MYC_TOKEN_ADDRESS = "0x826fc283d2007A261347Cf4c0ff316e486506eBb"
 MYC_MICRO_USD_PER_TOKEN = "1000000"
+
+# Buy MYC with stablecoin (USDT). The buyer pays USDT to the relayer (gasless,
+# passkey-signed) and the relayer hands back MYC, which they redeem to credit.
+# Fill STABLECOIN_TOKEN_ADDRESS after running contracts/script/deploy-stablecoin.sh;
+# until then the buyer dashboard hides the USDT purchase option. On mainnet point
+# this at real USDC. STABLECOIN_MYC_RATE = MYC per 1 stablecoin (1:1 default).
+# The faucet (STABLECOIN_FAUCET_AMOUNT, raw 6-decimal) is testnet-only.
+# Test USDT (MockStablecoin) on Sepolia, owner = relayer (so faucet can mint).
+# Deployed 2026-05-22, tx 0x5366d91c…e92a06.
+STABLECOIN_TOKEN_ADDRESS = "0x6aF00A6ec507aE429b2baF6484F834FeD2B1B868"
+STABLECOIN_MYC_RATE = "1"
+STABLECOIN_FAUCET_AMOUNT = "20000000"
 
 [observability]
 enabled = true

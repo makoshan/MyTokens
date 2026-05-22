@@ -10,11 +10,12 @@ import { D1GatewayStore, type D1Database, type GatewayStore } from './db/store.j
 import { GatewayError, toErrorResponse } from './errors.js'
 import { anthropicAdapter } from './providers/anthropic.js'
 import type { ProviderAdapter } from './providers/adapter.js'
-import { openAIAdapter } from './providers/openai.js'
+import { openAIAdapter, openAIChatCompletionsAdapter } from './providers/openai.js'
 import { createDashboardSession, createInviteToken, hashDashboardToken } from './routes/dashboard.js'
+import { verifyOperatorChallenge } from './routes/operator-auth.js'
 import { relayCompletion, relayCompletionStream } from './routes/relay.js'
 import { verifyAndCreditBurn, type TopupConfig } from './routes/topup.js'
-import { relayerTransfer, relayerBurnWithSig } from './routes/relayer.js'
+import { relayerTransfer, relayerBurnWithSig, relayerTransferWithSig, relayerMint, relayerAddress, relayerWithdrawToken } from './routes/relayer.js'
 import { resolveRoutingRule } from './routing/router.js'
 import type {
   CreditRequestRecord,
@@ -47,6 +48,12 @@ export interface GatewayEnv {
   MYC_TOKEN_ADDRESS?: string
   MYC_MICRO_USD_PER_TOKEN?: string
   RELAYER_PRIVATE_KEY?: string
+  // Test stablecoin (USDT) used to buy MYC. Validation only — on mainnet this is
+  // real USDC. MYC minted per 1 whole stablecoin (default 1:1).
+  STABLECOIN_TOKEN_ADDRESS?: string
+  STABLECOIN_MYC_RATE?: string
+  // Per-call faucet grant (raw 6-decimal). Faucet is testnet-only (Sepolia).
+  STABLECOIN_FAUCET_AMOUNT?: string
 }
 
 export interface GatewayAppOptions {
@@ -65,6 +72,10 @@ export interface GatewayAppOptions {
   relayer?: {
     transfer?: typeof relayerTransfer
     burnWithSig?: typeof relayerBurnWithSig
+    transferWithSig?: typeof relayerTransferWithSig
+    mint?: typeof relayerMint
+    address?: typeof relayerAddress
+    withdrawToken?: typeof relayerWithdrawToken
   }
 }
 
@@ -83,6 +94,28 @@ function fallbackExecutionContext(): GatewayExecutionContext {
 
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status })
+}
+
+function parseBooleanQueryParam(value: string | null): boolean {
+  if (!value) return false
+  const normalized = value.trim().toLowerCase()
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on'
+}
+
+function buildAcceptRedirectLocation(searchParams: URLSearchParams): string {
+  const redirectParams = new URLSearchParams()
+  const redpacket = searchParams.get('redpacket')
+  const tab = searchParams.get('tab')
+  if (redpacket) {
+    // Red-packet invite: its own claim overlay (envelope → burn MYC) takes over.
+    redirectParams.set('redpacket', redpacket)
+  } else {
+    // Manual-credit invite: a fresh /accept is a first-time join, so signal the
+    // welcome/claim overlay (create passkey wallet → reveal granted models + quota).
+    redirectParams.set('welcome', '1')
+  }
+  if (tab) redirectParams.set('tab', tab)
+  return redirectParams.size > 0 ? `/?${redirectParams.toString()}` : '/'
 }
 
 function parseCookie(header: string | null, name: string): string | null {
@@ -127,6 +160,30 @@ async function sha256Hex(input: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
+async function ensureInviteDashboardApiKey(
+  store: GatewayStore,
+  accountId: string,
+  pepper: string | undefined,
+  now: string
+): Promise<void> {
+  if (!pepper) return
+  const snapshot = await store.getDashboardSnapshot(accountId)
+  const hasActiveKey = snapshot.apiKeys.some((apiKey) => apiKey.status === 'active')
+  if (hasActiveKey) return
+
+  const created = createApiKey({ environment: 'live' })
+  const apiKey = registerApiKey({
+    id: `key_${crypto.randomUUID()}`,
+    accountId,
+    rawKey: created.rawKey,
+    pepper,
+    now,
+    name: '邀请链接自动创建',
+  })
+
+  await store.createApiKeyRecord(apiKey)
+}
+
 function getTopupConfig(env?: GatewayEnv): TopupConfig {
   const tokenAddress = env?.MYC_TOKEN_ADDRESS
   if (!tokenAddress) throw new GatewayError('topup_not_configured', 500)
@@ -139,6 +196,36 @@ function getTopupConfig(env?: GatewayEnv): TopupConfig {
   }
 }
 
+interface StablecoinConfig {
+  tokenAddress: string
+  /** MYC minted per 1 whole stablecoin. Both are 6-decimal, so this is a raw ratio. */
+  mycRate: number
+  /** Per-call faucet grant in raw 6-decimal units. */
+  faucetAmountRaw: bigint
+  /** Faucet (mint) is allowed only on testnet — guards against minting fake USDT in prod. */
+  faucetEnabled: boolean
+}
+
+function getStablecoinConfig(env?: GatewayEnv): StablecoinConfig {
+  const tokenAddress = env?.STABLECOIN_TOKEN_ADDRESS
+  if (!tokenAddress) throw new GatewayError('stablecoin_not_configured', 500)
+  const chainId = env?.TEMPO_CHAIN_ID ? Number(env.TEMPO_CHAIN_ID) : 11155111
+  return {
+    tokenAddress,
+    mycRate: env?.STABLECOIN_MYC_RATE ? Number(env.STABLECOIN_MYC_RATE) : 1,
+    faucetAmountRaw: BigInt(env?.STABLECOIN_FAUCET_AMOUNT ?? '20000000'),
+    // Only Sepolia (11155111) — mainnet (e.g. Base 8453) uses real USDC, no faucet.
+    faucetEnabled: chainId === 11155111,
+  }
+}
+
+/** Convert a raw stablecoin amount (6-decimal) to the MYC raw amount it buys. */
+function stablecoinToMycRaw(stablecoinRaw: bigint, mycRate: number): bigint {
+  // mycRate defaults to 1 (1:1). Support fractional rates via integer math at 1e6 precision.
+  const rateScaled = BigInt(Math.round(mycRate * 1_000_000))
+  return (stablecoinRaw * rateScaled) / 1_000_000n
+}
+
 async function authenticateDashboard(request: Request, store: GatewayStore, now: string): Promise<string> {
   const rawSession =
     parseCookie(request.headers.get('cookie'), 'mykey_dashboard_session') ??
@@ -146,7 +233,37 @@ async function authenticateDashboard(request: Request, store: GatewayStore, now:
   if (!rawSession) throw new GatewayError('dashboard_auth_required', 401)
   const session = await store.findDashboardSessionByHash(hashDashboardToken(rawSession), now)
   if (!session) throw new GatewayError('dashboard_auth_required', 401)
+  // A live session alone isn't enough — a disabled/paused account (e.g. after the
+  // operator revokes the invite) must lose dashboard access too, not just relay.
+  const account = await store.getAccount(session.accountId)
+  if (!account || account.status !== 'active') throw new GatewayError('account_disabled', 403)
   return session.accountId
+}
+
+async function authenticateOperator(request: Request, store: GatewayStore, now: string): Promise<string> {
+  const raw =
+    parseCookie(request.headers.get('cookie'), 'mykey_operator_session') ??
+    request.headers.get('x-operator-session')
+  if (!raw) throw new GatewayError('operator_auth_required', 401)
+  const session = await store.findOperatorSessionByHash(hashDashboardToken(raw), now)
+  if (!session) throw new GatewayError('operator_auth_required', 401)
+  return session.operatorId
+}
+
+async function mintOperatorSession(
+  store: GatewayStore,
+  operatorId: string,
+  now: string
+): Promise<{ token: string; expiresAt: string }> {
+  const token = `op_sess_${crypto.randomUUID().replace(/-/g, '')}${crypto.randomUUID().replace(/-/g, '')}`
+  const expiresAt = new Date(Date.parse(now) + 30 * 24 * 3600 * 1000).toISOString()
+  await store.createOperatorSession({
+    id: `ops_${crypto.randomUUID()}`,
+    operatorId,
+    sessionHash: hashDashboardToken(token),
+    expiresAt,
+  })
+  return { token, expiresAt }
 }
 
 async function authenticateBuyer(
@@ -228,10 +345,22 @@ function stringArrayField(body: Record<string, unknown>, key: string): string[] 
   return strings.map((item) => item.trim())
 }
 
+function optionalStringArrayField(body: Record<string, unknown>, key: string): string[] | undefined {
+  if (!(key in body)) return undefined
+  return stringArrayField(body, key)
+}
+
 function requireActiveAccount(account: Awaited<ReturnType<GatewayStore['getAccount']>>) {
   if (!account) throw new GatewayError('account_not_found', 404)
   if (account.status !== 'active') throw new GatewayError('account_paused', 403)
   return account
+}
+
+function ensureAccountModelAllowed(account: Awaited<ReturnType<GatewayStore['getAccount']>>, model: string): void {
+  const allowlist = account?.modelAllowlist
+  if (allowlist && allowlist.length > 0 && !allowlist.includes(model)) {
+    throw new GatewayError('model_not_allowed_for_account', 403)
+  }
 }
 
 function serializeCreditRequest(record: CreditRequestRecord) {
@@ -273,18 +402,47 @@ async function handleRelayRoute(
 ): Promise<Response> {
   if (!pepper) throw new GatewayError('server_pepper_not_configured', 500)
   const { accountId, apiKeyId } = await authenticateBuyer(request, store, pepper, now)
+  return handleRelayForAccount({
+    adapter,
+    request,
+    options,
+    env,
+    ctx,
+    store,
+    accountId,
+    apiKeyId,
+    now,
+  })
+}
+
+async function handleRelayForAccount(input: {
+  adapter: ProviderAdapter
+  request: Request
+  options: GatewayAppOptions
+  env: GatewayEnv | undefined
+  ctx: GatewayExecutionContext
+  store: GatewayStore
+  accountId: string
+  apiKeyId?: string
+  now: string
+}): Promise<Response> {
+  const { adapter, request, options, env, ctx, store, accountId, apiKeyId, now } = input
   const accountRecord = requireActiveAccount(await store.getAccount(accountId))
   const body = await readJsonObject(request)
   const requestedModel =
     typeof body.model === 'string' && body.model.length > 0 ? body.model : accountRecord.defaultModel
   if (!requestedModel) throw new GatewayError('model_required', 400)
+  ensureAccountModelAllowed(accountRecord, requestedModel)
 
+  // Multi-tenant isolation: a friend's request only ever routes to its own
+  // operator's tokens/rules. Legacy accounts (no operatorId) stay unscoped.
+  const operatorId = accountRecord.operatorId ?? undefined
   const routing = resolveRoutingRule({
     accountGroup: accountRecord.accountGroup,
     requestedModel,
     requestedProvider: adapter.name,
-    rules: await store.listRoutingRules(),
-    providerTokens: providerTokenSummariesFromChannels(await store.listProviderTokenSummaries()),
+    rules: await store.listRoutingRules(operatorId),
+    providerTokens: providerTokenSummariesFromChannels(await store.listProviderTokenSummaries(operatorId)),
     now,
   })
   if (routing.providerToken.adapter !== adapter.name) {
@@ -411,6 +569,340 @@ async function handleRequest(
     return json({ ok: true, service: 'mykey-compute-gateway' })
   }
 
+  // Operator self-registration / login. The native app signs a freshness-bound
+  // challenge with its locally-held EVM key; the gateway recovers the signer and
+  // mints an operator session. No invite link, no global Admin Token.
+  if (url.pathname === '/operator/register' && request.method === 'POST') {
+    const body = await readJsonObject(request)
+    const address = requireString(body, 'address').toLowerCase()
+    await verifyOperatorChallenge({
+      address,
+      challenge: requireString(body, 'challenge'),
+      sig: requireString(body, 'sig'),
+      now,
+    })
+    let operator = await store.findOperatorByAddress(address)
+    if (!operator) {
+      operator = await store.createOperator({
+        id: `op_${crypto.randomUUID()}`,
+        pubkeyAddress: address,
+        displayName: optionalStringField(body, 'display_name'),
+        createdAt: now,
+      })
+    }
+    const session = await mintOperatorSession(store, operator.id, now)
+    return json({ operator_id: operator.id, session_token: session.token, expires_at: session.expiresAt }, 201)
+  }
+
+  if (url.pathname === '/operator/login' && request.method === 'POST') {
+    const body = await readJsonObject(request)
+    const address = requireString(body, 'address').toLowerCase()
+    await verifyOperatorChallenge({
+      address,
+      challenge: requireString(body, 'challenge'),
+      sig: requireString(body, 'sig'),
+      now,
+    })
+    const operator = await store.findOperatorByAddress(address)
+    if (!operator) throw new GatewayError('operator_not_registered', 404)
+    if (operator.status !== 'active') throw new GatewayError('operator_disabled', 403)
+    const session = await mintOperatorSession(store, operator.id, now)
+    return json({ operator_id: operator.id, session_token: session.token, expires_at: session.expiresAt })
+  }
+
+  if (url.pathname === '/operator/me' && request.method === 'GET') {
+    const operatorId = await authenticateOperator(request, store, now)
+    return json({ operator_id: operatorId })
+  }
+
+  // --- Operator self-serve (tenant-scoped). All gated by the operator session;
+  // writes stamp operator_id, reads filter by it, so operators never see or
+  // touch each other's tokens / friends. ---
+
+  if (url.pathname === '/operator/provider-tokens' && request.method === 'POST') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const body = await readJsonObject(request)
+    const provider = requireString(body, 'provider')
+    const token = await encryptProviderToken({
+      id: optionalStringField(body, 'id') ?? `tok_${crypto.randomUUID()}`,
+      provider,
+      label: requireString(body, 'label'),
+      adapter: optionalStringField(body, 'adapter') ?? provider,
+      baseUrl: optionalStringField(body, 'base_url') ?? null,
+      plaintext: requireString(body, 'plaintext'),
+      masterKeys: getMasterKeys(options, env),
+      keyVersion: optionalStringField(body, 'key_version') ?? 'v1',
+      now,
+    })
+    const channel = await store.upsertProviderToken({
+      token,
+      models: stringArrayField(body, 'models'),
+      priority: positiveIntegerField(body, 'priority', 1),
+      weight: positiveIntegerField(body, 'weight', 1),
+      operatorId,
+      now,
+    })
+    return json({ id: channel.id, label: channel.label, provider: channel.provider, adapter: channel.adapter, models: channel.models, status: channel.status }, 201)
+  }
+
+  if (url.pathname === '/operator/provider-tokens' && request.method === 'GET') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const channels = await store.listProviderTokenSummaries(operatorId)
+    return json({ data: channels.map((c) => ({ id: c.id, label: c.label, provider: c.provider, adapter: c.adapter, status: c.status, models: c.models })) })
+  }
+
+  if (url.pathname === '/operator/routing-rules' && request.method === 'POST') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const body = await readJsonObject(request)
+    const saved = await store.upsertRoutingRule({
+      rule: {
+        id: optionalStringField(body, 'id') ?? `route_${crypto.randomUUID()}`,
+        accountGroup: optionalStringField(body, 'account_group') ?? 'default',
+        requestedProvider: optionalStringField(body, 'requested_provider'),
+        requestedModel: requireString(body, 'requested_model'),
+        providerTokenId: requireString(body, 'provider_token_id'),
+        actualProviderModel: optionalStringField(body, 'actual_provider_model') ?? requireString(body, 'requested_model'),
+        priority: integerField(body, 'priority', 0),
+        weight: positiveIntegerField(body, 'weight', 1),
+        status: optionalStringField(body, 'status') === 'disabled' ? 'disabled' : 'active',
+        operatorId,
+      },
+      now,
+    })
+    return json({ id: saved.id, account_group: saved.accountGroup, requested_model: saved.requestedModel, provider_token_id: saved.providerTokenId, status: saved.status }, 201)
+  }
+
+  if (url.pathname === '/operator/routing-rules' && request.method === 'GET') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const rules = await store.listRoutingRules(operatorId)
+    return json({
+      data: rules.map((r) => ({
+        id: r.id,
+        account_group: r.accountGroup,
+        requested_provider: r.requestedProvider ?? null,
+        requested_model: r.requestedModel,
+        provider_token_id: r.providerTokenId,
+        status: r.status,
+      })),
+    })
+  }
+
+  // Pricing stays platform-shared (not operator-isolated) for now.
+  if (url.pathname === '/operator/price-book' && request.method === 'POST') {
+    await authenticateOperator(request, store, now)
+    const body = await readJsonObject(request)
+    const saved = await store.upsertPriceBook({
+      row: {
+        id: optionalStringField(body, 'id') ?? `price_${crypto.randomUUID()}`,
+        version: positiveIntegerField(body, 'version', 1),
+        provider: requireString(body, 'provider'),
+        model: requireString(body, 'model'),
+        sellInputMicroUsdPer1MTokens: positiveIntegerField(body, 'sell_input_micro_usd_per_1m_tokens'),
+        sellOutputMicroUsdPer1MTokens: positiveIntegerField(body, 'sell_output_micro_usd_per_1m_tokens'),
+        upstreamInputMicroUsdPer1MTokens: positiveIntegerField(body, 'upstream_input_micro_usd_per_1m_tokens'),
+        upstreamOutputMicroUsdPer1MTokens: positiveIntegerField(body, 'upstream_output_micro_usd_per_1m_tokens'),
+        validFrom: optionalStringField(body, 'valid_from') ?? now,
+        validTo: optionalStringField(body, 'valid_to') ?? null,
+        enabled: booleanField(body, 'enabled', true),
+      },
+      now,
+    })
+    return json({ id: saved.id, provider: saved.provider, model: saved.model }, 201)
+  }
+
+  if (url.pathname === '/operator/accounts' && request.method === 'POST') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const body = await readJsonObject(request)
+    const modelAllowlist = optionalStringArrayField(body, 'model_allowlist')
+    const account = await store.createAccount({
+      id: optionalStringField(body, 'id') ?? `acct_${crypto.randomUUID()}`,
+      displayName: requireString(body, 'display_name'),
+      status: 'active',
+      accountGroup: optionalStringField(body, 'account_group') ?? 'default',
+      operatorId,
+      balanceMicroUsd: 0,
+      reservedMicroUsd: 0,
+      defaultProvider: optionalStringField(body, 'default_provider') ?? 'openai',
+      defaultModel: optionalStringField(body, 'default_model'),
+      modelAllowlist: modelAllowlist ?? null,
+      createdAt: now,
+      updatedAt: now,
+    })
+    return json({ id: account.id, display_name: account.displayName, account_group: account.accountGroup, balance_micro_usd: account.balanceMicroUsd, model_allowlist: account.modelAllowlist ?? [] }, 201)
+  }
+
+  if (url.pathname === '/operator/accounts' && request.method === 'GET') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const accounts = await store.listAccounts(operatorId)
+    return json({ data: accounts.map((a) => ({ id: a.id, display_name: a.displayName, status: a.status, account_group: a.accountGroup, balance_micro_usd: a.balanceMicroUsd, default_model: a.defaultModel ?? null, model_allowlist: a.modelAllowlist ?? [] })) })
+  }
+
+  const operatorAccountUpdateMatch = /^\/operator\/accounts\/([^/]+)$/.exec(url.pathname)
+  if (operatorAccountUpdateMatch && request.method === 'PATCH') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const account = await store.getAccount(operatorAccountUpdateMatch[1])
+    if (!account || account.operatorId !== operatorId) throw new GatewayError('account_not_found', 404)
+    const body = await readJsonObject(request)
+    const updated = await store.updateAccount({
+      accountId: account.id,
+      displayName: optionalStringField(body, 'display_name'),
+      defaultModel: optionalStringField(body, 'default_model'),
+      modelAllowlist: optionalStringArrayField(body, 'model_allowlist'),
+      now,
+    })
+    if (!updated) throw new GatewayError('account_not_found', 404)
+    return json({
+      id: updated.id,
+      display_name: updated.displayName,
+      account_group: updated.accountGroup,
+      balance_micro_usd: updated.balanceMicroUsd,
+      default_model: updated.defaultModel ?? null,
+      model_allowlist: updated.modelAllowlist ?? [],
+      status: updated.status,
+    })
+  }
+
+  if (url.pathname === '/operator/invites' && request.method === 'GET') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const invites = await store.listInvites({ operatorId })
+    const accounts = new Map((await store.listAccounts(operatorId)).map((account) => [account.id, account]))
+    return json({
+      data: invites.map((invite) => {
+        const account = accounts.get(invite.accountId)
+        return {
+          id: invite.id,
+          account_id: invite.accountId,
+          account_display_name: account?.displayName ?? invite.accountId,
+          account_group: account?.accountGroup ?? 'default',
+          status: invite.status,
+          expires_at: invite.expiresAt,
+          created_at: invite.createdAt,
+          accepted_at: invite.acceptedAt ?? null,
+        }
+      }),
+    })
+  }
+
+  const operatorInviteRevokeMatch = /^\/operator\/invites\/([^/]+)\/revoke$/.exec(url.pathname)
+  if (operatorInviteRevokeMatch && request.method === 'POST') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const inviteId = operatorInviteRevokeMatch[1]
+    const ownInvite = (await store.listInvites({ operatorId })).find((invite) => invite.id === inviteId)
+    if (!ownInvite) throw new GatewayError('invite_not_found', 404)
+    const revoked = await store.revokeInvite(inviteId, now)
+    if (!revoked) throw new GatewayError('invite_not_found', 404)
+    // Cut the friend off, not just the link: disabling the account blocks all
+    // relay (API key + web AI 对话, via requireActiveAccount) and the dashboard
+    // (authenticateDashboard checks status). Otherwise an already-accepted friend
+    // keeps their session + API keys and the revoke does nothing to live access.
+    await store.updateAccount({ accountId: revoked.accountId, status: 'disabled', now })
+    return json({
+      id: revoked.id,
+      account_id: revoked.accountId,
+      status: revoked.status,
+      account_status: 'disabled',
+      expires_at: revoked.expiresAt,
+      created_at: revoked.createdAt,
+      accepted_at: revoked.acceptedAt ?? null,
+    })
+  }
+
+  const operatorInviteMatch = /^\/operator\/accounts\/([^/]+)\/invites$/.exec(url.pathname)
+  if (operatorInviteMatch && request.method === 'POST') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const account = await store.getAccount(operatorInviteMatch[1])
+    // 404 (not 403) when the account isn't this operator's — don't leak existence.
+    if (!account || account.operatorId !== operatorId) throw new GatewayError('account_not_found', 404)
+    const { invite, rawToken } = createInviteToken({ accountId: account.id, createdBy: `operator:${operatorId}`, now })
+    await store.createInvite(invite)
+    const inviteUrl = `${options.baseUrl ?? new URL(request.url).origin}/accept?token=${encodeURIComponent(rawToken)}&autocreate_key=1&tab=keys`
+    return json({ invite_id: invite.id, invite_token: rawToken, invite_url: inviteUrl, expires_at: invite.expiresAt }, 201)
+  }
+
+  const operatorCreditMatch = /^\/operator\/accounts\/([^/]+)\/manual-credit$/.exec(url.pathname)
+  if (operatorCreditMatch && request.method === 'POST') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const account = await store.getAccount(operatorCreditMatch[1])
+    if (!account || account.operatorId !== operatorId) throw new GatewayError('account_not_found', 404)
+    const body = await readJsonObject(request)
+    const amount = Number(body.amount_micro_usd)
+    if (!Number.isInteger(amount) || amount <= 0) throw new GatewayError('invalid_credit_amount', 400)
+    const credited = await store.manualCredit(account.id, amount, now)
+    return json({ account_id: credited.id, balance_micro_usd: credited.balanceMicroUsd })
+  }
+
+  // Operator income view: real treasury (USDC collected − already withdrawn) and
+  // the accounting compute margin Σ(sell − upstream). Scoped to this operator.
+  if (url.pathname === '/operator/revenue' && request.method === 'GET') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const revenue = await store.getOperatorRevenue(operatorId)
+    const withdrawable = Math.max(0, revenue.treasuryCreditedMicroUsd - revenue.treasuryWithdrawnMicroUsd)
+    // Stablecoin meta is best-effort: the panel still renders if it's unconfigured.
+    let stablecoin: { token_address: string; chain_id: number; decimals: number } | null = null
+    try {
+      const config = getStablecoinConfig(env)
+      stablecoin = {
+        token_address: config.tokenAddress,
+        chain_id: env?.TEMPO_CHAIN_ID ? Number(env.TEMPO_CHAIN_ID) : 11155111,
+        decimals: 6,
+      }
+    } catch {
+      stablecoin = null
+    }
+    return json({
+      treasury: {
+        credited_micro_usd: revenue.treasuryCreditedMicroUsd,
+        withdrawn_micro_usd: revenue.treasuryWithdrawnMicroUsd,
+        withdrawable_micro_usd: withdrawable,
+      },
+      margin: {
+        sell_micro_usd: revenue.sellMicroUsd,
+        upstream_micro_usd: revenue.upstreamMicroUsd,
+        margin_micro_usd: revenue.marginMicroUsd,
+        calls: revenue.calls,
+        total_tokens: revenue.totalTokens,
+      },
+      stablecoin,
+    })
+  }
+
+  // Withdraw collected USDC to the operator's own wallet. Capped at this
+  // operator's withdrawable share so one tenant can never drain the shared
+  // relayer pool that holds every operator's collected funds.
+  if (url.pathname === '/operator/treasury/withdraw' && request.method === 'POST') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const body = await readJsonObject(request)
+    const toAddress = requireString(body, 'to_address')
+    if (!/^0x[0-9a-fA-F]{40}$/.test(toAddress)) throw new GatewayError('invalid_address', 400)
+    const revenue = await store.getOperatorRevenue(operatorId)
+    const withdrawable = Math.max(0, revenue.treasuryCreditedMicroUsd - revenue.treasuryWithdrawnMicroUsd)
+    // Default: sweep the whole withdrawable balance. An explicit amount must be a
+    // positive integer (µUSD) within that cap.
+    const requested = body.amount_micro_usd === undefined ? withdrawable : Number(body.amount_micro_usd)
+    if (!Number.isInteger(requested) || requested <= 0) throw new GatewayError('invalid_withdraw_amount', 400)
+    if (requested > withdrawable) throw new GatewayError('withdraw_exceeds_balance', 400)
+    const config = getStablecoinConfig(env)
+    const txHash = await (options.relayer?.withdrawToken ?? relayerWithdrawToken)(env, {
+      tokenAddress: config.tokenAddress,
+      to: toAddress,
+      value: BigInt(requested),
+    })
+    await store.recordTreasuryWithdrawal({
+      id: `twd_${crypto.randomUUID()}`,
+      operatorId,
+      amountMicroUsd: requested,
+      toAddress,
+      txHash,
+      createdAt: now,
+    })
+    return json({
+      tx_hash: txHash,
+      withdrawn_micro_usd: requested,
+      to_address: toAddress,
+      remaining_withdrawable_micro_usd: withdrawable - requested,
+    })
+  }
+
   // Browser-facing invite landing. Friend clicks `<gateway>/accept?token=...`
   // from a bootstrap-generated invite URL → we mint a dashboard session,
   // drop a cookie, and 302 them at the SPA root. POST /dashboard/invites/accept
@@ -436,6 +928,9 @@ async function handleRequest(
       createdAt: session.createdAt,
       expiresAt: session.expiresAt,
     })
+    if (parseBooleanQueryParam(url.searchParams.get('autocreate_key'))) {
+      await ensureInviteDashboardApiKey(store, invite.accountId, pepper, now)
+    }
     const cookie = [
       `mykey_dashboard_session=${session.sessionToken}`,
       'Path=/',
@@ -444,12 +939,7 @@ async function handleRequest(
       'SameSite=Strict',
       `Expires=${new Date(session.expiresAt).toUTCString()}`,
     ].join('; ')
-    // Preserve the red-packet claim code through the redirect so the SPA can
-    // auto-open the claim overlay once the session cookie is set. Without this
-    // the combined `/accept?token=...&redpacket=...` invite link logs the
-    // friend in but the overlay never appears (the query is dropped).
-    const redpacketCode = url.searchParams.get('redpacket')
-    const location = redpacketCode ? `/?redpacket=${encodeURIComponent(redpacketCode)}` : '/'
+    const location = buildAcceptRedirectLocation(url.searchParams)
     return new Response(null, {
       status: 302,
       headers: { location, 'set-cookie': cookie },
@@ -625,6 +1115,130 @@ async function handleRequest(
     })
   }
 
+  // Gasless MYC transfer between friends. The sender signs a transferWithSig
+  // authorization with their passkey wallet; the relayer submits it and pays gas
+  // — the sender never needs ETH and never sees the chain. Wallet→wallet only;
+  // the recipient later redeems the received MYC to credit their account.
+  if (url.pathname === '/dashboard/transfer-gasless' && request.method === 'POST') {
+    await authenticateDashboard(request, store, now)
+    const body = await readJsonObject(request)
+    const from = requireString(body, 'from') as `0x${string}`
+    const to = requireString(body, 'to') as `0x${string}`
+    const value = BigInt(requireString(body, 'value'))
+    if (value <= 0n) throw new GatewayError('invalid_value', 400)
+    const deadline = BigInt(requireString(body, 'deadline'))
+    const sig = requireString(body, 'sig') as `0x${string}`
+    const txHash = await (options.relayer?.transferWithSig ?? relayerTransferWithSig)(env, {
+      from,
+      to,
+      value,
+      deadline,
+      sig,
+    })
+    return json({ tx_hash: txHash, transferred_myc: Number(value) / 1e6, to_address: to })
+  }
+
+  // On-chain config the buyer's wallet needs to sign authorizations: the
+  // stablecoin token address and the relayer sink it must pay (the transferWithSig
+  // digest binds `to`, so the client must sign to the exact relayer address). Kept
+  // here (not in the dashboard snapshot) because it's derived from Worker env.
+  if (url.pathname === '/dashboard/onchain-config' && request.method === 'GET') {
+    await authenticateDashboard(request, store, now)
+    const chainId = env?.TEMPO_CHAIN_ID ? Number(env.TEMPO_CHAIN_ID) : 11155111
+    let stablecoinToken: string | null = null
+    let faucetEnabled = false
+    try {
+      const sc = getStablecoinConfig(env)
+      stablecoinToken = sc.tokenAddress
+      faucetEnabled = sc.faucetEnabled
+    } catch {
+      /* stablecoin not configured — USDT purchase unavailable */
+    }
+    let relayer: string | null = null
+    try {
+      relayer = (options.relayer?.address ?? relayerAddress)(env)
+    } catch {
+      /* relayer not configured */
+    }
+    return json({
+      chain_id: chainId,
+      myc_token: env?.MYC_TOKEN_ADDRESS ?? null,
+      stablecoin_token: stablecoinToken,
+      stablecoin_decimals: 6,
+      relayer_address: relayer,
+      faucet_enabled: faucetEnabled,
+    })
+  }
+
+  // Buy MYC with stablecoin (USDT), fully gasless. The buyer signs a stablecoin
+  // transferWithSig paying the relayer; the relayer submits it (pays gas) and
+  // then hands back MYC at the configured rate. The buyer then redeems that MYC
+  // to credit via /dashboard/redeem-gasless. No ETH ever needed by the buyer.
+  if (url.pathname === '/dashboard/buy-myc' && request.method === 'POST') {
+    const accountId = await authenticateDashboard(request, store, now)
+    const body = await readJsonObject(request)
+    const from = requireString(body, 'from') as `0x${string}`
+    if (!/^0x[0-9a-fA-F]{40}$/.test(from)) throw new GatewayError('invalid_address', 400)
+    const value = BigInt(requireString(body, 'value'))
+    if (value <= 0n) throw new GatewayError('invalid_value', 400)
+    const deadline = BigInt(requireString(body, 'deadline'))
+    const sig = requireString(body, 'sig') as `0x${string}`
+    const config = getStablecoinConfig(env)
+    const sink = (options.relayer?.address ?? relayerAddress)(env)
+    // 1) Pull the stablecoin from the buyer to the relayer (replay-protected
+    //    on-chain by the token's nonce; a resubmitted request reverts here).
+    const payTxHash = await (options.relayer?.transferWithSig ?? relayerTransferWithSig)(env, {
+      from,
+      to: sink,
+      value,
+      deadline,
+      sig,
+      tokenAddress: config.tokenAddress,
+    })
+    // 2) Hand back MYC at the configured rate. If this fails after the buyer
+    //    paid, the payTxHash is the on-chain receipt for operator reconciliation.
+    const mycRaw = stablecoinToMycRaw(value, config.mycRate)
+    const mycTxHash = await (options.relayer?.transfer ?? relayerTransfer)(env, from, mycRaw)
+    // Attribute the USDC paid into the shared relayer to the operator that owns
+    // this buyer, so it counts toward exactly their withdrawable treasury.
+    // Idempotent on payTxHash; skipped for legacy/unscoped accounts (no owner).
+    const buyerAccount = await store.getAccount(accountId)
+    if (buyerAccount?.operatorId) {
+      await store.recordTreasuryCredit({
+        id: `tcr_${crypto.randomUUID()}`,
+        operatorId: buyerAccount.operatorId,
+        accountId,
+        amountMicroUsd: Number(value),
+        stablecoinTxHash: payTxHash,
+        createdAt: now,
+      })
+    }
+    return json({
+      stablecoin_tx_hash: payTxHash,
+      tx_hash: mycTxHash,
+      paid_usdt: Number(value) / 1e6,
+      bought_myc: Number(mycRaw) / 1e6,
+      to_address: from,
+    })
+  }
+
+  // Testnet faucet: mint test-USDT to a wallet so the buy-MYC flow can be
+  // exercised end to end without real funds. Disabled on mainnet.
+  if (url.pathname === '/dashboard/faucet-usdt' && request.method === 'POST') {
+    await authenticateDashboard(request, store, now)
+    const body = await readJsonObject(request)
+    const toAddress = requireString(body, 'to_address')
+    if (!/^0x[0-9a-fA-F]{40}$/.test(toAddress)) throw new GatewayError('invalid_address', 400)
+    const config = getStablecoinConfig(env)
+    if (!config.faucetEnabled) throw new GatewayError('faucet_disabled', 403)
+    const txHash = await (options.relayer?.mint ?? relayerMint)(env, {
+      tokenAddress: config.tokenAddress,
+      to: toAddress,
+      value: config.faucetAmountRaw,
+    })
+    return json({ tx_hash: txHash, minted_usdt: Number(config.faucetAmountRaw) / 1e6, to_address: toAddress })
+  }
+
   // Self-service MYC top-up: buyer burns MYC on Tempo, then submits the tx hash
   // here. We verify the burn on-chain (read-only) and credit their balance.
   if (url.pathname === '/dashboard/topup' && request.method === 'POST') {
@@ -670,6 +1284,50 @@ async function handleRequest(
     return json({ data: records.map(serializeCreditRequest) })
   }
 
+  if (url.pathname === '/dashboard/responses' && request.method === 'POST') {
+    const accountId = await authenticateDashboard(request, store, now)
+    return handleRelayForAccount({
+      adapter: openAIAdapter,
+      request,
+      options,
+      env,
+      ctx,
+      store,
+      accountId,
+      now,
+    })
+  }
+
+  if (url.pathname === '/dashboard/chat/completions' && request.method === 'POST') {
+    const accountId = await authenticateDashboard(request, store, now)
+    return handleRelayForAccount({
+      adapter: openAIChatCompletionsAdapter,
+      request,
+      options,
+      env,
+      ctx,
+      store,
+      accountId,
+      now,
+    })
+  }
+
+  // Anthropic-format counterpart so the web AI chat can reach anthropic-compat
+  // channels that the OpenAI-compatible adapters reject.
+  if (url.pathname === '/dashboard/messages' && request.method === 'POST') {
+    const accountId = await authenticateDashboard(request, store, now)
+    return handleRelayForAccount({
+      adapter: anthropicAdapter,
+      request,
+      options,
+      env,
+      ctx,
+      store,
+      accountId,
+      now,
+    })
+  }
+
   if (url.pathname === '/v1/balance' && request.method === 'GET') {
     if (!pepper) throw new GatewayError('server_pepper_not_configured', 500)
     const { accountId } = await authenticateBuyer(request, store, pepper, now)
@@ -701,6 +1359,10 @@ async function handleRequest(
 
   if (url.pathname === '/v1/responses' && request.method === 'POST') {
     return handleRelayRoute(openAIAdapter, request, options, env, ctx, store, pepper, now)
+  }
+
+  if (url.pathname === '/v1/chat/completions' && request.method === 'POST') {
+    return handleRelayRoute(openAIChatCompletionsAdapter, request, options, env, ctx, store, pepper, now)
   }
 
   if (url.pathname === '/v1/messages' && request.method === 'POST') {
@@ -921,7 +1583,7 @@ async function handleRequest(
         id: invite.id,
         account_id: invite.accountId,
         invite_token: rawToken,
-        invite_url: `${options.baseUrl ?? new URL(request.url).origin}/accept?token=${rawToken}`,
+        invite_url: `${options.baseUrl ?? new URL(request.url).origin}/accept?token=${rawToken}&autocreate_key=1&tab=keys`,
         expires_at: invite.expiresAt,
         status: invite.status,
         created_at: invite.createdAt,

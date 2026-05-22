@@ -105,6 +105,29 @@ function seedStore() {
 
 test('dashboard routes require a real dashboard session and never fall back to demo data', async () => {
   const { store, pepper, dashboardToken } = seedStore()
+  store.channels.push({
+    id: 'tok-kimi',
+    label: 'Kimi for Coding',
+    provider: 'kimi',
+    adapter: 'openai',
+    models: ['kimi-for-coding'],
+    status: 'active',
+    priority: 1,
+    weight: 10,
+    latencyMs: 700,
+    errorRate: 0.0,
+    exhaustedUntil: null,
+  })
+  store.routingRules.push({
+    id: 'route-kimi-admins',
+    accountGroup: 'admins',
+    requestedModel: 'kimi-for-coding',
+    providerTokenId: 'tok-kimi',
+    actualProviderModel: 'kimi-for-coding',
+    priority: 1,
+    weight: 10,
+    status: 'active',
+  })
   const app = createGatewayApp({
     store,
     pepper,
@@ -128,10 +151,31 @@ test('dashboard routes require a real dashboard session and never fall back to d
   assert.equal(payload.apiKeys[0].last4, 'cret')
   assert.equal(payload.apiKeys[0].keyHash, undefined)
   assert.equal(payload.channels[0].label, 'official-openai')
+  assert.deepEqual(
+    payload.channels.map((channel: { label: string }) => channel.label),
+    ['official-openai']
+  )
+  assert.deepEqual(
+    payload.routingRules.map((rule: { requestedModel: string }) => rule.requestedModel),
+    ['gpt-4.1-mini']
+  )
 })
 
 test('buyer API routes use MyKey API key auth and expose account-scoped balance', async () => {
   const { store, pepper, apiKey } = seedStore()
+  store.channels.push({
+    id: 'tok-kimi',
+    label: 'Kimi for Coding',
+    provider: 'kimi',
+    adapter: 'openai',
+    models: ['kimi-for-coding'],
+    status: 'active',
+    priority: 1,
+    weight: 10,
+    latencyMs: 700,
+    errorRate: 0.0,
+    exhaustedUntil: null,
+  })
   const app = createGatewayApp({
     store,
     pepper,
@@ -153,6 +197,17 @@ test('buyer API routes use MyKey API key auth and expose account-scoped balance'
   assert.equal(payload.account_id, 'acct-1')
   assert.equal(payload.balance_micro_usd, 20_000_000)
   assert.equal(hashApiKey(apiKey, pepper), store.apiKeys[0].keyHash)
+
+  const modelsResponse = await app.fetch(
+    new Request('https://gateway.test/v1/models', {
+      headers: { authorization: `Bearer ${apiKey}` },
+    })
+  )
+  const modelsPayload = await modelsResponse.json()
+  assert.deepEqual(
+    modelsPayload.data.map((model: { id: string }) => model.id),
+    ['gpt-4.1-mini']
+  )
 })
 
 test('admin manual credit requires admin auth and updates the account snapshot', async () => {
@@ -311,6 +366,167 @@ test('POST /v1/responses decrypts provider token, relays upstream, settles usage
   assert.equal(lastLog?.providerTokenId, 'tok-1')
   assert.equal(lastLog?.routingRuleId, 'route-1')
   assert.equal(lastLog?.sellCostMicroUsd, 50)
+})
+
+test('POST /dashboard/responses uses dashboard session auth, spends balance, and logs without an API key', async () => {
+  const { store, pepper, dashboardToken } = seedStore()
+  const masterKeys = { v1: new Uint8Array(32).fill(12) }
+  store.providerTokens.push(
+    await encryptProviderToken({
+      id: 'tok-1',
+      provider: 'openai',
+      label: 'official-openai',
+      adapter: 'openai',
+      plaintext: 'sk-upstream-secret',
+      masterKeys,
+      keyVersion: 'v1',
+      now: '2026-05-19T00:00:00Z',
+    })
+  )
+  store.priceBook.push({
+    id: 'price-1',
+    version: 1,
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    sellInputMicroUsdPer1MTokens: 100_000,
+    sellOutputMicroUsdPer1MTokens: 200_000,
+    upstreamInputMicroUsdPer1MTokens: 50_000,
+    upstreamOutputMicroUsdPer1MTokens: 100_000,
+    validFrom: '2026-05-01T00:00:00Z',
+    validTo: null,
+    enabled: true,
+  })
+
+  let upstreamAuthorization: string | null = null
+  const app = createGatewayApp({
+    store,
+    pepper,
+    adminToken: 'admin-secret',
+    masterKeys,
+    now: () => '2026-05-19T00:00:00Z',
+    fetchImpl: async (_url: string | URL | Request, init?: RequestInit) => {
+      upstreamAuthorization = new Headers(init?.headers).get('authorization')
+      return Response.json({
+        id: 'resp-dashboard',
+        model: 'gpt-4.1-mini',
+        usage: { input_tokens: 100, output_tokens: 200, total_tokens: 300 },
+      })
+    },
+  })
+
+  const missingSession = await app.fetch(
+    new Request('https://gateway.test/dashboard/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-4.1-mini', input: 'hello', max_output_tokens: 20 }),
+    })
+  )
+  assert.equal(missingSession.status, 401)
+
+  const response = await app.fetch(
+    new Request('https://gateway.test/dashboard/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-dashboard-session': dashboardToken },
+      body: JSON.stringify({ model: 'gpt-4.1-mini', input: 'hello', max_output_tokens: 20 }),
+    })
+  )
+  const payload = await response.json()
+  const account = await store.getAccount('acct-1')
+  const lastLog = store.usage.at(-1)
+
+  assert.equal(response.status, 200)
+  assert.equal(payload.id, 'resp-dashboard')
+  assert.equal(upstreamAuthorization, 'Bearer sk-upstream-secret')
+  assert.equal(account?.balanceMicroUsd, 19_999_950)
+  assert.equal(lastLog?.apiKeyId, undefined)
+  assert.equal(lastLog?.endpoint, '/v1/responses')
+  assert.equal(lastLog?.providerTokenId, 'tok-1')
+  assert.equal(lastLog?.routingRuleId, 'route-1')
+  assert.equal(lastLog?.sellCostMicroUsd, 50)
+})
+
+test('POST /v1/chat/completions relays OpenAI-compatible chat requests to provider chat endpoint', async () => {
+  const { store, pepper, apiKey } = seedStore()
+  const masterKeys = { v1: new Uint8Array(32).fill(17) }
+  store.channels[0] = {
+    ...store.channels[0],
+    provider: 'bailian',
+    label: 'BaiLian',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  }
+  store.routingRules[0] = {
+    ...store.routingRules[0],
+    requestedProvider: 'bailian',
+    requestedModel: 'deepseek-v4-pro',
+    actualProviderModel: 'deepseek-v4-pro',
+  }
+  store.priceBook.push({
+    id: 'price-bailian',
+    version: 1,
+    provider: 'bailian',
+    model: 'deepseek-v4-pro',
+    sellInputMicroUsdPer1MTokens: 100_000,
+    sellOutputMicroUsdPer1MTokens: 200_000,
+    upstreamInputMicroUsdPer1MTokens: 50_000,
+    upstreamOutputMicroUsdPer1MTokens: 100_000,
+    validFrom: '2026-05-01T00:00:00Z',
+    validTo: null,
+    enabled: true,
+  })
+  store.providerTokens.push(
+    await encryptProviderToken({
+      id: 'tok-1',
+      provider: 'bailian',
+      label: 'BaiLian',
+      adapter: 'openai',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      plaintext: 'sk-bailian-secret',
+      masterKeys,
+      keyVersion: 'v1',
+      now: '2026-05-19T00:00:00Z',
+    })
+  )
+
+  let upstreamUrl = ''
+  let upstreamBody: unknown = null
+  const app = createGatewayApp({
+    store,
+    pepper,
+    adminToken: 'admin-secret',
+    masterKeys,
+    now: () => '2026-05-19T00:00:00Z',
+    fetchImpl: async (url: string | URL | Request, init?: RequestInit) => {
+      upstreamUrl = String(url)
+      upstreamBody = JSON.parse(String(init?.body))
+      return Response.json({
+        id: 'chatcmpl-bailian',
+        model: 'deepseek-v4-pro',
+        choices: [{ message: { role: 'assistant', content: 'ok' } }],
+        usage: { prompt_tokens: 100, completion_tokens: 200, total_tokens: 300 },
+      })
+    },
+  })
+
+  const response = await app.fetch(
+    new Request('https://gateway.test/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'deepseek-v4-pro', messages: [{ role: 'user', content: 'hello' }] }),
+    })
+  )
+  const payload = await response.json()
+  const lastLog = store.usage.at(-1)
+
+  assert.equal(response.status, 200)
+  assert.equal(payload.id, 'chatcmpl-bailian')
+  assert.equal(upstreamUrl, 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions')
+  assert.deepEqual(upstreamBody, {
+    model: 'deepseek-v4-pro',
+    messages: [{ role: 'user', content: 'hello' }],
+  })
+  assert.equal(lastLog?.endpoint, '/v1/chat/completions')
+  assert.equal(lastLog?.provider, 'bailian')
+  assert.equal(lastLog?.model, 'deepseek-v4-pro')
 })
 
 test('POST /v1/messages routes to anthropicAdapter, sends x-api-key, and settles using Messages usage', async () => {

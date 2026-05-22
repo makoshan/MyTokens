@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
+const { readFileSync } = require('node:fs')
 const {
   getCredentialsLinkedToProject,
   resolveCredentialProjectName,
@@ -144,4 +145,14 @@ test('getCredentialsLinkedToProject: 基于同一优先级规则返回关联密�
     linked.map((item) => item.id).sort(),
     ['derived-hit', 'manual-hit', 'path-hit']
   )
+})
+
+test('macOS tray builder sets a visible icon before building', () => {
+  const source = readFileSync('src-tauri/src/lib.rs', 'utf8')
+  const start = source.indexOf('fn setup_tray')
+  const build = source.indexOf('        .build(app)?;', start)
+  const setupTrayBuilder = start >= 0 && build >= 0 ? source.slice(start, build) : ''
+
+  assert.match(setupTrayBuilder, /TrayIconBuilder::new\(\)[\s\S]*\.icon\(/)
+  assert.match(setupTrayBuilder, /\.tooltip\("MyKey"\)/)
 })

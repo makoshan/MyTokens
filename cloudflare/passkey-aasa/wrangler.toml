@@ -1,0 +1,7 @@
+name = "mykey-passkey-aasa"
+main = "src/worker.mjs"
+compatibility_date = "2025-12-01"
+workers_dev = true
+
+[vars]
+APPLE_APP_ID = "A32Q4A82E2.com.mykey.desktop"

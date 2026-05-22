@@ -81,15 +81,49 @@ function maxOutputTokens(body: Record<string, unknown>): number {
   return Math.max(1, Number(value) || 256)
 }
 
+function openAIEndpointUrl(baseUrl: string | null | undefined, endpoint: string): string {
+  const host = (baseUrl ?? 'https://api.openai.com').replace(/\/$/, '')
+  return host.endsWith('/v1') ? `${host}${endpoint}` : `${host}/v1${endpoint}`
+}
+
 export const openAIAdapter: ProviderAdapter = {
   name: 'openai',
   endpoint: '/v1/responses',
   buildUpstreamRequest({ body, model, upstreamApiKey, baseUrl, stream }) {
     const upstreamBody: Record<string, unknown> = { ...body, model }
     if (stream) upstreamBody.stream = true
-    const host = (baseUrl ?? 'https://api.openai.com').replace(/\/$/, '')
     return {
-      url: `${host}/v1/responses`,
+      url: openAIEndpointUrl(baseUrl, '/responses'),
+      headers: {
+        authorization: `Bearer ${upstreamApiKey}`,
+        'content-type': 'application/json',
+        ...(stream ? { accept: 'text/event-stream' } : {}),
+      },
+      body: JSON.stringify(upstreamBody),
+    }
+  },
+  estimateInputTokens(body) {
+    return roughInputTokens(body)
+  },
+  estimateMaxOutputTokens(body) {
+    return maxOutputTokens(body)
+  },
+  parseUsage(payload) {
+    return parseOpenAIUsage(payload)
+  },
+  parseStreamEventUsage(eventBlock) {
+    return parseOpenAIStreamEventUsage(eventBlock)
+  },
+}
+
+export const openAIChatCompletionsAdapter: ProviderAdapter = {
+  name: 'openai',
+  endpoint: '/v1/chat/completions',
+  buildUpstreamRequest({ body, model, upstreamApiKey, baseUrl, stream }) {
+    const upstreamBody: Record<string, unknown> = { ...body, model }
+    if (stream) upstreamBody.stream = true
+    return {
+      url: openAIEndpointUrl(baseUrl, '/chat/completions'),
       headers: {
         authorization: `Bearer ${upstreamApiKey}`,
         'content-type': 'application/json',

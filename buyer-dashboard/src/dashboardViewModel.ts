@@ -1,5 +1,24 @@
 import type { DashboardApiKey, DashboardSnapshot, QualityLabel } from './types.js'
 
+export type DashboardTab =
+  | 'chat'
+  | 'overview'
+  | 'channels'
+  | 'keys'
+  | 'usage'
+  | 'quality'
+  | 'credits'
+  | 'topup'
+  | 'docs'
+
+// Friends land in the web AI chat right after redeeming a red packet — they can
+// test the shared model immediately, before deciding to mint an API key.
+export function tabAfterRedpacketRedeem(): DashboardTab {
+  return 'chat'
+}
+
+export const DEFAULT_DASHBOARD_TAB: DashboardTab = 'chat'
+
 export function formatMicroUsd(value: number): string {
   const usd = value / 1_000_000
   if (value > 0 && value < 10_000) return `$${usd.toFixed(6)}`
@@ -23,16 +42,19 @@ export function buildDashboardViewModel(snapshot: DashboardSnapshot) {
   const totalTokensToday = snapshot.usage.reduce((sum, row) => sum + row.inputTokens + row.outputTokens, 0)
   const lastRequest = snapshot.usage[0]
   const qualitySummary = strongestQuality(snapshot.modelQuality.map((row) => row.label))
-  const navigation = [
-    { id: 'overview', label: '总览' },
-    { id: 'channels', label: '渠道' },
-    { id: 'keys', label: '令牌' },
-    { id: 'usage', label: '日志' },
-    { id: 'quality', label: '模型检测' },
-    { id: 'credits', label: '额度' },
-    { id: 'topup', label: '充值' },
-    { id: 'docs', label: '文档' },
-  ] as const
+  // Friend-facing MVP keeps only chat / API key / access. Operator-leaning views
+  // (channels, logs, quality, credits…) move behind an "高级" toggle.
+  const navigation: Array<{ id: DashboardTab; label: string; advanced?: boolean }> = [
+    { id: 'chat', label: 'AI 对话' },
+    { id: 'keys', label: 'MyKey API Key' },
+    { id: 'docs', label: '接入说明' },
+    { id: 'overview', label: '总览', advanced: true },
+    { id: 'channels', label: '渠道', advanced: true },
+    { id: 'usage', label: '日志', advanced: true },
+    { id: 'quality', label: '模型检测', advanced: true },
+    { id: 'credits', label: '额度', advanced: true },
+    { id: 'topup', label: '充值', advanced: true },
+  ]
   const channelSummary = {
     total: snapshot.channels.length,
     active: snapshot.channels.filter((channel) => channel.status === 'active').length,

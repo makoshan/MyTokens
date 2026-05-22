@@ -5,7 +5,17 @@ import { redpacketReward, humanError } from '../redpacketRewards.js'
 
 type Stage = 'sealed' | 'opening' | 'revealed' | 'redeeming' | 'done' | 'error'
 
-export function RedpacketClaim({ code, accountId, onClose }: { code: string; accountId: string; onClose: () => void }) {
+export function RedpacketClaim({
+  code,
+  accountId,
+  onClose,
+  onRedeemed,
+}: {
+  code: string
+  accountId: string
+  onClose: () => void
+  onRedeemed?: () => void
+}) {
   const [stage, setStage] = useState<Stage>('sealed')
   const [myc, setMyc] = useState(0)
   const [error, setError] = useState('')
@@ -71,8 +81,8 @@ export function RedpacketClaim({ code, accountId, onClose }: { code: string; acc
           {stage === 'done' ? (
             <>
               <div className="rp-done">✓ 已兑换 ${usd} 额度到账！</div>
-              <p className="rp-done-tip">在「令牌」页拿 API key，把 Claude Code / 任意 OpenAI 兼容工具指向网关即可开跑。</p>
-              <button className="rp-cta" onClick={onClose}>进入面板 →</button>
+              <p className="rp-done-tip">下一步创建 MyKey API Key，复制 Base URL 后即可在网页或任意 OpenAI-compatible 客户端使用。</p>
+              <button className="rp-cta" onClick={onRedeemed ?? onClose}>创建 API key →</button>
             </>
           ) : (
             <>

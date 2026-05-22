@@ -21,10 +21,12 @@ export function resolveRoutingRule(input: {
       if (rule.status !== 'active') return false
       if (rule.accountGroup !== input.accountGroup && rule.accountGroup !== 'default') return false
       if (rule.requestedModel !== input.requestedModel) return false
-      if (input.requestedProvider && rule.requestedProvider && rule.requestedProvider !== input.requestedProvider) {
-        return false
-      }
       const token = tokensById.get(rule.providerTokenId)
+      if (input.requestedProvider && rule.requestedProvider && token) {
+        const matchesAdapter = rule.requestedProvider === input.requestedProvider
+        const matchesUpstreamProvider = rule.requestedProvider === token.provider
+        if (!matchesAdapter && !matchesUpstreamProvider) return false
+      }
       return token ? isTokenHealthy(token, input.now) : false
     })
     .sort((a, b) => {

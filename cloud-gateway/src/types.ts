@@ -61,6 +61,8 @@ export interface RoutingRule {
   priority: number
   weight: number
   status: RoutingRuleStatus
+  // Multi-tenant owner. Undefined = legacy/unscoped.
+  operatorId?: string | null
 }
 
 export interface ResolvedRoute {

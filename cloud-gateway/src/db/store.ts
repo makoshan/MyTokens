@@ -15,10 +15,14 @@ export interface GatewayAccountRecord {
   displayName: string
   status: 'active' | 'paused' | 'disabled'
   accountGroup: string
+  // Multi-tenant owner. Undefined = legacy/single-tenant (unscoped). Set =
+  // the operator who owns this friend account; relay scopes routing to it.
+  operatorId?: string | null
   balanceMicroUsd: number
   reservedMicroUsd: number
   defaultProvider: string
   defaultModel?: string
+  modelAllowlist?: string[] | null
   createdAt: string
   updatedAt: string
 }
@@ -31,11 +35,61 @@ export interface DashboardSessionRecord {
   expiresAt: string
 }
 
+export interface OperatorRecord {
+  id: string
+  pubkeyAddress: string
+  displayName?: string | null
+  status: 'active' | 'disabled'
+  createdAt: string
+}
+
+export interface OperatorSessionRecord {
+  id: string
+  operatorId: string
+  sessionHash: string
+  expiresAt: string
+}
+
+export interface TreasuryCreditRecord {
+  id: string
+  operatorId: string
+  accountId?: string | null
+  amountMicroUsd: number
+  stablecoinTxHash: string
+  createdAt: string
+}
+
+export interface TreasuryWithdrawalRecord {
+  id: string
+  operatorId: string
+  amountMicroUsd: number
+  toAddress: string
+  txHash: string
+  createdAt: string
+}
+
+/** Per-operator income view: real USDC collected vs. accounting compute margin. */
+export interface OperatorRevenue {
+  // Real money: USDC paid into the shared relayer by this operator's friends,
+  // minus what this operator has already withdrawn. This is the withdrawable cap.
+  treasuryCreditedMicroUsd: number
+  treasuryWithdrawnMicroUsd: number
+  // Accounting: resold-compute gross margin = Σ(sell − upstream) over this
+  // operator's request logs. Denominated in account credit, not withdrawable.
+  sellMicroUsd: number
+  upstreamMicroUsd: number
+  marginMicroUsd: number
+  calls: number
+  totalTokens: number
+}
+
 export interface ChannelRecord {
   id: string
   label: string
   provider: string
   adapter: string
+  // Multi-tenant owner. Undefined = legacy/unscoped (all operators' relays may use it).
+  operatorId?: string | null
   baseUrl?: string | null
   models: string[]
   status: 'active' | 'degraded' | 'exhausted' | 'paused' | 'disabled' | 'revoked'
@@ -44,6 +98,27 @@ export interface ChannelRecord {
   latencyMs: number
   errorRate: number
   exhaustedUntil: string | null
+}
+
+function ownerMatchesAccount(account: GatewayAccountRecord, ownerId?: string | null): boolean {
+  if (!account.operatorId) return true
+  return ownerId === account.operatorId
+}
+
+function ruleVisibleToAccount(account: GatewayAccountRecord, rule: RoutingRule): boolean {
+  return (
+    ownerMatchesAccount(account, rule.operatorId) &&
+    (rule.accountGroup === account.accountGroup || rule.accountGroup === 'default')
+  )
+}
+
+function channelIsRoutableForRules(channel: ChannelRecord, visibleRules: RoutingRule[]): boolean {
+  return visibleRules.some((rule) => rule.providerTokenId === channel.id)
+}
+
+function modelAllowedForAccount(account: GatewayAccountRecord, model: string): boolean {
+  const allowlist = account.modelAllowlist
+  return !allowlist || allowlist.length === 0 || allowlist.includes(model)
 }
 
 export interface OnchainTopupRecord {
@@ -150,12 +225,36 @@ export interface GatewayStore {
     createdAt: string
     expiresAt: string
   }): Promise<DashboardSessionRecord>
+  findOperatorByAddress(address: string): Promise<OperatorRecord | null>
+  createOperator(input: {
+    id: string
+    pubkeyAddress: string
+    displayName?: string | null
+    createdAt: string
+  }): Promise<OperatorRecord>
+  findOperatorSessionByHash(hash: string, now: string): Promise<OperatorSessionRecord | null>
+  createOperatorSession(input: {
+    id: string
+    operatorId: string
+    sessionHash: string
+    expiresAt: string
+  }): Promise<OperatorSessionRecord>
   createInvite(invite: AccountInvite): Promise<AccountInvite>
+  listInvites(input?: { operatorId?: string; accountId?: string }): Promise<AccountInvite[]>
   findInviteByHash(hash: string): Promise<AccountInvite | null>
   markInviteAccepted(inviteId: string, now: string): Promise<void>
+  revokeInvite(inviteId: string, now: string): Promise<AccountInvite | null>
   getAccount(accountId: string): Promise<GatewayAccountRecord | null>
-  listAccounts(): Promise<GatewayAccountRecord[]>
+  listAccounts(operatorId?: string): Promise<GatewayAccountRecord[]>
   createAccount(account: GatewayAccountRecord): Promise<GatewayAccountRecord>
+  updateAccount(input: {
+    accountId: string
+    displayName?: string
+    defaultModel?: string
+    modelAllowlist?: string[] | null
+    status?: GatewayAccountRecord['status']
+    now: string
+  }): Promise<GatewayAccountRecord | null>
   createApiKeyRecord(apiKey: ApiKeyRecord): Promise<ApiKeyRecord>
   getDashboardSnapshot(accountId: string): Promise<DashboardSnapshot>
   listModels(accountId: string): Promise<string[]>
@@ -177,14 +276,16 @@ export interface GatewayStore {
   revertRedpacketClaim(input: { id: string }): Promise<void>
   listRedpackets(input?: { limit?: number }): Promise<RedpacketRecord[]>
   listPriceBook(): Promise<PriceBookRow[]>
-  listRoutingRules(): Promise<RoutingRule[]>
-  listProviderTokenSummaries(): Promise<ChannelRecord[]>
+  // operatorId scopes to one tenant; omitted = all (legacy/admin/platform view).
+  listRoutingRules(operatorId?: string): Promise<RoutingRule[]>
+  listProviderTokenSummaries(operatorId?: string): Promise<ChannelRecord[]>
   getProviderToken(providerTokenId: string): Promise<ProviderTokenRecord | null>
   upsertProviderToken(input: {
     token: ProviderTokenRecord
     models: string[]
     priority?: number
     weight?: number
+    operatorId?: string | null
     now: string
   }): Promise<ChannelRecord>
   upsertPriceBook(input: { row: PriceBookRow; now: string }): Promise<PriceBookRow>
@@ -217,12 +318,19 @@ export interface GatewayStore {
   }): Promise<{ record: CreditRequestRecord; ok: true } | { record: CreditRequestRecord; ok: false; reason: 'already_resolved' }>
   recordAdminAudit(record: AdminAuditRecord): Promise<AdminAuditRecord>
   listAdminAudit(input: { limit?: number; since?: string; actorFilter?: string }): Promise<AdminAuditRecord[]>
+  // Treasury ledger (per-operator income). Credit is idempotent on the on-chain
+  // payment tx so a replayed buy-myc can never double-count.
+  recordTreasuryCredit(record: TreasuryCreditRecord): Promise<void>
+  recordTreasuryWithdrawal(record: TreasuryWithdrawalRecord): Promise<void>
+  getOperatorRevenue(operatorId: string): Promise<OperatorRevenue>
 }
 
 export class InMemoryGatewayStore implements GatewayStore {
   readonly accounts: GatewayAccountRecord[]
   readonly apiKeys: ApiKeyRecord[]
   readonly dashboardSessions: DashboardSessionRecord[]
+  readonly operators: OperatorRecord[] = []
+  readonly operatorSessions: OperatorSessionRecord[] = []
   readonly invites: AccountInvite[]
   readonly channels: ChannelRecord[]
   readonly routingRules: RoutingRule[]
@@ -233,6 +341,8 @@ export class InMemoryGatewayStore implements GatewayStore {
   readonly creditRequests: CreditRequestRecord[]
   readonly onchainTopups: OnchainTopupRecord[] = []
   readonly redpackets: RedpacketRecord[] = []
+  readonly treasuryCredits: TreasuryCreditRecord[] = []
+  readonly treasuryWithdrawals: TreasuryWithdrawalRecord[] = []
   readonly ledger: Array<{ id: string; accountId: string; type: string; amountMicroUsd: number; createdAt: string }>
   readonly auditLog: AdminAuditRecord[]
   readonly baseUrl: string
@@ -309,9 +419,68 @@ export class InMemoryGatewayStore implements GatewayStore {
     return record
   }
 
+  async findOperatorByAddress(address: string): Promise<OperatorRecord | null> {
+    const addr = address.trim().toLowerCase()
+    return this.operators.find((op) => op.pubkeyAddress === addr) ?? null
+  }
+
+  async createOperator(input: {
+    id: string
+    pubkeyAddress: string
+    displayName?: string | null
+    createdAt: string
+  }): Promise<OperatorRecord> {
+    const record: OperatorRecord = {
+      id: input.id,
+      pubkeyAddress: input.pubkeyAddress.trim().toLowerCase(),
+      displayName: input.displayName ?? null,
+      status: 'active',
+      createdAt: input.createdAt,
+    }
+    this.operators.push(record)
+    return record
+  }
+
+  async findOperatorSessionByHash(hash: string, now: string): Promise<OperatorSessionRecord | null> {
+    const session = this.operatorSessions.find((candidate) => candidate.sessionHash === hash) ?? null
+    if (!session) return null
+    if (Date.parse(session.expiresAt) <= Date.parse(now)) return null
+    // Session is only usable while its operator is active.
+    const operator = this.operators.find((op) => op.id === session.operatorId)
+    if (!operator || operator.status !== 'active') return null
+    return session
+  }
+
+  async createOperatorSession(input: {
+    id: string
+    operatorId: string
+    sessionHash: string
+    expiresAt: string
+  }): Promise<OperatorSessionRecord> {
+    const record: OperatorSessionRecord = {
+      id: input.id,
+      operatorId: input.operatorId,
+      sessionHash: input.sessionHash,
+      expiresAt: input.expiresAt,
+    }
+    this.operatorSessions.push(record)
+    return record
+  }
+
   async createInvite(invite: AccountInvite): Promise<AccountInvite> {
     this.invites.push(invite)
     return invite
+  }
+
+  async listInvites(input: { operatorId?: string; accountId?: string } = {}): Promise<AccountInvite[]> {
+    return this.invites
+      .filter((invite) => (input.accountId ? invite.accountId === input.accountId : true))
+      .filter((invite) => {
+        if (!input.operatorId) return true
+        const account = this.accounts.find((candidate) => candidate.id === invite.accountId)
+        return account?.operatorId === input.operatorId
+      })
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
   }
 
   async findInviteByHash(hash: string): Promise<AccountInvite | null> {
@@ -325,16 +494,43 @@ export class InMemoryGatewayStore implements GatewayStore {
     invite.acceptedAt = now
   }
 
+  async revokeInvite(inviteId: string, now: string): Promise<AccountInvite | null> {
+    const invite = this.invites.find((candidate) => candidate.id === inviteId)
+    if (!invite) return null
+    invite.status = 'revoked'
+    invite.acceptedAt = invite.acceptedAt ?? now
+    return invite
+  }
+
   async getAccount(accountId: string): Promise<GatewayAccountRecord | null> {
     return this.accounts.find((account) => account.id === accountId) ?? null
   }
 
-  async listAccounts(): Promise<GatewayAccountRecord[]> {
-    return this.accounts
+  async listAccounts(operatorId?: string): Promise<GatewayAccountRecord[]> {
+    if (!operatorId) return this.accounts
+    return this.accounts.filter((account) => account.operatorId === operatorId)
   }
 
   async createAccount(account: GatewayAccountRecord): Promise<GatewayAccountRecord> {
     this.accounts.push(account)
+    return account
+  }
+
+  async updateAccount(input: {
+    accountId: string
+    displayName?: string
+    defaultModel?: string
+    modelAllowlist?: string[] | null
+    status?: GatewayAccountRecord['status']
+    now: string
+  }): Promise<GatewayAccountRecord | null> {
+    const account = await this.getAccount(input.accountId)
+    if (!account) return null
+    if (input.displayName !== undefined) account.displayName = input.displayName
+    if (input.defaultModel !== undefined) account.defaultModel = input.defaultModel
+    if (input.modelAllowlist !== undefined) account.modelAllowlist = input.modelAllowlist
+    if (input.status !== undefined) account.status = input.status
+    account.updatedAt = input.now
     return account
   }
 
@@ -348,6 +544,12 @@ export class InMemoryGatewayStore implements GatewayStore {
     if (!account) throw new Error('account_not_found')
     const accountUsage = this.usage.filter((row) => row.accountId === accountId)
     const todaySpendMicroUsd = accountUsage.reduce((sum, row) => sum + (row.sellCostMicroUsd ?? 0), 0)
+    const visibleRules = this.routingRules.filter(
+      (rule) => ruleVisibleToAccount(account, rule) && modelAllowedForAccount(account, rule.requestedModel)
+    )
+    const visibleChannels = this.channels.filter(
+      (channel) => ownerMatchesAccount(account, channel.operatorId) && channelIsRoutableForRules(channel, visibleRules)
+    )
 
     return {
       account: {
@@ -368,7 +570,7 @@ export class InMemoryGatewayStore implements GatewayStore {
           status: apiKey.status,
           createdAt: apiKey.createdAt,
         })),
-      channels: this.channels.map((channel) => ({
+      channels: visibleChannels.map((channel) => ({
         id: channel.id,
         label: channel.label,
         provider: channel.provider,
@@ -379,7 +581,7 @@ export class InMemoryGatewayStore implements GatewayStore {
         latencyMs: channel.latencyMs,
         errorRate: channel.errorRate,
       })),
-      routingRules: this.routingRules.map((rule) => ({
+      routingRules: visibleRules.map((rule) => ({
         id: rule.id,
         group: rule.accountGroup,
         requestedModel: rule.requestedModel,
@@ -412,8 +614,27 @@ export class InMemoryGatewayStore implements GatewayStore {
     }
   }
 
-  async listModels(_accountId: string): Promise<string[]> {
-    return [...new Set(this.channels.flatMap((channel) => channel.models))].sort()
+  async listModels(accountId: string): Promise<string[]> {
+    const account = await this.getAccount(accountId)
+    if (!account) throw new Error('account_not_found')
+    const visibleRules = this.routingRules.filter(
+      (rule) =>
+        rule.status === 'active' &&
+        ruleVisibleToAccount(account, rule) &&
+        modelAllowedForAccount(account, rule.requestedModel)
+    )
+    const activeChannelIds = new Set(
+      this.channels
+        .filter((channel) => channel.status === 'active' && ownerMatchesAccount(account, channel.operatorId))
+        .map((channel) => channel.id)
+    )
+    return [
+      ...new Set(
+        visibleRules
+          .filter((rule) => activeChannelIds.has(rule.providerTokenId))
+          .map((rule) => rule.requestedModel)
+      ),
+    ].sort()
   }
 
   async listUsage(accountId: string): Promise<RequestLog[]> {
@@ -493,12 +714,14 @@ export class InMemoryGatewayStore implements GatewayStore {
     return this.priceBook
   }
 
-  async listRoutingRules(): Promise<RoutingRule[]> {
-    return this.routingRules
+  async listRoutingRules(operatorId?: string): Promise<RoutingRule[]> {
+    if (!operatorId) return this.routingRules
+    return this.routingRules.filter((rule) => rule.operatorId === operatorId)
   }
 
-  async listProviderTokenSummaries(): Promise<ChannelRecord[]> {
-    return this.channels
+  async listProviderTokenSummaries(operatorId?: string): Promise<ChannelRecord[]> {
+    if (!operatorId) return this.channels
+    return this.channels.filter((channel) => channel.operatorId === operatorId)
   }
 
   async getProviderToken(providerTokenId: string): Promise<ProviderTokenRecord | null> {
@@ -510,6 +733,7 @@ export class InMemoryGatewayStore implements GatewayStore {
     models: string[]
     priority?: number
     weight?: number
+    operatorId?: string | null
     now: string
   }): Promise<ChannelRecord> {
     const existingTokenIndex = this.providerTokens.findIndex((token) => token.id === input.token.id)
@@ -524,6 +748,7 @@ export class InMemoryGatewayStore implements GatewayStore {
       label: input.token.label,
       provider: input.token.provider,
       adapter: input.token.adapter,
+      operatorId: input.operatorId ?? null,
       baseUrl: input.token.baseUrl ?? null,
       models: input.models,
       status: mapChannelStatus(input.token.status),
@@ -676,6 +901,41 @@ export class InMemoryGatewayStore implements GatewayStore {
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
       .slice(0, limit)
   }
+
+  async recordTreasuryCredit(record: TreasuryCreditRecord): Promise<void> {
+    // Idempotent on the on-chain payment tx (mirrors the D1 UNIQUE index).
+    if (this.treasuryCredits.some((row) => row.stablecoinTxHash === record.stablecoinTxHash)) return
+    this.treasuryCredits.push(record)
+  }
+
+  async recordTreasuryWithdrawal(record: TreasuryWithdrawalRecord): Promise<void> {
+    this.treasuryWithdrawals.push(record)
+  }
+
+  async getOperatorRevenue(operatorId: string): Promise<OperatorRevenue> {
+    const credited = this.treasuryCredits
+      .filter((row) => row.operatorId === operatorId)
+      .reduce((sum, row) => sum + row.amountMicroUsd, 0)
+    const withdrawn = this.treasuryWithdrawals
+      .filter((row) => row.operatorId === operatorId)
+      .reduce((sum, row) => sum + row.amountMicroUsd, 0)
+    const operatorAccountIds = new Set(
+      this.accounts.filter((account) => account.operatorId === operatorId).map((account) => account.id)
+    )
+    const logs = this.usage.filter((row) => operatorAccountIds.has(row.accountId))
+    const sell = logs.reduce((sum, row) => sum + (row.sellCostMicroUsd ?? 0), 0)
+    const upstream = logs.reduce((sum, row) => sum + (row.upstreamCostMicroUsd ?? 0), 0)
+    const totalTokens = logs.reduce((sum, row) => sum + (row.totalTokens ?? 0), 0)
+    return {
+      treasuryCreditedMicroUsd: credited,
+      treasuryWithdrawnMicroUsd: withdrawn,
+      sellMicroUsd: sell,
+      upstreamMicroUsd: upstream,
+      marginMicroUsd: sell - upstream,
+      calls: logs.length,
+      totalTokens,
+    }
+  }
 }
 
 export interface D1RunResult {
@@ -807,6 +1067,76 @@ export class D1GatewayStore implements GatewayStore {
     }
   }
 
+  async findOperatorByAddress(address: string): Promise<OperatorRecord | null> {
+    const row = await this.db
+      .prepare('SELECT * FROM compute_operators WHERE pubkey_address = ? LIMIT 1')
+      .bind(address.trim().toLowerCase())
+      .first<Record<string, unknown>>()
+    if (!row) return null
+    return {
+      id: stringValue(row.id),
+      pubkeyAddress: stringValue(row.pubkey_address),
+      displayName: row.display_name == null ? null : stringValue(row.display_name),
+      status: stringValue(row.status) === 'disabled' ? 'disabled' : 'active',
+      createdAt: stringValue(row.created_at),
+    }
+  }
+
+  async createOperator(input: {
+    id: string
+    pubkeyAddress: string
+    displayName?: string | null
+    createdAt: string
+  }): Promise<OperatorRecord> {
+    await this.db
+      .prepare(
+        'INSERT INTO compute_operators (id, pubkey_address, display_name, status, created_at) VALUES (?, ?, ?, ?, ?)'
+      )
+      .bind(input.id, input.pubkeyAddress.trim().toLowerCase(), input.displayName ?? null, 'active', input.createdAt)
+      .run()
+    return {
+      id: input.id,
+      pubkeyAddress: input.pubkeyAddress.trim().toLowerCase(),
+      displayName: input.displayName ?? null,
+      status: 'active',
+      createdAt: input.createdAt,
+    }
+  }
+
+  async findOperatorSessionByHash(hash: string, now: string): Promise<OperatorSessionRecord | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT s.id AS id, s.operator_id AS operator_id, s.session_hash AS session_hash, s.expires_at AS expires_at
+         FROM compute_operator_sessions s
+         JOIN compute_operators o ON o.id = s.operator_id
+         WHERE s.session_hash = ? AND s.expires_at > ? AND o.status = 'active' LIMIT 1`
+      )
+      .bind(hash, now)
+      .first<Record<string, unknown>>()
+    if (!row) return null
+    return {
+      id: stringValue(row.id),
+      operatorId: stringValue(row.operator_id),
+      sessionHash: stringValue(row.session_hash),
+      expiresAt: stringValue(row.expires_at),
+    }
+  }
+
+  async createOperatorSession(input: {
+    id: string
+    operatorId: string
+    sessionHash: string
+    expiresAt: string
+  }): Promise<OperatorSessionRecord> {
+    await this.db
+      .prepare(
+        'INSERT INTO compute_operator_sessions (id, operator_id, session_hash, expires_at) VALUES (?, ?, ?, ?)'
+      )
+      .bind(input.id, input.operatorId, input.sessionHash, input.expiresAt)
+      .run()
+    return input
+  }
+
   async createInvite(invite: AccountInvite): Promise<AccountInvite> {
     await this.db
       .prepare(
@@ -826,12 +1156,56 @@ export class D1GatewayStore implements GatewayStore {
     return invite
   }
 
+  async listInvites(input: { operatorId?: string; accountId?: string } = {}): Promise<AccountInvite[]> {
+    const conditions: string[] = []
+    const binds: unknown[] = []
+    if (input.operatorId) {
+      conditions.push('a.operator_id = ?')
+      binds.push(input.operatorId)
+    }
+    if (input.accountId) {
+      conditions.push('i.account_id = ?')
+      binds.push(input.accountId)
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+    const rows = await this.db
+      .prepare(
+        `SELECT i.* FROM compute_account_invites i JOIN compute_accounts a ON a.id = i.account_id ${where} ORDER BY i.created_at DESC`
+      )
+      .bind(...binds)
+      .all<Record<string, unknown>>()
+    return rows.results.map((row) => this.inviteFromRow(row))
+  }
+
   async findInviteByHash(hash: string): Promise<AccountInvite | null> {
     const row = await this.db
       .prepare('SELECT * FROM compute_account_invites WHERE invite_token_hash = ? LIMIT 1')
       .bind(hash)
       .first<Record<string, unknown>>()
     if (!row) return null
+    return this.inviteFromRow(row)
+  }
+
+  async markInviteAccepted(inviteId: string, now: string): Promise<void> {
+    await this.db
+      .prepare('UPDATE compute_account_invites SET status = ?, accepted_at = ? WHERE id = ?')
+      .bind('accepted', now, inviteId)
+      .run()
+  }
+
+  async revokeInvite(inviteId: string, now: string): Promise<AccountInvite | null> {
+    await this.db
+      .prepare("UPDATE compute_account_invites SET status = 'revoked', accepted_at = COALESCE(accepted_at, ?) WHERE id = ?")
+      .bind(now, inviteId)
+      .run()
+    const row = await this.db
+      .prepare('SELECT * FROM compute_account_invites WHERE id = ? LIMIT 1')
+      .bind(inviteId)
+      .first<Record<string, unknown>>()
+    return row ? this.inviteFromRow(row) : null
+  }
+
+  private inviteFromRow(row: Record<string, unknown>): AccountInvite {
     const status = stringValue(row.status)
     return {
       id: stringValue(row.id),
@@ -843,13 +1217,6 @@ export class D1GatewayStore implements GatewayStore {
       createdBy: stringValue(row.created_by),
       acceptedAt: optionalString(row.accepted_at) ?? null,
     }
-  }
-
-  async markInviteAccepted(inviteId: string, now: string): Promise<void> {
-    await this.db
-      .prepare('UPDATE compute_account_invites SET status = ?, accepted_at = ? WHERE id = ?')
-      .bind('accepted', now, inviteId)
-      .run()
   }
 
   async getAccount(accountId: string): Promise<GatewayAccountRecord | null> {
@@ -875,17 +1242,24 @@ export class D1GatewayStore implements GatewayStore {
             ? 'paused'
             : 'disabled',
       accountGroup: stringValue(row.account_group, 'default'),
+      operatorId: optionalString(row.operator_id) ?? null,
       balanceMicroUsd: numberValue(latestLedger?.balance_after_micro_usd),
       reservedMicroUsd: 0,
       defaultProvider: stringValue(row.default_provider),
       defaultModel: optionalString(row.default_model),
+      modelAllowlist: await this.listAccountModelAllowlist(accountId),
       createdAt: stringValue(row.created_at),
       updatedAt: stringValue(row.updated_at),
     }
   }
 
-  async listAccounts(): Promise<GatewayAccountRecord[]> {
-    const rows = await this.db.prepare('SELECT id FROM compute_accounts ORDER BY created_at DESC').all<Record<string, unknown>>()
+  async listAccounts(operatorId?: string): Promise<GatewayAccountRecord[]> {
+    const rows = operatorId
+      ? await this.db
+          .prepare('SELECT id FROM compute_accounts WHERE operator_id = ? ORDER BY created_at DESC')
+          .bind(operatorId)
+          .all<Record<string, unknown>>()
+      : await this.db.prepare('SELECT id FROM compute_accounts ORDER BY created_at DESC').all<Record<string, unknown>>()
     const accounts = await Promise.all(rows.results.map((row) => this.getAccount(stringValue(row.id))))
     return accounts.filter((account): account is GatewayAccountRecord => Boolean(account))
   }
@@ -893,7 +1267,7 @@ export class D1GatewayStore implements GatewayStore {
   async createAccount(account: GatewayAccountRecord): Promise<GatewayAccountRecord> {
     await this.db
       .prepare(
-        'INSERT INTO compute_accounts (id, display_name, status, account_group, default_provider, default_model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO compute_accounts (id, display_name, status, account_group, default_provider, default_model, operator_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
       .bind(
         account.id,
@@ -902,11 +1276,64 @@ export class D1GatewayStore implements GatewayStore {
         account.accountGroup,
         account.defaultProvider,
         account.defaultModel ?? null,
+        account.operatorId ?? null,
         account.createdAt,
         account.updatedAt
       )
       .run()
+    if (account.modelAllowlist !== undefined) {
+      await this.replaceAccountModelAllowlist(account.id, account.modelAllowlist, account.createdAt)
+    }
     return account
+  }
+
+  async updateAccount(input: {
+    accountId: string
+    displayName?: string
+    defaultModel?: string
+    modelAllowlist?: string[] | null
+    status?: GatewayAccountRecord['status']
+    now: string
+  }): Promise<GatewayAccountRecord | null> {
+    const account = await this.getAccount(input.accountId)
+    if (!account) return null
+
+    await this.db
+      .prepare(
+        'UPDATE compute_accounts SET display_name = COALESCE(?, display_name), default_model = COALESCE(?, default_model), status = COALESCE(?, status), updated_at = ? WHERE id = ?'
+      )
+      .bind(input.displayName ?? null, input.defaultModel ?? null, input.status ?? null, input.now, input.accountId)
+      .run()
+    if (input.modelAllowlist !== undefined) {
+      await this.replaceAccountModelAllowlist(input.accountId, input.modelAllowlist, input.now)
+    }
+    return this.getAccount(input.accountId)
+  }
+
+  private async listAccountModelAllowlist(accountId: string): Promise<string[] | null> {
+    const rows = await this.db
+      .prepare('SELECT model FROM compute_model_allowlist WHERE account_id = ? ORDER BY model')
+      .bind(accountId)
+      .all<Record<string, unknown>>()
+    const models = rows.results.map((row) => stringValue(row.model)).filter(Boolean)
+    return models.length > 0 ? models : null
+  }
+
+  private async replaceAccountModelAllowlist(
+    accountId: string,
+    modelAllowlist: string[] | null | undefined,
+    now: string
+  ): Promise<void> {
+    await this.db.prepare('DELETE FROM compute_model_allowlist WHERE account_id = ?').bind(accountId).run()
+    const models = [...new Set((modelAllowlist ?? []).map((model) => model.trim()).filter(Boolean))]
+    await Promise.all(
+      models.map((model) =>
+        this.db
+          .prepare('INSERT INTO compute_model_allowlist (account_id, provider, model, created_at) VALUES (?, ?, ?, ?)')
+          .bind(accountId, '*', model, now)
+          .run()
+      )
+    )
   }
 
   async createApiKeyRecord(apiKey: ApiKeyRecord): Promise<ApiKeyRecord> {
@@ -952,9 +1379,18 @@ export class D1GatewayStore implements GatewayStore {
     return memory.getDashboardSnapshot(accountId)
   }
 
-  async listModels(_accountId: string): Promise<string[]> {
-    const channels = await this.listChannels()
-    return [...new Set(channels.flatMap((channel) => channel.models))].sort()
+  async listModels(accountId: string): Promise<string[]> {
+    const snapshot = await this.getDashboardSnapshot(accountId)
+    const activeChannelLabels = new Set(
+      snapshot.channels.filter((channel) => channel.status === 'active').map((channel) => channel.label)
+    )
+    return [
+      ...new Set(
+        snapshot.routingRules
+          .filter((rule) => rule.status === 'active' && activeChannelLabels.has(rule.channelLabel))
+          .map((rule) => rule.requestedModel)
+      ),
+    ].sort()
   }
 
   async listUsage(accountId: string): Promise<RequestLog[]> {
@@ -1149,12 +1585,16 @@ export class D1GatewayStore implements GatewayStore {
     }))
   }
 
-  async listProviderTokenSummaries(): Promise<ChannelRecord[]> {
-    return this.listChannels()
+  async listProviderTokenSummaries(operatorId?: string): Promise<ChannelRecord[]> {
+    const channels = await this.listChannels()
+    if (!operatorId) return channels
+    return channels.filter((channel) => channel.operatorId === operatorId)
   }
 
-  async listRoutingRules(): Promise<RoutingRule[]> {
-    return this.queryRoutingRules()
+  async listRoutingRules(operatorId?: string): Promise<RoutingRule[]> {
+    const rules = await this.queryRoutingRules()
+    if (!operatorId) return rules
+    return rules.filter((rule) => rule.operatorId === operatorId)
   }
 
   async getProviderToken(providerTokenId: string): Promise<ProviderTokenRecord | null> {
@@ -1188,11 +1628,12 @@ export class D1GatewayStore implements GatewayStore {
     models: string[]
     priority?: number
     weight?: number
+    operatorId?: string | null
     now: string
   }): Promise<ChannelRecord> {
     await this.db
       .prepare(
-        'INSERT OR REPLACE INTO compute_provider_tokens (id, provider, label, adapter, base_url, models_json, status, scope_json, secret_ref, ciphertext, nonce, key_version, derivation_fingerprint, success_count, failure_count, exhausted_until, last_error, last_response_ms, last_used_at, rotated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT OR REPLACE INTO compute_provider_tokens (id, provider, label, adapter, base_url, models_json, status, scope_json, secret_ref, ciphertext, nonce, key_version, derivation_fingerprint, success_count, failure_count, exhausted_until, last_error, last_response_ms, last_used_at, rotated_at, operator_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
       .bind(
         input.token.id,
@@ -1215,6 +1656,7 @@ export class D1GatewayStore implements GatewayStore {
         input.token.lastResponseMs ?? null,
         input.token.lastUsedAt ?? null,
         input.token.rotatedAt ?? null,
+        input.operatorId ?? null,
         input.token.createdAt,
         input.now
       )
@@ -1225,6 +1667,7 @@ export class D1GatewayStore implements GatewayStore {
       label: input.token.label,
       provider: input.token.provider,
       adapter: input.token.adapter,
+      operatorId: input.operatorId ?? null,
       baseUrl: input.token.baseUrl ?? null,
       models: input.models,
       status: mapChannelStatus(input.token.status),
@@ -1263,7 +1706,7 @@ export class D1GatewayStore implements GatewayStore {
   async upsertRoutingRule(input: { rule: RoutingRule; now: string }): Promise<RoutingRule> {
     await this.db
       .prepare(
-        'INSERT OR REPLACE INTO compute_routing_rules (id, account_group, requested_provider, requested_model, provider_token_id, actual_provider_model, priority, weight, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT OR REPLACE INTO compute_routing_rules (id, account_group, requested_provider, requested_model, provider_token_id, actual_provider_model, priority, weight, status, operator_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
       .bind(
         input.rule.id,
@@ -1275,6 +1718,7 @@ export class D1GatewayStore implements GatewayStore {
         input.rule.priority,
         input.rule.weight,
         input.rule.status,
+        input.rule.operatorId ?? null,
         input.now,
         input.now
       )
@@ -1367,6 +1811,7 @@ export class D1GatewayStore implements GatewayStore {
       label: stringValue(row.label),
       provider: stringValue(row.provider),
       adapter: stringValue(row.adapter),
+      operatorId: optionalString(row.operator_id) ?? null,
       baseUrl: optionalString(row.base_url) ?? null,
       models: parseJsonArray(row.models_json),
       status: mapChannelStatus(stringValue(row.status)),
@@ -1392,6 +1837,7 @@ export class D1GatewayStore implements GatewayStore {
       priority: numberValue(row.priority),
       weight: numberValue(row.weight),
       status: stringValue(row.status) === 'active' ? 'active' : 'disabled',
+      operatorId: optionalString(row.operator_id) ?? null,
     }))
   }
 
@@ -1585,6 +2031,76 @@ export class D1GatewayStore implements GatewayStore {
       metadata: parseJsonObject(row.metadata_json),
       createdAt: stringValue(row.created_at),
     }))
+  }
+
+  async recordTreasuryCredit(record: TreasuryCreditRecord): Promise<void> {
+    // INSERT OR IGNORE keys off the UNIQUE(stablecoin_tx_hash) index: a replayed
+    // buy-myc with the same on-chain payment can never double-credit a treasury.
+    await this.db
+      .prepare(
+        'INSERT OR IGNORE INTO compute_treasury_credits (id, operator_id, account_id, amount_micro_usd, stablecoin_tx_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+      )
+      .bind(
+        record.id,
+        record.operatorId,
+        record.accountId ?? null,
+        record.amountMicroUsd,
+        record.stablecoinTxHash.toLowerCase(),
+        record.createdAt
+      )
+      .run()
+  }
+
+  async recordTreasuryWithdrawal(record: TreasuryWithdrawalRecord): Promise<void> {
+    await this.db
+      .prepare(
+        'INSERT INTO compute_treasury_withdrawals (id, operator_id, amount_micro_usd, to_address, tx_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+      )
+      .bind(
+        record.id,
+        record.operatorId,
+        record.amountMicroUsd,
+        record.toAddress.toLowerCase(),
+        record.txHash.toLowerCase(),
+        record.createdAt
+      )
+      .run()
+  }
+
+  async getOperatorRevenue(operatorId: string): Promise<OperatorRevenue> {
+    const credited = await this.db
+      .prepare('SELECT COALESCE(SUM(amount_micro_usd), 0) AS total FROM compute_treasury_credits WHERE operator_id = ?')
+      .bind(operatorId)
+      .first<Record<string, unknown>>()
+    const withdrawn = await this.db
+      .prepare('SELECT COALESCE(SUM(amount_micro_usd), 0) AS total FROM compute_treasury_withdrawals WHERE operator_id = ?')
+      .bind(operatorId)
+      .first<Record<string, unknown>>()
+    // Margin joins logs to their owning account, scoped to this operator.
+    const margin = await this.db
+      .prepare(
+        `SELECT
+           COALESCE(SUM(l.sell_cost_micro_usd), 0) AS sell,
+           COALESCE(SUM(l.upstream_cost_micro_usd), 0) AS upstream,
+           COALESCE(SUM(l.total_tokens), 0) AS tokens,
+           COUNT(*) AS calls
+         FROM compute_request_logs l
+         JOIN compute_accounts a ON a.id = l.account_id
+         WHERE a.operator_id = ?`
+      )
+      .bind(operatorId)
+      .first<Record<string, unknown>>()
+    const sell = numberValue(margin?.sell)
+    const upstream = numberValue(margin?.upstream)
+    return {
+      treasuryCreditedMicroUsd: numberValue(credited?.total),
+      treasuryWithdrawnMicroUsd: numberValue(withdrawn?.total),
+      sellMicroUsd: sell,
+      upstreamMicroUsd: upstream,
+      marginMicroUsd: sell - upstream,
+      calls: numberValue(margin?.calls),
+      totalTokens: numberValue(margin?.tokens),
+    }
   }
 
   private async listModelQuality(): Promise<ModelQualityRecord[]> {

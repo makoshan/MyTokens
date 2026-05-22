@@ -195,7 +195,7 @@ test('GET /accept preserves ?redpacket= through the login redirect', async () =>
   assert.ok(res.headers.get('set-cookie')?.includes('mykey_dashboard_session='))
 })
 
-test('GET /accept without a red-packet code lands at the bare root', async () => {
+test('GET /accept without a red-packet code lands on the welcome/claim overlay', async () => {
   const store = seedStore()
   const app = createGatewayApp(appOptions(store, stubRelayer()))
 
@@ -212,7 +212,8 @@ test('GET /accept without a red-packet code lands at the bare root', async () =>
     new Request(`https://gateway.test/accept?token=${invite_token}`, { redirect: 'manual' })
   )
   assert.equal(res.status, 302)
-  assert.equal(res.headers.get('location'), '/')
+  // A fresh manual-credit join shows the welcome overlay (passkey wallet + reveal).
+  assert.equal(res.headers.get('location'), '/?welcome=1')
 })
 
 // Regression for the claim double-spend race: the route used to transfer MYC
@@ -277,4 +278,82 @@ test('a failed relayer transfer releases the packet back to unclaimed', async ()
   const session2 = await openSession(healthy)
   const retry = await claim(healthy, session2, { code, to_address: VALID_ADDRESS })
   assert.equal(retry.status, 200)
+})
+
+// --- gasless MYC transfer between friends (transferWithSig relay) ---
+
+/** Records relayer.transferWithSig calls so tests assert args without a live RPC. */
+function stubTransferRelayer() {
+  const calls: Array<{ from: string; to: string; value: bigint; deadline: bigint; sig: string }> = []
+  return {
+    calls,
+    transferWithSig: async (
+      _env: unknown,
+      input: { from: string; to: string; value: bigint; deadline: bigint; sig: `0x${string}` }
+    ) => {
+      calls.push({ ...input })
+      return FAKE_TX
+    },
+  }
+}
+
+const TRANSFER_TO = '0x4444444444444444444444444444444444444444'
+const FAKE_SIG = `0x${'1'.repeat(130)}`
+
+function transferGasless(app: App, session: string | null, body: Record<string, unknown>) {
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (session) headers['x-dashboard-session'] = session
+  return app.fetch(
+    new Request('https://gateway.test/dashboard/transfer-gasless', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    })
+  )
+}
+
+test('transfer-gasless requires a dashboard session', async () => {
+  const app = createGatewayApp(appOptions(seedStore(), stubTransferRelayer()))
+  const res = await transferGasless(app, null, {
+    from: VALID_ADDRESS,
+    to: TRANSFER_TO,
+    value: '5000000',
+    deadline: '9999999999',
+    sig: FAKE_SIG,
+  })
+  assert.equal(res.status, 401)
+})
+
+test('transfer-gasless relays a passkey-signed MYC transfer via the relayer', async () => {
+  const relayer = stubTransferRelayer()
+  const app = createGatewayApp(appOptions(seedStore(), relayer))
+  const session = await openSession(app)
+  const res = await transferGasless(app, session, {
+    from: VALID_ADDRESS,
+    to: TRANSFER_TO,
+    value: '5000000',
+    deadline: '9999999999',
+    sig: FAKE_SIG,
+  })
+  assert.equal(res.status, 200)
+  const body = (await res.json()) as { tx_hash: string; transferred_myc: number; to_address: string }
+  assert.equal(body.tx_hash, FAKE_TX)
+  assert.equal(body.transferred_myc, 5)
+  assert.equal(body.to_address, TRANSFER_TO)
+  assert.equal(relayer.calls.length, 1)
+  assert.equal(relayer.calls[0].to, TRANSFER_TO)
+  assert.equal(relayer.calls[0].value, 5_000_000n)
+})
+
+test('transfer-gasless rejects a non-positive amount', async () => {
+  const app = createGatewayApp(appOptions(seedStore(), stubTransferRelayer()))
+  const session = await openSession(app)
+  const res = await transferGasless(app, session, {
+    from: VALID_ADDRESS,
+    to: TRANSFER_TO,
+    value: '0',
+    deadline: '9999999999',
+    sig: FAKE_SIG,
+  })
+  assert.equal(res.status, 400)
 })

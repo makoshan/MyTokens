@@ -1,6 +1,6 @@
-# v1 收尾计划：credit requests + Account DO + 安全运维
+# v1 收尾计划：基建收口 + MYC 红包主流程
 
-> **续：** [2026-05-19-compute-credit-gateway.md](./2026-05-19-compute-credit-gateway.md)。此计划只覆盖 v1 plan 里「尚未完成」的剩余三块，且推迟 v2/v3 gate。
+> **续：** [2026-05-19-compute-credit-gateway.md](./2026-05-19-compute-credit-gateway.md)。本文件最初只覆盖 v1 plan 里「尚未完成」的基建收口；2026-05-21 对照代码后，追加记录 MYC 红包推荐主流程与下一轮改造方向。
 
 **目标：** 把 private alpha 从「能跑」推到「敢长开」。Credit request 闭环让 buyer 自助补 credit；Account DO 消除并发超花；audit log + IP allowlist + rate limit + 自动化部署让生产能 7×24 暴露。
 
@@ -8,26 +8,35 @@
 
 - ~~不引入 v2/v3 项（MPP、USDC、MYC、链上 indexer、translation 等）。~~ **⚠️ 此约束已于 2026-05-20 晚被推翻——MYC 红包 / gasless redeem / burn-to-credit 已实现并成为产品核心。详见文末「计划外 pivot：MYC 红包共享」。**
 - 每块尽量一次 PR（< 500 行核心 diff）。
-- 不破现有 34 个测试。
+- 不破现有测试；“34 个测试”是 2026-05-20 计划时的历史基线，当前测试集已扩大。
 
 ---
 
-## 当前进度（2026-05-20）
+## 当前进度（2026-05-21 对照代码后）
 
-已完成（commits f5a5701 → 4de16dd）：
+> **Product spec note：** AGENTS.md 指向的 `/Users/thursday/go/play/mykey/Docs_code/Mykey 产品文档.md` 当前工作区不存在；本次先按现有代码和本计划文档对齐。恢复产品 spec 后，要重新核对术语、legal gate 和默认主流程。
 
-- v1 cloud gateway alpha：Worker + D1 + 加密 vault + reserve/settle/refund + manual credit
-- Streaming SSE relay + fail-closed settle
-- Dashboard self-service：invite accept / API key create+revoke / admin revoke any
-- Adapter framework：openAIAdapter（`/v1/responses`）+ anthropicAdapter（`/v1/messages`）
-- 部署工具链：wrangler scripts、gen-secrets、bootstrap、DEPLOY.md
+已完成 / 当前代码里已看到：
 
-剩余三块按依赖排序：
+- v1 cloud gateway alpha：Worker + D1 + 加密 vault + reserve/settle/refund + manual credit。
+- Streaming SSE relay + fail-closed settle；`/v1/responses` 和 `/v1/messages` 已接 provider adapter。
+- Dashboard self-service：invite accept、API key create/revoke、admin revoke any。
+- **Block A Credit Requests：** `/dashboard/credit-requests`、`/admin/credit-requests` approve/reject、幂等 resolve 和测试文件已存在。
+- **Block C1 Audit Log：** admin action audit、payload hash / metadata、`/admin/audit-log` 和测试文件已存在。
+- **Block C2 IP Allowlist：** `src/admin-ip.ts`、`ADMIN_IP_ALLOWLIST` 路径和测试文件已存在。
+- **Block B Account DO：** `AccountActor` 抽象、`DurableObjectAccountActor`、`AccountDurableObject`、DO alarm 自动释放 reservation 和 workerd 测试已存在。
+- **Block C3 Rate Limit：** account RPM limit 已在 `AccountBalance.reserve()` 热路径上生效，并有 rate-limit 测试。
+- **MYC 红包 pivot：** `/accept?token=...&redpacket=...`、`/dashboard/claim`、`/dashboard/redeem-gasless`、passkey 钱包、红包测试和前端红包状态机已进入代码。
 
-1. **Block A — Credit Requests**（1 PR，1 天）：完结 buyer 自助闭环。
-2. **Block C1+C2+C4 — Audit log + IP allowlist + CI 部署**（3 个小 PR，2 天）：安全 + 运维基线。
-3. **Block B — Account Durable Object**（1–2 PR，3–5 天）：消除超花。最高风险，放在测试设施齐全后再动。
-4. **Block C3 — Rate limit**（1 PR，1–2 天）：依赖 Block B 的 DO 基础设施。
+所以这份文档下面的 Block A/B/C/C3 现在应视为**历史实施计划 + 设计记录**，不再是最短路径。2026-05-21 起，v1 收口的真正瓶颈变成“推荐主流程”是否顺滑：
+
+1. 运营者在 MyKey 原生 App 的 `算力网关` 里共享上游模型。
+2. 运营者生成带红包的邀请链接。
+3. 朋友打开链接，passkey 建钱包，领 MYC，免 gas 兑换 AI 额度。
+4. 朋友优先直接在网页 `AI 对话` 测试模型。
+5. 朋友需要接入自己的客户端时，再创建并复制 MyKey API Key。
+
+当前代码已完成 1-3 和 5；**第 4 步 `AI 对话` 还没有落地**，这是下一轮改造主线。
 
 ---
 
@@ -458,16 +467,108 @@ jobs:
 
 现在（红包 UX，**有意**）：直接给朋友看 `20 MYC ≈ $20`、token 估算、「兑换」CTA。crypto 层从「藏起来」变成「拆礼品卡的仪式感卖点」。这是 pivot 的一部分，不是 bug——但要清楚它和原心智模型相反。
 
+### 2026-05-21 MVP UX 决策
+
+红包 / MYC 只面向**受信朋友 alpha**，不是公开转售、投资型 token 或收益承诺。Gate 1（provider 商务授权）和 Gate 2（法律意见）未通过前，所有文案都避免「公开卖模型」「MYC 升值」「无限制转售 API」。
+
+核心承诺：
+
+> 运营者共享授权的上游 AI Key，给朋友发一个算力红包；朋友兑换后可以立刻在网页里测试模型，也可以复制 MyKey API Key 接入自己的 OpenAI-compatible 客户端。
+
+主流程：
+
+1. 运营者进入 MyKey 原生 App 的 `算力网关`。
+2. 在「共享 AI Token」里选择百炼 / Kimi / OpenAI / Anthropic，填写模型 ID 和上游 API Token；系统自动创建 channel、price、routing。
+3. 在「邀请朋友用模型」里填写朋友名称、模型、红包 MYC 数量，生成合一链接：`/accept?token=...&redpacket=...`。
+4. 朋友打开链接，使用 passkey 创建钱包，领取 MYC，并兑换成 AI 额度。
+5. 兑换成功后默认进入网页 `AI 对话` 试用；需要接入自己客户端时，再复制 Base URL 和 `sk-mykey_*`。
+
+MVP 只保留：
+
+- 运营者端：`算力网关`、`密钥库`、`全局设置`。`算力网关` 内只做连接网关、添加上游 AI Key、生成邀请、查看红包/兑换状态。
+- 朋友端：`领取 / 兑换`、`AI 对话`、`MyKey API Key`、`余额 / 接入说明`。
+- 高级入口：`应用`、`MCP`、`Skills`、`提示词` 合并为一个 `AI 功能`，默认隐藏；UI 合并即可，底层数据结构和权限仍分开。
+
+暂不进入主流程：
+
+- `项目`、`应用绑定`、`提示词库`、`历史记录`。
+- 完整 `Crypto` 钱包、NFT、swap、portfolio；朋友端只保留 passkey 钱包领取/兑换 MYC。
+- 大型 Usage & Cost 总览、模型质量排行、全量审计表。
+- 完整 ChatGPT 形态：网页 `AI 对话` 只做最小在线测试，不做 MCP 调用、文件上传、联网搜索、长历史管理。
+
+命名约束：
+
+- `Admin Token`：运营者管理网关的凭据，不能发给朋友。
+- `共享 AI Token`：可以作为运营者入口文案；进入表单和规格后统一叫 `上游 AI Key`。
+- `上游 AI Key`：provider key，只进入加密 vault。
+- `MYC`：alpha 红包和额度兑换载体，不能包装成投资资产。
+- `MyKey API Key`：朋友调用网关的 key，可复制、撤销。
+
+对照当前代码的改造清单：
+
+| 主流程步骤 | 当前代码落点 | 状态 | 最小改造 |
+|-----------|-------------|------|---------|
+| 进入原生 App `算力网关` | `src/components/ComputeGatewayManager.tsx` | ✅ 已有 | 把入口文案从「共享上游 AI Key」统一成「共享 AI Token」，表单字段继续说明“上游 API Token / Key”。 |
+| 添加百炼/Kimi/OpenAI/Anthropic 共享 token | `buildProviderTokenSetupPayload()` + `setupProviderChannel()` | ✅ 已有 | 保持自动创建 provider token、price、routing；后续再给价格开放高级编辑，不进 MVP。 |
+| 邀请朋友用模型 | `ComputeGatewayManager.tsx` 的 `inviteFriend()` | ✅ 已有 | 明确 `?redpacket=` 合一链接是新朋友唯一主入口；`/?redpacket=` 只作为已登录补发红包。 |
+| 打开邀请链接并登录 | `cloud-gateway/src/index.ts` 的 `GET /accept` | ✅ 已有 | 已保留 `redpacket` 查询参数，并有回归测试；部署前确认线上 worker 已包含此修复。 |
+| passkey 钱包 + 领取 MYC | `buyer-dashboard/src/components/RedpacketClaim.tsx`、`wallet.ts`、`/dashboard/claim` | ✅ 已有 | 领取失败释放红包的后端逻辑已有；前端文案继续保持“无需助记词、免 gas”。 |
+| 立即兑换 AI 额度 | `RedpacketClaim.tsx`、`Topup.tsx`、`/dashboard/redeem-gasless` | ✅ 已有 | 兑换完成后不再把“创建 API key”作为第一下一步，而是进入 `AI 对话`。 |
+| 在线使用和测试 | 当前无独立页面；只有 `/v1/responses` API relay | ❌ 缺口 | 新增 dashboard-session relay + `AI 对话` tab，让朋友不创建 API key 也能先试模型。 |
+| 复制 API 使用 | `ApiKeys.tsx`、`/dashboard/api-keys`、`Docs.tsx` | ✅ 已有 | 定位改成“接入自己的客户端”，排在 `AI 对话` 之后。 |
+
+推荐改造顺序：
+
+1. **前端导航先收口。** 在 `buyer-dashboard/src/dashboardViewModel.ts` 增加 `chat` tab，让 `tabAfterRedpacketRedeem()` 返回 `chat`；导航改为 `AI 对话`、`MyKey API Key`、`余额 / 接入说明`，把渠道、日志、模型检测、额度请求等后台视图藏到高级入口。
+2. **新增最小 `ChatPlayground`。** 文件建议 `buyer-dashboard/src/components/ChatPlayground.tsx`：模型选择、输入框、发送、结果区、错误/余额不足提示；不做 MCP、文件上传、联网搜索、长历史和多轮复杂会话。
+3. **给 dashboard session 增加 relay 入口。** 在 `cloud-gateway/src/index.ts` 增 `POST /dashboard/responses`：先 `authenticateDashboard()` 得到 `accountId`，再复用现有 routing、provider token 解密、AccountActor reserve/settle/refund、request log persist。实现上最好先把 `handleRelayRoute()` 里“鉴权后 relay”的部分抽成 `handleRelayForAccount({ accountId, apiKeyId?: undefined, adapter, body })`，避免复制热路径。
+4. **保留 OpenAI-compatible API Key，但降低心智优先级。** `ApiKeys.tsx` 文案改成“接入 Claude Code / OpenAI-compatible 客户端”，保留创建、复制 Base URL、复制 env、撤销；朋友先能在线跑，再决定是否复制。
+5. **运营者端术语统一。** 原生 App 显示「共享 AI Token」；安全解释统一说“上游 API Token 只进入加密 vault，不会给朋友看”。`Admin Token` 始终只指运营者管理网关的凭据。
+6. **补测试。** 已有 `/accept` 透传 redpacket、红包领取幂等、并发领取防双花测试；新增 `tabAfterRedpacketRedeem() === 'chat'`、`POST /dashboard/responses` 无需 API key 但会扣余额、API key raw key 只展示一次、ChatPlayground 余额不足/上游错误状态。
+
 ### 链：Sepolia 测试网（alpha 决定 2026-05-20）
 
 `wrangler.toml` 配置 `TEMPO_CHAIN_ID=11155111`（Sepolia），与 project memory 里的「Tempo 主网」目标暂时不一致。**alpha 阶段有意留在 Sepolia**：红包领取 / gasless redeem 走测试网 MYC，不消耗真实价值。主网切换是后续动作，需同时确认 `MYC_TOKEN_ADDRESS` 在目标链上的部署与 relayer pool 充值。
 
 ### 下一步工作
 
-1. **测试（已批准，最高优先级）**：红包后端 + 组件单测。
-   - `/dashboard/claim` 幂等（领取 → claimed；再领 → 409）+ 校验（非法地址 400、未知口令 404）。
-   - `/accept?token=X&redpacket=Y` → 302 必须带 `?redpacket=Y` 的**回归测试**（防止透传 bug 重现）。
-   - `RedpacketClaim` 组件状态机：`sealed → opening → revealed → redeeming → done` + `humanError` 映射。
-   - **前置改动**：`createGatewayApp` 需加一个 relayer 注入缝（与现有 `fetchImpl` 同款），让 claim/redeem 单测不打真 RPC。
-2. **部署 `/accept` 修复**：透传逻辑（`index.ts:444`）已在代码里，但线上 worker 未部署——合一邀请链接的红包覆盖层目前弹不出。需 `cd cloud-gateway && npm run build && wrangler deploy`（对外动作，需确认）。
-3. **运营文档**：原计划的 `docs/compute-gateway-operator-runbook.md` 等仍为零；红包/relayer 的运维（pool 充值、stale 退款、口令生成）需要 runbook。
+1. **P0：实现 `AI 对话` 主入口。**
+   - 后端：新增 dashboard-session relay，复用现有 `/v1/responses` 计费、路由、Account DO、request log。
+   - 前端：新增 `ChatPlayground` tab，红包兑换完成后默认跳到这里。
+   - 测试：dashboard session 无 API key 可调用、余额不足返回 402、上游错误会 refund reservation。
+2. **P0：收窄朋友端 dashboard。**
+   - 默认导航只保留 `AI 对话`、`MyKey API Key`、`余额 / 接入说明`。
+   - `渠道`、`日志`、`模型检测`、`额度请求` 进高级入口或运营视图，避免朋友第一次进来像进后台。
+3. **P0：统一运营者端术语。**
+   - `算力网关` 第一屏使用「共享 AI Token」；表单解释保留“上游 API Token / Key”。
+   - `邀请朋友用模型` 强调生成的是 `/accept?token=...&redpacket=...` 合一入口。
+4. **P1：部署确认。**
+   - `/accept` 透传 redpacket 的修复已有测试；线上 worker 仍需确认是否已部署。
+   - 部署前跑 `cd cloud-gateway && npm test`，再按当前 Cloudflare 流程发布。
+5. **P1：运营 runbook。**
+   - 新增 `docs/compute-gateway-operator-runbook.md`：上游 token 添加、relayer pool 充值、红包口令生成、失败重试、stale reservation 观察、legal gate 文案边界。
+
+### 原生 macOS passkey（Apple AuthenticationServices）脚手架（2026-05-22）
+
+目标：把 passkey 从「localhost 当 RP ID 的 WebView/系统浏览器 hack」升级成绑定真实域名的原生 `AuthenticationServices`，用 WebAuthn **PRF** 派生对称密钥加密 vault/钱包。
+
+**已落地并验证（编译通过）：**
+
+| 部件 | 落点 | 状态 |
+|------|------|------|
+| AASA Worker | `cloudflare/passkey-aasa/`（worker.mjs + wrangler.toml + node:test） | ✅ 已部署 `https://mykey-passkey-aasa.v2eth.workers.dev/.well-known/apple-app-site-association`，返回 `{"webcredentials":{"apps":["6WTVNAVJGZ.com.mykey.desktop"]}}`，HTTP/2 200、application/json、无跳转 |
+| Associated Domains entitlement | `src-tauri/Entitlements.plist` → `webcredentials:mykey-passkey-aasa.v2eth.workers.dev`，`tauri.conf.json` 的 `macOS.entitlements` 引用 | ✅ |
+| 原生 bridge | `src-tauri/src/passkey_native.rs`（objc2-authentication-services，`ASAuthorizationController` + 平台 passkey provider + PRF register/assert，main-thread delegate + presentation anchor=Tauri NSWindow） | ✅ `cargo check` 通过 |
+| Tauri 命令 | `commands::passkey_native_available / passkey_native_register / passkey_native_assert`（非 macOS 返回 error） | ✅ |
+| 前端封装 + 接线 | `src/utils/passkeyNative.ts`；`GlobalSettings.tsx` 注册时优先原生、失败回退浏览器桥；`App.tsx` 解锁时按存储的 `rpId` 自动选原生 / 浏览器桥 | ✅ 类型干净、vite 构建通过 |
+
+**运行时阻塞（重要）：** `com.apple.developer.associated-domains` 是 restricted entitlement。当前 App 是 ad-hoc 签名，该权限不生效；用本机 Apple Development 证书强签会被系统判定 restricted entitlement 而拒绝启动。**当前账号是免费个人 team，注册不了带 Associated Domains capability 的显式 App ID。** 因此原生 passkey 现在跑不通，前端会自动回退到 localhost 浏览器桥（今天仍可用）。
+
+**解锁步骤（需要付费 Apple Developer Program $99/年）：**
+1. portal → Identifiers → 把 `com.mykey.desktop` 注册成显式 App ID → 勾选 Associated Domains capability。
+2. Profiles → 建 macOS Development provisioning profile（绑定 Apple Development 证书 `6WTVNAVJGZ` + 本机）。
+3. 把 `.provisionprofile` 放进 `MyKey.app/Contents/embedded.provisionprofile`，用 Apple Development 身份重签；entitlements 要把 associated-domains **合并进**完整集合（保留 webview 需要的 `com.apple.security.cs.allow-jit` / `allow-unsigned-executable-memory` / `disable-library-validation`），否则 hardened runtime 会让 App 启动失败。
+4. 测试期可给 entitlement 加 `?mode=developer` 并开启 Mac 的 Associated Domains 开发者模式以绕过 Apple CDN 缓存。
+5. 正式版把 RP ID 从 workers.dev 换成自有域名（如 `mykey.im`），同步改 `NATIVE_PASSKEY_RP_ID`、AASA 的 host、Entitlements。
+
+注：原生 passkey 绑定的是 workers.dev 域名 RP ID，与浏览器桥（localhost）创建的 passkey 是**不同凭据**，不可互换；解锁路径靠存储的 `rpId` 字段区分。

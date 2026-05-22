@@ -17,9 +17,19 @@ import {
 import type { ProviderConfig } from '../types/provider'
 import { getProviderCategory } from '../utils/provider'
 import { suppressProjectAutoScanOnce } from '../utils/project'
+import { createVaultPasskeyPrfKey, isPasskeyPrfAvailable } from '../utils/passkeyPrf'
+import { isNativePasskeyAvailable, registerNativePasskey } from '../utils/passkeyNative'
+import {
+  canRegisterVaultPasskey,
+  classifyPasskeyError,
+  describeVaultUnlockState,
+  type VaultAuthMethod,
+  type VaultUnlockState,
+} from '../utils/vaultUnlock'
 
 interface GlobalSettingsProps {
   masterPassword: string
+  authMethod: VaultAuthMethod
   onProjectDataCleared?: () => Promise<void> | void
 }
 
@@ -78,6 +88,11 @@ interface OnePasswordSyncSummary {
   results: OnePasswordProjectSyncResult[]
 }
 
+interface PasskeyBridgeStart {
+  token: string
+  url: string
+}
+
 type ProjectSyncNoticeLevel = 'info' | 'success' | 'error'
 const GATEWAY_TRAFFIC_WINDOWS = [
   { label: '15 分钟', value: 15 },
@@ -86,7 +101,7 @@ const GATEWAY_TRAFFIC_WINDOWS = [
   { label: '24 小时', value: 1440 },
 ]
 
-export default function GlobalSettings({ masterPassword, onProjectDataCleared }: GlobalSettingsProps) {
+export default function GlobalSettings({ masterPassword, authMethod, onProjectDataCleared }: GlobalSettingsProps) {
   const [settings, setSettings] = useState<GlobalSettingsPayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -117,12 +132,15 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
   const [macPerm, setMacPerm] = useState<MacosPermissionStatus | null>(null)
   const [voiceSelfTestMessage, setVoiceSelfTestMessage] = useState<string>('')
   const [debugLogs, setDebugLogs] = useState<RecentDebugLogs | null>(null)
+  const [vaultUnlockState, setVaultUnlockState] = useState<VaultUnlockState | null>(null)
+  const [vaultUnlockMessage, setVaultUnlockMessage] = useState<string>('')
   const refreshSeqRef = useRef(0)
 
   const services = settings?.services ?? []
   const integrations = settings?.integrations ?? []
   const gatewayService = services.find((item) => item.service_name === 'gateway')
   const gatewayBaseUrl = `http://127.0.0.1:${gatewayService?.port || 8888}`
+  const vaultUnlockLabels = vaultUnlockState ? describeVaultUnlockState(vaultUnlockState) : null
 
   const refresh = async (showLoading = true, windowMinutes = gatewayTrafficWindow) => {
     if (!masterPassword) return
@@ -163,6 +181,7 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
           invoke<VoiceInputSettings>('get_voice_input_settings', { masterPassword }),
           invoke<VoiceInputDiagnostics>('get_voice_input_diagnostics', { masterPassword }),
           invoke<MacosPermissionStatus>('get_macos_permission_status'),
+          invoke<VaultUnlockState>('get_vault_unlock_state'),
         ])
 
         if (seq !== refreshSeqRef.current) return
@@ -183,6 +202,7 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
         const voice = settledValue<VoiceInputSettings>(5)
         const voiceDiag = settledValue<VoiceInputDiagnostics>(6)
         const perm = settledValue<MacosPermissionStatus>(7)
+        const unlockState = settledValue<VaultUnlockState>(8)
 
         if (policy) {
           setGatewayPolicy(policy)
@@ -195,6 +215,7 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
         if (voice) setVoiceSettings(voice)
         if (voiceDiag) setVoiceDiagnostics(voiceDiag)
         if (perm) setMacPerm(perm)
+        if (unlockState) setVaultUnlockState(unlockState)
 
         if (errors.length > 0) {
           setError(`部分信息加载失败：${errors[0]}`)
@@ -642,6 +663,106 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
     }
   }
 
+  const waitForPasskeyBridgeResult = async (token: string) => {
+    const deadline = Date.now() + 120000
+    while (Date.now() < deadline) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      // eslint-disable-next-line no-await-in-loop
+      const result = await invoke<{
+        credentialId: string
+        userId: string
+        rpId: string
+        prfSalt: string
+        prfKeyHex: string
+      } | null>('consume_passkey_browser_bridge_result', { token })
+      if (result) return result
+    }
+    throw new Error('浏览器 passkey 操作超时。')
+  }
+
+  const createVaultPasskeyWithBrowserBridge = async () => {
+    const bridge = await invoke<PasskeyBridgeStart>('begin_passkey_browser_bridge', {
+      mode: 'register',
+      credentialId: null,
+      prfSalt: null,
+      rpId: null,
+    })
+    await invoke<boolean>('open_external_url', { url: bridge.url })
+    setVaultUnlockMessage('已打开系统浏览器，请在那里完成 passkey，然后回到 MyKey。')
+    return waitForPasskeyBridgeResult(bridge.token)
+  }
+
+  const addVaultPasskey = async () => {
+    if (!vaultUnlockState?.configured) {
+      setVaultUnlockMessage('Vault 加密状态还未初始化，请先用主密码重新登录一次。')
+      return
+    }
+    if (authMethod !== 'master-password') {
+      setVaultUnlockMessage('新增 passkey 需要主密码会话。请退出后用主密码登录，再添加 passkey。')
+      return
+    }
+    if (!isPasskeyPrfAvailable()) {
+      setVaultUnlockMessage('当前 WebView 不支持 WebAuthn PRF，无法创建 passkey。')
+      return
+    }
+
+    setBusyKey('vault-passkey')
+    setVaultUnlockMessage('')
+    try {
+      let passkey: {
+        credentialId: string
+        userId: string
+        rpId: string
+        prfSalt: string
+        prfKeyHex: string
+      }
+      // Prefer the native macOS passkey (real RP domain). It is runtime-blocked
+      // until the app is signed with the Associated Domains entitlement, so any
+      // failure falls through to the in-WebView / browser-bridge paths that work
+      // today against localhost.
+      const nativeReady = await isNativePasskeyAvailable()
+      let nativePasskey: typeof passkey | null = null
+      if (nativeReady) {
+        try {
+          setVaultUnlockMessage('正在通过系统原生 passkey 创建…')
+          nativePasskey = await registerNativePasskey('MyKey Vault')
+        } catch (err) {
+          console.warn('native passkey register failed, falling back to browser bridge:', err)
+          setVaultUnlockMessage('')
+        }
+      }
+
+      if (nativePasskey) {
+        passkey = nativePasskey
+      } else {
+        try {
+          passkey = await createVaultPasskeyPrfKey('MyKey Vault')
+        } catch (err) {
+          const classified = classifyPasskeyError(err)
+          if (!classified.canUseBrowserBridge) throw err
+          passkey = await createVaultPasskeyWithBrowserBridge()
+        }
+      }
+      await invoke<boolean>('add_passkey_prf_unlock_method', {
+        masterPassword,
+        rpId: passkey.rpId || window.location.hostname || 'localhost',
+        userId: passkey.userId,
+        credentialId: passkey.credentialId,
+        prfSalt: passkey.prfSalt,
+        prfKeyHex: passkey.prfKeyHex,
+      })
+      const nextState = await invoke<VaultUnlockState>('get_vault_unlock_state')
+      setVaultUnlockState(nextState)
+      setVaultUnlockMessage('Passkey 已添加。下次登录可选择主密码或 passkey 解锁。')
+    } catch (err) {
+      console.error(err)
+      setVaultUnlockMessage(`添加 passkey 失败: ${String(err)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
   const saveQuickActionSettings = async () => {
     if (!quickSettings) return
     setBusyKey('quick-settings')
@@ -797,6 +918,52 @@ export default function GlobalSettings({ masterPassword, onProjectDataCleared }:
             >
               {settings.debug_mode ? '关闭 Debug' : '开启 Debug'}
             </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel settings-section">
+        <div className="panel-header">
+          <h2>Vault 解锁方式</h2>
+        </div>
+        <div className="settings-list">
+          <div className="settings-item">
+            <div className="settings-item-header">
+              <div>
+                <div className="settings-item-title">主密码 / Passkey</div>
+                <div className="settings-item-subtitle">
+                  主密码和 passkey 解锁同一个本地 vault 数据密钥；passkey 使用 WebAuthn PRF 生成 32-byte key，用于解密和加密本地密钥库。
+                </div>
+              </div>
+              <div className="settings-item-badges">
+                <span className={`service-badge ${vaultUnlockState?.configured ? 'enabled' : 'disabled'}`}>
+                  {vaultUnlockLabels?.configuredLabel || '加载中'}
+                </span>
+                <span className="service-badge running">
+                  {authMethod === 'passkey-prf' ? '当前 Passkey' : '当前主密码'}
+                </span>
+              </div>
+            </div>
+            <div className="settings-item-controls">
+              <button
+                className="btn btn-primary"
+                disabled={!canRegisterVaultPasskey(authMethod, vaultUnlockState, busyKey === 'vault-passkey')}
+                onClick={addVaultPasskey}
+              >
+                {busyKey === 'vault-passkey' ? '创建中...' : '添加 Passkey'}
+              </button>
+            </div>
+            <div className="settings-item-subtitle">
+              {vaultUnlockLabels
+                ? `${vaultUnlockLabels.passkeyLabel}；${vaultUnlockLabels.recoveryLabel}`
+                : '正在读取解锁方式...'}
+            </div>
+            {authMethod === 'passkey-prf' ? (
+              <div className="settings-item-subtitle">
+                当前用 passkey 登录，可继续读写已加密数据；新增 passkey 需要主密码验证。
+              </div>
+            ) : null}
+            {vaultUnlockMessage ? <div className="backup-message">{vaultUnlockMessage}</div> : null}
           </div>
         </div>
       </section>

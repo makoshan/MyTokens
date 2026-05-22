@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { assertNativePasskey, isNativePasskey } from './utils/passkeyNative'
 import './App.css'
 import KeyList from './components/KeyList'
 import KeyForm from './components/KeyForm'
@@ -9,13 +10,23 @@ import ProjectManager from './components/ProjectManager'
 import PromptManager, { PromptTemplate } from './components/PromptManager'
 import UsageDashboard from './components/UsageDashboard'
 import GlobalSettings from './components/GlobalSettings'
-import { ComputeGatewayManager } from './components/ComputeGatewayManager'
 import ApplicationManager from './components/ApplicationManager'
 import OpencodeMcpManager from './components/OpencodeMcpManager'
 import OpencodeSkillManager from './components/OpencodeSkillManager'
 import ClippyAssistant from './components/ClippyAssistant'
 import VoiceInputController from './components/VoiceInputController'
 import CryptoWalletManager, { CryptoWallet } from './components/CryptoWalletManager'
+import ComputeGatewayManager from './components/ComputeGatewayManager'
+import {
+  APP_NAV_ITEMS,
+  buildHomeQuickStats,
+  type AppNavView,
+} from './utils/homeNavigation'
+import {
+  shouldShowVaultPasskeyLogin,
+  type VaultAuthMethod,
+  type VaultUnlockState,
+} from './utils/vaultUnlock'
 import type { VoiceInputHistoryRecord } from './types/settings'
 import {
   DEFAULT_PROVIDER_DETAILS,
@@ -55,19 +66,7 @@ interface ParsedKey {
   variable?: string
 }
 
-type View =
-  | 'dashboard'
-  | 'keys'
-  | 'projects'
-  | 'providers'
-  | 'crypto'
-  | 'apps'
-  | 'mcp'
-  | 'skills'
-  | 'prompts'
-  | 'history'
-  | 'gateway'
-  | 'settings'
+type View = AppNavView
 
 const VIEW_META: Record<View, { title: string; description: string }> = {
   dashboard: {
@@ -110,7 +109,7 @@ const VIEW_META: Record<View, { title: string; description: string }> = {
     title: '历史记录',
     description: '查看语音输入的转写、复制与取消记录。',
   },
-  gateway: {
+  compute: {
     title: '算力网关',
     description: '管理云端网关账户、渠道、红包与兑换记录。',
   },
@@ -132,16 +131,19 @@ type UsageSnapshot = {
 type DashboardOverview = {
   keys: number
   cryptoWallets: number
-  projects: number
+  providers: number
   apps: number
-  mcps: number
-  skills: number
 }
 
 type ProviderUsageStatus = {
   provider_id: string
   enabled: boolean
   snapshot?: UsageSnapshot | null
+}
+
+type PasskeyBridgeStart = {
+  token: string
+  url: string
 }
 
 const statusOrder: Record<QuotaStatus, number> = {
@@ -257,6 +259,8 @@ function App() {
   const [showForm, setShowForm] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [masterPassword, setMasterPassword] = useState('')
+  const [authMethod, setAuthMethod] = useState<VaultAuthMethod>('master-password')
+  const [vaultUnlockState, setVaultUnlockState] = useState<VaultUnlockState | null>(null)
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [loadingKeys, setLoadingKeys] = useState(false)
   const [loadingProviders, setLoadingProviders] = useState(false)
@@ -270,10 +274,8 @@ function App() {
   const [dashboardOverview, setDashboardOverview] = useState<DashboardOverview>({
     keys: 0,
     cryptoWallets: 0,
-    projects: 0,
+    providers: 0,
     apps: 0,
-    mcps: 0,
-    skills: 0,
   })
   const hasMigratedLegacyProjectLabels = useRef(false)
 
@@ -435,25 +437,19 @@ function App() {
   const loadDashboardOverview = async () => {
     if (!masterPassword) return
     try {
-      const [settings, mcps, skills] = await Promise.all([
-        invoke<{ integrations: Array<{ app_type: string }> }>('get_global_settings', { masterPassword }),
-        invoke<Array<{ name: string }>>('get_claude_tool_manager_mcps', { masterPassword }),
-        invoke<Array<{ name: string }>>('get_claude_tool_manager_skills', { masterPassword }),
-      ])
+      const settings = await invoke<{ integrations: Array<{ app_type: string }> }>('get_global_settings', {
+        masterPassword,
+      })
       const appCount = settings.integrations.filter(
         (item) => item.app_type !== 'openai-compatible' && item.app_type !== 'claude'
       ).length
-      setDashboardOverview({
-        keys: credentials.length,
-        cryptoWallets: cryptoWallets.length,
-        projects: projects.length,
+      setDashboardOverview((prev) => ({
+        ...prev,
         apps: appCount,
-        mcps: mcps.length,
-        skills: skills.length,
-      })
+      }))
     } catch (error) {
       console.error('Failed to load dashboard overview:', error)
-      setDashboardOverview({ keys: 0, cryptoWallets: 0, projects: 0, apps: 0, mcps: 0, skills: 0 })
+      setDashboardOverview((prev) => ({ ...prev, apps: 0 }))
     }
   }
 
@@ -466,12 +462,27 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!hasPassword) {
+      setVaultUnlockState(null)
+      return
+    }
+
+    invoke<VaultUnlockState>('get_vault_unlock_state')
+      .then(setVaultUnlockState)
+      .catch((error) => {
+        console.error('Error checking vault unlock state:', error)
+        setVaultUnlockState(null)
+      })
+  }, [hasPassword])
+
+  useEffect(() => {
     if (isAuthenticated && masterPassword) {
       loadCredentials()
       loadProviders()
       loadCryptoWallets()
       loadProjects()
       loadPrompts()
+      loadVoiceHistory()
       loadDashboardOverview()
     }
   }, [isAuthenticated, masterPassword])
@@ -494,9 +505,9 @@ function App() {
       ...prev,
       keys: credentials.length,
       cryptoWallets: cryptoWallets.length,
-      projects: projects.length,
+      providers: providers.length,
     }))
-  }, [credentials.length, cryptoWallets.length, projects.length])
+  }, [credentials.length, cryptoWallets.length, providers.length])
 
   const providerContextById = useMemo(
     () => buildProviderContextMap(credentials, projectLabelsByCredential, projects),
@@ -580,6 +591,8 @@ function App() {
     try {
       await invoke('set_master_password', { password })
       setMasterPassword(password)
+      setHasPassword(true)
+      setAuthMethod('master-password')
       setIsAuthenticated(true)
     } catch (error) {
       console.error('Failed to set password:', error)
@@ -592,6 +605,7 @@ function App() {
       const result = await invoke<boolean>('authenticate', { password })
       if (result) {
         setMasterPassword(password)
+        setAuthMethod('master-password')
         setIsAuthenticated(true)
       } else {
         alert('Invalid password')
@@ -599,6 +613,57 @@ function App() {
     } catch (error) {
       console.error('Authentication failed:', error)
       alert('Authentication failed')
+    }
+  }
+
+  const waitForPasskeyBridgeResult = async (token: string) => {
+    const deadline = Date.now() + 120000
+    while (Date.now() < deadline) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      // eslint-disable-next-line no-await-in-loop
+      const result = await invoke<{ prfKeyHex: string } | null>('consume_passkey_browser_bridge_result', { token })
+      if (result) return result
+    }
+    throw new Error('浏览器 passkey 操作超时。')
+  }
+
+  const handleAuthenticateWithPasskey = async () => {
+    try {
+      const state = await invoke<VaultUnlockState>('get_vault_unlock_state')
+      const passkey = state.passkeys[0]
+      if (!state.configured || !passkey) {
+        alert('还没有可用的 passkey。请先用主密码登录，并在设置里添加 passkey。')
+        return
+      }
+      let prfKeyHex: string
+      if (isNativePasskey(passkey.rpId)) {
+        // Native passkeys assert directly through AuthenticationServices — no
+        // system-browser detour. (Runtime-blocked until the app is signed with
+        // the Associated Domains entitlement.)
+        const native = await assertNativePasskey(passkey.credentialId, passkey.prfSalt, passkey.rpId)
+        prfKeyHex = native.prfKeyHex
+      } else {
+        const bridge = await invoke<PasskeyBridgeStart>('begin_passkey_browser_bridge', {
+          mode: 'login',
+          credentialId: passkey.credentialId,
+          prfSalt: passkey.prfSalt,
+          rpId: passkey.rpId,
+        })
+        await invoke<boolean>('open_external_url', { url: bridge.url })
+        prfKeyHex = (await waitForPasskeyBridgeResult(bridge.token)).prfKeyHex
+      }
+      const result = await invoke<boolean>('authenticate_with_passkey_prf', { prfKeyHex })
+      if (result) {
+        setMasterPassword(prfKeyHex)
+        setAuthMethod('passkey-prf')
+        setIsAuthenticated(true)
+      } else {
+        alert('Passkey 解锁失败')
+      }
+    } catch (error) {
+      console.error('Passkey authentication failed:', error)
+      alert(`Passkey 解锁失败: ${String(error)}`)
     }
   }
 
@@ -927,7 +992,9 @@ function App() {
           <AuthForm
             onSubmit={handleSetPassword}
             onAuthenticate={handleAuthenticate}
+            onAuthenticateWithPasskey={handleAuthenticateWithPasskey}
             defaultMode={hasPassword ? 'login' : 'setup'}
+            vaultUnlockState={vaultUnlockState}
           />
         </div>
       </div>
@@ -946,78 +1013,15 @@ function App() {
           </div>
         </div>
         <nav className="nav">
-          <button
-            className={`nav-item ${view === 'dashboard' ? 'active' : ''}`}
-            onClick={() => setView('dashboard')}
-          >
-            Dashboard
-          </button>
-          <button
-            className={`nav-item ${view === 'keys' ? 'active' : ''}`}
-            onClick={() => setView('keys')}
-          >
-            密钥库
-          </button>
-          <button
-            className={`nav-item ${view === 'projects' ? 'active' : ''}`}
-            onClick={() => setView('projects')}
-          >
-            项目
-          </button>
-          <button
-            className={`nav-item ${view === 'providers' ? 'active' : ''}`}
-            onClick={() => setView('providers')}
-          >
-            提供商
-          </button>
-          <button
-            className={`nav-item ${view === 'crypto' ? 'active' : ''}`}
-            onClick={() => setView('crypto')}
-          >
-            Crypto
-          </button>
-          <button
-            className={`nav-item ${view === 'apps' ? 'active' : ''}`}
-            onClick={() => setView('apps')}
-          >
-            应用
-          </button>
-          <button
-            className={`nav-item ${view === 'mcp' ? 'active' : ''}`}
-            onClick={() => setView('mcp')}
-          >
-            MCP
-          </button>
-          <button
-            className={`nav-item ${view === 'skills' ? 'active' : ''}`}
-            onClick={() => setView('skills')}
-          >
-            Skills
-          </button>
-          <button
-            className={`nav-item ${view === 'prompts' ? 'active' : ''}`}
-            onClick={() => setView('prompts')}
-          >
-            提示词
-          </button>
-          <button
-            className={`nav-item ${view === 'history' ? 'active' : ''}`}
-            onClick={() => setView('history')}
-          >
-            历史记录
-          </button>
-          <button
-            className={`nav-item ${view === 'gateway' ? 'active' : ''}`}
-            onClick={() => setView('gateway')}
-          >
-            算力网关
-          </button>
-          <button
-            className={`nav-item ${view === 'settings' ? 'active' : ''}`}
-            onClick={() => setView('settings')}
-          >
-            全局设置
-          </button>
+          {APP_NAV_ITEMS.map((item) => (
+            <button
+              key={item.view}
+              className={`nav-item ${view === item.view ? 'active' : ''}`}
+              onClick={() => setView(item.view)}
+            >
+              {item.label}
+            </button>
+          ))}
         </nav>
       </aside>
 
@@ -1056,14 +1060,7 @@ function App() {
             <UsageDashboard
               providerContextById={providerContextById}
               masterPassword={masterPassword}
-              quickStats={[
-                { key: 'keys', label: '密钥', value: dashboardOverview.keys, view: 'keys' },
-                { key: 'crypto', label: '钱包', value: dashboardOverview.cryptoWallets, view: 'crypto' },
-                { key: 'projects', label: '项目', value: dashboardOverview.projects, view: 'projects' },
-                { key: 'mcp', label: 'MCP', value: dashboardOverview.mcps, view: 'mcp' },
-                { key: 'skills', label: '技能', value: dashboardOverview.skills, view: 'skills' },
-                { key: 'apps', label: '应用', value: dashboardOverview.apps, view: 'apps' },
-              ]}
+              quickStats={buildHomeQuickStats(dashboardOverview)}
               onNavigate={(nextView) => setView(nextView)}
             />
           ) : view === 'history' ? (
@@ -1386,11 +1383,12 @@ function App() {
             <OpencodeMcpManager masterPassword={masterPassword} />
           ) : view === 'skills' ? (
             <OpencodeSkillManager masterPassword={masterPassword} />
-          ) : view === 'gateway' ? (
-            <ComputeGatewayManager />
+          ) : view === 'compute' ? (
+            <ComputeGatewayManager masterPassword={masterPassword} providers={providers} />
           ) : view === 'settings' ? (
             <GlobalSettings
               masterPassword={masterPassword}
+              authMethod={authMethod}
               onProjectDataCleared={handleProjectDataCleared}
             />
           ) : (
@@ -1434,7 +1432,7 @@ function App() {
         />
       )}
 
-      <ClippyAssistant masterPassword={masterPassword} onNavigate={setView} />
+      <ClippyAssistant masterPassword={masterPassword} />
     </div>
   )
 }
@@ -1442,10 +1440,18 @@ function App() {
 interface AuthFormProps {
   onSubmit: (password: string) => void
   onAuthenticate: (password: string) => void
+  onAuthenticateWithPasskey: () => void
   defaultMode: 'setup' | 'login'
+  vaultUnlockState: VaultUnlockState | null
 }
 
-function AuthForm({ onSubmit, onAuthenticate, defaultMode }: AuthFormProps) {
+function AuthForm({
+  onSubmit,
+  onAuthenticate,
+  onAuthenticateWithPasskey,
+  defaultMode,
+  vaultUnlockState,
+}: AuthFormProps) {
   const [password, setPassword] = useState('')
   const [mode, setMode] = useState<'setup' | 'login'>(defaultMode)
 
@@ -1474,6 +1480,11 @@ function AuthForm({ onSubmit, onAuthenticate, defaultMode }: AuthFormProps) {
       <button type="submit" className="btn btn-primary">
         {mode === 'setup' ? '设置密码' : '登录'}
       </button>
+      {shouldShowVaultPasskeyLogin(mode, vaultUnlockState) ? (
+        <button type="button" className="btn btn-secondary" onClick={onAuthenticateWithPasskey}>
+          使用 Passkey 登录
+        </button>
+      ) : null}
       <button
         type="button"
         className="btn btn-link"

@@ -656,6 +656,85 @@
   font-size: 12px;
 }
 
+.crypto-mini-action.primary {
+  background: var(--wallet-primary);
+  color: #fff;
+  box-shadow: var(--wallet-shadow-cta);
+}
+
+.crypto-mini-action.primary:hover:not(:disabled) {
+  background: var(--wallet-primary-hover);
+}
+
+.crypto-rpc-hint {
+  font-size: 12px;
+  color: var(--wallet-muted, #6b7280);
+  line-height: 1.4;
+}
+
+.crypto-key-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.crypto-token-logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  object-fit: cover;
+  background: #f0f1f3;
+  flex-shrink: 0;
+}
+
+.crypto-token-info-modal {
+  max-width: 460px;
+}
+
+.crypto-token-info-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.crypto-token-info-head h3 {
+  margin: 0;
+}
+
+.crypto-token-info-head p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--wallet-muted, #6b7280);
+}
+
+.crypto-token-info-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.crypto-token-info-body p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.crypto-token-info-links {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.crypto-token-info-links a {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--wallet-primary);
+}
+
 .crypto-danger-action {
   height: 32px;
   padding: 0 12px;
@@ -935,4 +1014,270 @@
   .crypto-account-drawer {
     width: 100%;
   }
+}
+
+/* --- Home Send / Receive / Swap modals --- */
+.crypto-home-modal {
+  width: min(460px, 100%);
+}
+
+.crypto-modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.crypto-modal-form input,
+.crypto-modal-form select {
+  width: 100%;
+  border: 1px solid var(--wallet-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+  background: var(--wallet-card);
+  color: var(--wallet-foreground);
+}
+
+.crypto-field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--wallet-muted);
+  margin-top: 2px;
+}
+
+.crypto-validation-hint {
+  color: var(--wallet-danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.crypto-amount-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.crypto-amount-row input,
+.crypto-amount-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+.crypto-receive-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 0 4px;
+}
+
+.crypto-receive-qr {
+  width: 208px;
+  height: 208px;
+  border: 1px solid var(--wallet-border);
+  border-radius: 14px;
+  padding: 10px;
+  background: #fff;
+  image-rendering: pixelated;
+}
+
+.crypto-receive-address {
+  font-family: var(--mono);
+  font-size: 13px;
+  word-break: break-all;
+  text-align: center;
+  color: var(--wallet-foreground);
+  background: var(--wallet-soft);
+  border-radius: 10px;
+  padding: 10px 12px;
+  width: 100%;
+}
+
+.crypto-swap-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.crypto-chip {
+  border: 1px solid var(--wallet-border);
+  background: var(--wallet-card);
+  color: var(--wallet-foreground);
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.crypto-chip.active {
+  background: var(--wallet-primary);
+  border-color: var(--wallet-primary);
+  color: #fff;
+}
+
+.crypto-swap-advanced {
+  border-top: 1px solid var(--wallet-border);
+  padding-top: 8px;
+  margin-top: 2px;
+}
+
+.crypto-swap-advanced summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--wallet-muted);
+  margin-bottom: 8px;
+}
+
+.crypto-swap-advanced input {
+  width: 100%;
+  border: 1px solid var(--wallet-border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 13px;
+  margin-bottom: 8px;
+  background: var(--wallet-card);
+  color: var(--wallet-foreground);
+}
+
+a.crypto-tx-hash {
+  display: block;
+  word-break: break-all;
+  text-decoration: none;
+}
+
+/* --- NFT + Activity tabs --- */
+.crypto-tab-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--wallet-muted);
+}
+
+.crypto-nft-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 12px;
+}
+
+.crypto-nft-card {
+  border: 1px solid var(--wallet-border);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--wallet-card);
+}
+
+.crypto-nft-media {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  background: var(--wallet-soft);
+  display: grid;
+  place-items: center;
+}
+
+.crypto-nft-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.crypto-nft-placeholder {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--wallet-muted);
+}
+
+.crypto-nft-chain {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  background: rgba(17, 29, 74, 0.72);
+  color: #fff;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.crypto-nft-meta {
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.crypto-nft-meta strong {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.crypto-nft-meta small {
+  font-size: 11px;
+  color: var(--wallet-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.crypto-activity-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.crypto-activity-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--wallet-border);
+}
+
+.crypto-activity-row:last-child {
+  border-bottom: none;
+}
+
+.crypto-activity-dir {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: var(--wallet-soft);
+  color: var(--wallet-muted);
+}
+
+.crypto-activity-dir.in {
+  background: rgba(36, 174, 96, 0.14);
+  color: #1c9c54;
+}
+
+.crypto-activity-dir.out {
+  background: rgba(243, 99, 111, 0.14);
+  color: var(--wallet-danger);
+}
+
+.crypto-activity-row .crypto-asset-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.crypto-activity-row .crypto-asset-copy strong {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+}
+
+.crypto-activity-cat {
+  font-size: 11px;
+  color: var(--wallet-muted);
 }

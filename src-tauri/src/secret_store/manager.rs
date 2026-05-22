@@ -3,11 +3,16 @@ use std::sync::{Arc, Mutex};
 use crate::secret_store::config::{SecretStoreConfig, SecretStoreProviderConfig};
 use crate::secret_store::provider::{Secret, SecretProvider, SecretStoreError};
 use crate::secret_store::providers::{KeyringProvider, MemoryProvider, SqliteProvider};
+use crate::vault_crypto::{decrypt_secret, encrypt_secret, SealedSecret, VaultKey};
 
 #[derive(Debug)]
 pub struct SecretManager {
     providers: Vec<(String, Arc<Mutex<Box<dyn SecretProvider>>>)>,
     primary: String,
+    // Data key unwrapped from the vault header on unlock. When present, secret
+    // values are AES-256-GCM encrypted at rest in the local store instead of
+    // relying on the OS keychain for at-rest protection.
+    vault_key: Mutex<Option<VaultKey>>,
 }
 
 impl SecretManager {
@@ -15,6 +20,7 @@ impl SecretManager {
         Self {
             providers: Vec::new(),
             primary: String::new(),
+            vault_key: Mutex::new(None),
         }
     }
 
@@ -102,7 +108,10 @@ impl SecretManager {
                 continue;
             }
             match guard.get(key_id) {
-                Ok(secret) => return Ok(secret),
+                Ok(mut secret) => {
+                    secret.value = self.open_value(key_id, &secret.value);
+                    return Ok(secret);
+                }
                 Err(SecretStoreError::NotFound(_)) => continue,
                 Err(_) => continue,
             }
@@ -122,7 +131,80 @@ impl SecretManager {
         if !guard.is_unlocked() {
             return Err(SecretStoreError::Locked(guard.name().to_string()));
         }
-        guard.set(key_id, secret)
+        let sealed = Secret {
+            value: self.seal_value(key_id, &secret.value),
+            metadata: secret.metadata.clone(),
+        };
+        guard.set(key_id, &sealed)
+    }
+
+    /// Hand the secret store the unwrapped vault data key so values are encrypted
+    /// at rest. Called on unlock once the master password / passkey unwraps it.
+    pub fn set_vault_key(&self, key: VaultKey) {
+        *self.vault_key.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
+    }
+
+    fn seal_value(&self, key_id: &str, plaintext: &str) -> String {
+        let guard = self.vault_key.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref key) = *guard {
+            if let Ok(sealed) = encrypt_secret(key, plaintext.as_bytes(), key_id.as_bytes()) {
+                if let Ok(json) = serde_json::to_string(&sealed) {
+                    return json;
+                }
+            }
+        }
+        // No key yet (pre-unlock) or failure: store as-is; migrated on next unlock.
+        plaintext.to_string()
+    }
+
+    fn open_value(&self, key_id: &str, stored: &str) -> String {
+        // Only our envelope JSON is decrypted; anything else is legacy plaintext.
+        let Ok(sealed) = serde_json::from_str::<SealedSecret>(stored) else {
+            return stored.to_string();
+        };
+        let guard = self.vault_key.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref key) = *guard {
+            if let Ok(plain) = decrypt_secret(key, &sealed, key_id.as_bytes()) {
+                if let Ok(text) = String::from_utf8(plain) {
+                    return text;
+                }
+            }
+        }
+        stored.to_string()
+    }
+
+    /// Re-encrypt any still-plaintext secrets once a vault key is available.
+    /// Idempotent: values already stored as envelope JSON are skipped.
+    pub fn migrate_plaintext_secrets(&self) {
+        if self
+            .vault_key
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+        {
+            return;
+        }
+        let Some(provider) = self.primary_provider() else {
+            return;
+        };
+        for key_id in self.list().unwrap_or_default() {
+            let raw = {
+                let guard = provider.lock().unwrap_or_else(|e| e.into_inner());
+                match guard.get(&key_id) {
+                    Ok(secret) => secret,
+                    Err(_) => continue,
+                }
+            };
+            if serde_json::from_str::<SealedSecret>(&raw.value).is_ok() {
+                continue; // already encrypted
+            }
+            let resealed = Secret {
+                value: self.seal_value(&key_id, &raw.value),
+                metadata: raw.metadata.clone(),
+            };
+            let guard = provider.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = guard.set(&key_id, &resealed);
+        }
     }
 
     pub fn delete(&self, key_id: &str) -> Result<(), SecretStoreError> {

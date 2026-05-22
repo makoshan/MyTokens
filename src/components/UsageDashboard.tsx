@@ -5,6 +5,7 @@ import UsageCard from './UsageCard';
 import './UsageDashboard.css';
 import type { ProviderLinkageContext } from '../utils/linkage';
 import { GatewayRequestLog, GatewayTrafficMetrics } from '../types/settings';
+import type { AppNavView } from '../utils/homeNavigation';
 
 interface UsageDashboardProps {
   masterPassword: string
@@ -13,9 +14,9 @@ interface UsageDashboardProps {
     key: string
     label: string
     value: number
-    view: 'keys' | 'crypto' | 'projects' | 'mcp' | 'skills' | 'apps'
+    view: AppNavView
   }>
-  onNavigate?: (view: 'providers' | 'keys' | 'crypto' | 'projects' | 'mcp' | 'skills' | 'apps') => void
+  onNavigate?: (view: AppNavView) => void
 }
 
 const integrationLabels: Record<string, string> = {
@@ -603,11 +604,8 @@ export default function UsageDashboard({
     key: string
     label: string
     value: number
-    view: 'providers' | 'keys' | 'crypto' | 'projects' | 'mcp' | 'skills' | 'apps'
-  }> = [
-    { key: 'providers', label: '供应商', value: enabledStatuses.length, view: 'providers' },
-    ...quickStats,
-  ]
+    view: AppNavView
+  }> = [...quickStats]
 
   return (
     <div className="usage-dashboard">

@@ -17,7 +17,7 @@ function ceilDiv(numerator: number, denominator: number): number {
 
 interface RelayCommonInput {
   account: AccountActor
-  apiKeyId: string
+  apiKeyId?: string
   requestId: string
   body: Record<string, unknown>
   routing: ResolvedRoute

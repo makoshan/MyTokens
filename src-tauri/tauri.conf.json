@@ -11,18 +11,7 @@
   },
   "app": {
     "macOSPrivateApi": true,
-    "windows": [
-      {
-        "title": "MyKey - AI 资产保险箱",
-        "width": 1200,
-        "height": 800,
-        "resizable": true,
-        "fullscreen": false,
-        "minWidth": 800,
-        "minHeight": 600,
-        "devtools": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
@@ -46,7 +35,7 @@
       "exceptionDomain": "com.mykey.desktop",
       "infoPlist": "Info.plist",
       "signingIdentity": null,
-      "entitlements": null
+      "entitlements": "Entitlements.plist"
     }
   }
 }

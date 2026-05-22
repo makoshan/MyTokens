@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   buildCryptoPortfolioSummary,
   canSaveCryptoWalletForm,
+  filterTrustWalletVerifiedTokens,
   getActiveCryptoSelection,
   getAccountTokens,
   isWatchOnlyWalletConfig,
@@ -124,6 +125,15 @@ test('getAccountTokens returns only tokens for the active account', () => {
   const tokens = getAccountTokens(wallets[0], wallets[0].accounts[1])
 
   assert.deepEqual(tokens.map((token) => token.id), ['token-usdt-base'])
+})
+
+test('filterTrustWalletVerifiedTokens hides contract tokens without TrustWallet assets', () => {
+  const tokens = filterTrustWalletVerifiedTokens(wallets[0].tokens, {
+    'token-usdt-eth': 'verified',
+    'token-usdt-base': 'missing',
+  })
+
+  assert.deepEqual(tokens.map((token) => token.id), ['token-eth', 'token-usdt-eth'])
 })
 
 test('buildCryptoPortfolioSummary aggregates wallets chains and token symbols', () => {

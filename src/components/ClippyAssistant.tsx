@@ -7,7 +7,14 @@ import type {
   GatewayTrafficMetrics,
   GlobalSettingsPayload,
 } from '../types/settings'
+import type { ProviderConfig } from '../types/provider'
 import { getQuotaStatus } from '../utils/usage'
+import {
+  buildModelUseLabel,
+  buildModelTestEntries,
+  resolveInitialModelTestSelection,
+  type ModelTestSelection,
+} from '../utils/clippyModelTesting'
 import ClippyAlert from '../assets/clippy/Alert.png'
 import ClippyDefault from '../assets/clippy/Default.png'
 import ClippyGreeting from '../assets/clippy/Greeting.png'
@@ -57,7 +64,6 @@ type AssistantView =
 
 interface ClippyAssistantProps {
   masterPassword: string
-  onNavigate: (view: AssistantView) => void
 }
 
 interface GatewayAccessCredentials {
@@ -156,14 +162,19 @@ interface CommandRunResult {
   resultText: string
 }
 
-const ANALYZE_INTERVAL_MS = 5 * 60 * 1000
+interface AiModelTestInvokeResult {
+  provider: string
+  model: string
+  success: boolean
+  statusCode: number | null
+  latencyMs: number
+  text: string
+  testedUrl: string | null
+}
+
 const TRAFFIC_WINDOW_MINUTES = 60
 const CLIPPY_IDLE_GREET_MS = 3200
 const CLIPPY_IDLE_WAIT_MS = 4200
-const AUTO_REMINDER_CHECK_MS = 60 * 1000
-const AUTO_REMINDER_INTERVAL_MS = 12 * 60 * 1000
-const AUTO_REMINDER_INTERVAL_MINUTES = Math.round(AUTO_REMINDER_INTERVAL_MS / (60 * 1000))
-const AUTO_REMINDER_STORAGE_KEY = 'mykey.clippy.auto_remind_enabled'
 const CLIPPY_ANIMATION_PROTOCOL_STORAGE_KEY = 'mykey.clippy.animation_protocol_enabled'
 const CLIPPY_STYLE_PROMPT_STORAGE_KEY = 'mykey.clippy.style_prompt'
 const CLIPPY_OPEN_RESPONSES_STORAGE_KEY = 'mykey.clippy.open_responses_enabled'
@@ -184,7 +195,6 @@ type ClippyChatStatus =
   | 'responding'
   | 'analyzing'
   | 'executing'
-  | 'auto_reminding'
 
 type ClippyAnimationKey =
   | 'Alert'
@@ -828,7 +838,6 @@ function chatStatusLabel(status: ClippyChatStatus) {
   if (status === 'responding') return '回复中'
   if (status === 'analyzing') return '分析中'
   if (status === 'executing') return '执行中'
-  if (status === 'auto_reminding') return '自动巡检'
   return '待命'
 }
 
@@ -854,79 +863,6 @@ function formatPrettyResult(result: unknown, max = 5000) {
 
   if (!raw) return 'ok'
   return raw.length > max ? `${raw.slice(0, max)}...` : raw
-}
-
-function shouldTriggerAutoReminder(
-  suggestions: AssistantSuggestion[],
-  policy: GatewayPolicySettings | null,
-  traffic: GatewayTrafficMetrics | null
-) {
-  const top = suggestions[0]
-  if (!top) return false
-  if (top.severity === 'critical') return true
-
-  const requests = traffic?.total_requests ?? 0
-  if (top.severity === 'warning' && requests >= 8) return true
-
-  if (policy?.daily_budget_usd && policy.daily_budget_usd > 0) {
-    const ratio = policy.today_cost_usd / policy.daily_budget_usd
-    if (ratio >= 0.75) return true
-  }
-
-  if (traffic && traffic.total_requests >= 12) {
-    const successRate = traffic.success_requests / traffic.total_requests
-    if (successRate < 0.95) return true
-    if ((traffic.avg_latency_ms ?? 0) >= 4200) return true
-  }
-
-  return false
-}
-
-function buildAutoReminderSignature(
-  suggestions: AssistantSuggestion[],
-  policy: GatewayPolicySettings | null,
-  traffic: GatewayTrafficMetrics | null
-) {
-  const top = suggestions[0]
-  const successRate =
-    traffic && traffic.total_requests > 0 ? traffic.success_requests / traffic.total_requests : 1
-  const successBucket = Math.floor(successRate * 20)
-  const latencyBucket = Math.floor((traffic?.avg_latency_ms ?? 0) / 500)
-  const budgetBucket =
-    policy?.daily_budget_usd && policy.daily_budget_usd > 0
-      ? Math.floor((policy.today_cost_usd / policy.daily_budget_usd) * 10)
-      : -1
-
-  return [
-    top?.id || 'none',
-    top?.severity || 'info',
-    `s${successBucket}`,
-    `l${latencyBucket}`,
-    `b${budgetBucket}`,
-  ].join('|')
-}
-
-function buildAutoReminderFallback(
-  suggestions: AssistantSuggestion[],
-  policy: GatewayPolicySettings | null,
-  traffic: GatewayTrafficMetrics | null
-) {
-  const top = suggestions[0]
-  const snapshot = summarizeCurrentSituation(policy, traffic)
-  if (!top) return `当前无明显风险。${snapshot}`
-  if (top.severity === 'critical') {
-    return `检测到高优先级风险：${top.title}。建议现在先处理这个问题。${snapshot}`
-  }
-  if (top.severity === 'warning') {
-    return `发现需要关注的项：${top.title}。建议在本轮先优化该项，再复查成功率与延迟。${snapshot}`
-  }
-  return `当前整体稳定。建议继续观察趋势，并每次变更后复查数据。${snapshot}`
-}
-
-function compactReminderText(text: string) {
-  const normalized = text.replace(/\s+/g, ' ').trim()
-  if (!normalized) return '当前需要你关注一项风险，请打开面板查看详情。'
-  return normalized.length > 210 ? `${normalized.slice(0, 210)}...` : normalized
 }
 
 function mergeSuggestedCommands(current: SuggestedCommand[], incoming: SuggestedCommand[]) {
@@ -1020,7 +956,7 @@ function formatPythonStructuredOutput(value: unknown) {
   }
 }
 
-export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAssistantProps) {
+export default function ClippyAssistant({ masterPassword }: ClippyAssistantProps) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [settings, setSettings] = useState<GlobalSettingsPayload | null>(null)
@@ -1044,15 +980,6 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   const [skills, setSkills] = useState<ClippySkill[]>([])
   const [suggestedCommands, setSuggestedCommands] = useState<SuggestedCommand[]>([])
   const [batchExecuting, setBatchExecuting] = useState(false)
-  const [autoRemindEnabled, setAutoRemindEnabled] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return true
-    try {
-      const raw = window.localStorage.getItem(AUTO_REMINDER_STORAGE_KEY)
-      return raw === null ? true : raw === '1'
-    } catch {
-      return true
-    }
-  })
   const [animationProtocolEnabled, setAnimationProtocolEnabled] = useState<boolean>(() => {
     if (typeof window === 'undefined') return true
     try {
@@ -1090,11 +1017,15 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   const [skillDraftModel, setSkillDraftModel] = useState('')
   const [editingCustomSkill, setEditingCustomSkill] = useState('')
   const [skillCatalog, setSkillCatalog] = useState<GatewayModelCatalogItem[]>([])
+  const [providerCatalog, setProviderCatalog] = useState<ProviderConfig[]>([])
+  const [modelTestSelection, setModelTestSelection] = useState<ModelTestSelection>({
+    provider: '',
+    model: '',
+  })
   const [animationCue, setAnimationCue] = useState(0)
   const [agentError, setAgentError] = useState<string>('')
   const [greetingActive, setGreetingActive] = useState(true)
   const [avatarSrc, setAvatarSrc] = useState(CLIPPY_ANIMATIONS.Greeting.src)
-  const signatureRef = useRef('')
   const openRef = useRef(open)
   const previousOpenRef = useRef(open)
   const previousSeverityRef = useRef<AssistantSeverity>('info')
@@ -1104,9 +1035,6 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   const idleTimeoutRef = useRef<number>()
   const queuedAnimationRef = useRef<ClippyAnimationKey>()
   const styleCommitTimerRef = useRef<number>()
-  const lastAutoReminderAtRef = useRef(0)
-  const lastAutoReminderSignatureRef = useRef('')
-  const autoReminderRunningRef = useRef(false)
   const runtimeGatewayOnline = agentMode === 'codex'
   const capabilityMap = useMemo(() => {
     const map: Record<string, MykeyCapability> = {}
@@ -1162,6 +1090,22 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       .slice(0, 30)
   }, [skills])
 
+  const modelTestEntries = useMemo(
+    () => buildModelTestEntries(providerCatalog, skillCatalog),
+    [providerCatalog, skillCatalog]
+  )
+  const selectedModelEntry = useMemo(
+    () => modelTestEntries.find((entry) => entry.provider === modelTestSelection.provider) || null,
+    [modelTestEntries, modelTestSelection.provider]
+  )
+  const selectedModelUseLabel = useMemo(
+    () => buildModelUseLabel({
+      providerLabel: selectedModelEntry?.providerLabel || modelTestSelection.provider,
+      model: modelTestSelection.model,
+    }),
+    [modelTestSelection.model, modelTestSelection.provider, selectedModelEntry]
+  )
+
   const suggestions = useMemo(
     () => buildSuggestions(settings, policy, traffic, usageStatuses, runtimeGatewayOnline),
     [policy, runtimeGatewayOnline, settings, traffic, usageStatuses]
@@ -1183,6 +1127,35 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
 
   const addAssistantMessage = (text: string) => {
     setMessages((prev) => [...prev, { id: `${Date.now()}-${prev.length}`, role: 'assistant', text }])
+  }
+
+  const updateModelTestProvider = (provider: string) => {
+    const entry = modelTestEntries.find((item) => item.provider === provider)
+    setModelTestSelection({
+      provider,
+      model: entry?.models[0] || '',
+    })
+  }
+
+  const updateModelTestModel = (model: string) => {
+    setModelTestSelection((prev) => ({ ...prev, model }))
+  }
+
+  const refreshModelTestCatalog = async () => {
+    if (!masterPassword || busy) return
+    setBusy(true)
+    try {
+      const [catalog, providers] = await Promise.all([
+        invoke<GatewayModelCatalogItem[]>('list_gateway_model_catalog', { masterPassword }),
+        invoke<ProviderConfig[]>('get_providers', { masterPassword }),
+      ])
+      setSkillCatalog(catalog)
+      setProviderCatalog(providers)
+    } catch (error) {
+      setAgentError(normalizeError(error))
+    } finally {
+      setBusy(false)
+    }
   }
 
   const triggerClippyAnimation = (key: ClippyAnimationKey) => {
@@ -1318,35 +1291,13 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
         invoke<ProviderUsageStatus[]>('usage_get_summary'),
       ])
 
+      // Pulls gateway settings/policy/traffic/usage purely as context for Codex
+      // answers — no proactive reminders, alerts, or unread badges.
       setSettings(nextSettings)
       setPolicy(nextPolicy)
       setTraffic(nextTraffic)
       setUsageStatuses(nextUsage)
       setLastAnalyzedAt(new Date())
-
-      const nextSuggestions = buildSuggestions(
-        nextSettings,
-        nextPolicy,
-        nextTraffic,
-        nextUsage,
-        runtimeGatewayOnline
-      )
-      const signature = nextSuggestions.map((item) => `${item.id}:${item.severity}`).join('|')
-
-      if (signature !== signatureRef.current) {
-        signatureRef.current = signature
-        if (!silent) {
-          addAssistantMessage(
-            `新分析完成：${nextSuggestions[0]?.title || '状态稳定'}。${summarizeCurrentSituation(nextPolicy, nextTraffic)}`
-          )
-        }
-        if (!openRef.current) {
-          const highPriority = nextSuggestions.filter((item) => item.severity !== 'info').length
-          if (highPriority > 0) {
-            setUnread((prev) => prev + highPriority)
-          }
-        }
-      }
     } catch (error) {
       if (!silent) {
         addAssistantMessage(`分析失败：${normalizeError(error)}`)
@@ -1572,6 +1523,34 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     addAssistantMessage(`${command} 执行完成：${formatPrettyResult(result)}`)
   }
 
+  const askBySelectedModel = async (question: string): Promise<boolean> => {
+    const provider = modelTestSelection.provider.trim()
+    const model = modelTestSelection.model.trim()
+    if (!provider || !model) return false
+
+    const providerLabel = selectedModelEntry?.providerLabel || provider
+    const response = await invoke<AiModelTestInvokeResult>('test_ai_model', {
+      provider,
+      model,
+      prompt: question,
+      masterPassword,
+    })
+
+    setChatStatus('responding')
+    triggerClippyAnimation(response.success ? 'GetAttention' : 'Alert')
+    if (response.success) {
+      addAssistantMessage(response.text.trim() || '模型返回为空。')
+      setAgentError('')
+      return true
+    }
+
+    const statusText = response.statusCode ? `HTTP ${response.statusCode}，` : ''
+    const detail = response.text.trim() || '模型调用失败。'
+    addAssistantMessage(`模型调用失败：${providerLabel} / ${model}，${statusText}${detail}`)
+    setAgentError(`${statusText}${detail}`)
+    return true
+  }
+
   const askByText = async (question: string) => {
     const q = question.trim()
     if (!q || busy) return
@@ -1582,6 +1561,7 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     setChatStatus('thinking')
     triggerClippyAnimation('Thinking')
 
+    let usedSelectedModel = false
     try {
       const invocation = parseDollarInvocation(q)
       if (invocation.error) {
@@ -1608,6 +1588,13 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
         return
       }
 
+      usedSelectedModel = Boolean(modelTestSelection.provider.trim() && modelTestSelection.model.trim())
+      const selectedModelAnswered = await askBySelectedModel(q)
+      usedSelectedModel = usedSelectedModel || selectedModelAnswered
+      if (selectedModelAnswered) {
+        return
+      }
+
       if (agentMode === 'codex' && gatewayCreds) {
         const rawAnswer = await askByCodex(q)
         addCodexMessageFromRaw(q, rawAnswer)
@@ -1619,6 +1606,10 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     } catch (error) {
       const message = normalizeError(error)
       setAgentError(message)
+      if (usedSelectedModel) {
+        addAssistantMessage(`模型调用失败：${message}`)
+        return
+      }
       const fallback = buildFallbackAnswer(q, policy, traffic, suggestions)
       addAssistantMessage(`Codex 代理暂时不可用，已切换规则建议：${fallback}`)
     } finally {
@@ -1682,12 +1673,7 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       return clearAnimationTimers
     }
 
-    if (
-      busy ||
-      chatStatus === 'thinking' ||
-      chatStatus === 'analyzing' ||
-      chatStatus === 'auto_reminding'
-    ) {
+    if (busy || chatStatus === 'thinking' || chatStatus === 'analyzing') {
       previousOpenRef.current = open
       previousSeverityRef.current = topSeverity
       setAvatarSrc(CLIPPY_ANIMATIONS.Thinking.src)
@@ -1695,17 +1681,11 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     }
 
     const justOpened = open && !previousOpenRef.current
-    const justCritical = topSeverity === 'critical' && previousSeverityRef.current !== 'critical'
     previousOpenRef.current = open
     previousSeverityRef.current = topSeverity
 
     if (justOpened) {
       playOneShot('Wave')
-      return clearAnimationTimers
-    }
-
-    if (justCritical && !open) {
-      playOneShot('Alert')
       return clearAnimationTimers
     }
 
@@ -1757,15 +1737,20 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       }
 
       try {
-        const catalog = await invoke<GatewayModelCatalogItem[]>('list_gateway_model_catalog', {
-          masterPassword,
-        })
+        const [catalog, providers] = await Promise.all([
+          invoke<GatewayModelCatalogItem[]>('list_gateway_model_catalog', {
+            masterPassword,
+          }),
+          invoke<ProviderConfig[]>('get_providers', { masterPassword }),
+        ])
         if (!canceled) {
           setSkillCatalog(catalog)
+          setProviderCatalog(providers)
         }
       } catch {
         if (!canceled) {
           setSkillCatalog([])
+          setProviderCatalog([])
         }
       }
 
@@ -1805,10 +1790,18 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   }, [masterPassword])
 
   useEffect(() => {
-    runAnalysis(true)
-    const timer = window.setInterval(() => runAnalysis(true), ANALYZE_INTERVAL_MS)
-    return () => window.clearInterval(timer)
-  }, [masterPassword, runtimeGatewayOnline])
+    const next = resolveInitialModelTestSelection(modelTestEntries, modelTestSelection)
+    if (next.provider !== modelTestSelection.provider || next.model !== modelTestSelection.model) {
+      setModelTestSelection(next)
+    }
+  }, [modelTestEntries, modelTestSelection])
+
+  // Refresh gateway context once each time the panel opens — no background
+  // polling, so Clippy never proactively reminds.
+  useEffect(() => {
+    if (open && masterPassword) void runAnalysis(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, masterPassword, runtimeGatewayOnline])
 
   useEffect(() => {
     openRef.current = open
@@ -1817,14 +1810,6 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
   useEffect(() => {
     if (open) setUnread(0)
   }, [open])
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(AUTO_REMINDER_STORAGE_KEY, autoRemindEnabled ? '1' : '0')
-    } catch {
-      // ignore local storage failure
-    }
-  }, [autoRemindEnabled])
 
   useEffect(() => {
     try {
@@ -1883,86 +1868,6 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
       setStyleEditorOpen(false)
     }
   }, [open, styleEditorOpen])
-
-  useEffect(() => {
-    if (!masterPassword) return
-    if (!autoRemindEnabled) return
-
-    const tick = async () => {
-      if (autoReminderRunningRef.current) return
-      if (busy || batchExecuting) return
-      if (!shouldTriggerAutoReminder(suggestions, policy, traffic)) return
-
-      const now = Date.now()
-      if (now - lastAutoReminderAtRef.current < AUTO_REMINDER_INTERVAL_MS) return
-
-      const signature = buildAutoReminderSignature(suggestions, policy, traffic)
-      if (
-        signature === lastAutoReminderSignatureRef.current &&
-        now - lastAutoReminderAtRef.current < AUTO_REMINDER_INTERVAL_MS * 2
-      ) {
-        return
-      }
-
-      autoReminderRunningRef.current = true
-      setChatStatus('auto_reminding')
-      try {
-        let reminderText = buildAutoReminderFallback(suggestions, policy, traffic)
-        let actions: SuggestedCommand[] = []
-
-        if (agentMode === 'codex' && gatewayCreds) {
-          try {
-            const raw = await askByCodex(
-              '这是系统定时巡检时刻。请给出一句自动提醒（80字内，直接结论+下一步），必要时可附带 mykey-actions。'
-            )
-            const parsed = parseAssistantPayload(raw, capabilityMap)
-            reminderText = parsed.answerText || reminderText
-            actions = parsed.actions
-            if (animationProtocolEnabled && parsed.animationKey) {
-              triggerClippyAnimation(parsed.animationKey)
-            }
-          } catch {
-            // keep fallback reminder
-          }
-        }
-
-        if (!actions.length) {
-          triggerClippyAnimation(suggestions[0]?.severity === 'critical' ? 'Alert' : 'CheckingSomething')
-        }
-        addAssistantMessage(`自动提醒：${compactReminderText(reminderText)}`)
-        if (actions.length > 0) {
-          setSuggestedCommands((prev) => mergeSuggestedCommands(prev, actions))
-          addAssistantMessage(`已附带 ${actions.length} 条可执行建议，可按需一键执行。`)
-        }
-        if (!openRef.current) {
-          setUnread((prev) => prev + 1)
-        }
-        lastAutoReminderAtRef.current = now
-        lastAutoReminderSignatureRef.current = signature
-      } finally {
-        autoReminderRunningRef.current = false
-        setChatStatus('idle')
-      }
-    }
-
-    void tick()
-    const timer = window.setInterval(tick, AUTO_REMINDER_CHECK_MS)
-    return () => window.clearInterval(timer)
-  }, [
-    agentMode,
-    animationProtocolEnabled,
-    assistantStylePrompt,
-    autoRemindEnabled,
-    openResponsesEnabled,
-    batchExecuting,
-    busy,
-    capabilityMap,
-    gatewayCreds,
-    masterPassword,
-    policy,
-    suggestions,
-    traffic,
-  ])
 
   const runSuggestedCommand = async (
     target: SuggestedCommand,
@@ -2061,37 +1966,6 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
     setSuggestedCommands([])
   }
 
-  const executeAction = async (action: AssistantAction) => {
-    try {
-      setBusy(true)
-      setChatStatus('executing')
-      triggerClippyAnimation('GetAttention')
-      if (action.kind === 'navigate') {
-        onNavigate(action.view)
-        setOpen(false)
-      } else if (action.kind === 'set_breaker') {
-        await invoke('set_gateway_circuit_breaker', { enabled: action.enabled, masterPassword })
-        addAssistantMessage(action.enabled ? '已开启全局熔断。' : '已关闭全局熔断。')
-      } else if (action.kind === 'set_budget') {
-        await invoke('set_gateway_daily_budget', {
-          dailyBudgetUsd: action.amount,
-          masterPassword,
-        })
-        addAssistantMessage(
-          action.amount ? `已将每日预算设置为 $${action.amount.toFixed(2)}。` : '已清空每日预算。'
-        )
-      } else {
-        await runAnalysis()
-      }
-      await runAnalysis(true)
-    } catch (error) {
-      addAssistantMessage(`执行失败：${normalizeError(error)}`)
-    } finally {
-      setBusy(false)
-      setChatStatus('idle')
-    }
-  }
-
   const onSubmitAsk = (event: FormEvent) => {
     event.preventDefault()
     askByText(askInput)
@@ -2135,262 +2009,6 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
               关闭
             </button>
           </header>
-
-          <div className="clippy-summary">
-            <span className={`clippy-pill ${topSeverity}`}>{topSeverity.toUpperCase()}</span>
-            <p>{summarizeCurrentSituation(policy, traffic)}</p>
-            <div className="clippy-auto-row">
-              <span className="clippy-auto-hint">
-                自动提醒：{autoRemindEnabled ? '已开启' : '已关闭'}（约每 {AUTO_REMINDER_INTERVAL_MINUTES} 分钟）
-              </span>
-              <div className="clippy-auto-actions">
-                <button
-                  className="btn btn-secondary clippy-auto-toggle"
-                  onClick={() => {
-                    lastAutoReminderAtRef.current = 0
-                    lastAutoReminderSignatureRef.current = ''
-                    void runAnalysis(true)
-                  }}
-                  disabled={busy}
-                >
-                  立即巡检
-                </button>
-                <button
-                  className="btn btn-secondary clippy-auto-toggle"
-                  onClick={() =>
-                    setAutoRemindEnabled((prev) => {
-                      const next = !prev
-                      if (next) {
-                        lastAutoReminderAtRef.current = 0
-                        lastAutoReminderSignatureRef.current = ''
-                      }
-                      return next
-                    })
-                  }
-                  disabled={busy}
-                >
-                  {autoRemindEnabled ? '关闭提醒' : '开启提醒'}
-                </button>
-              </div>
-            </div>
-            <div className="clippy-style-config">
-              <button
-                className="btn btn-secondary clippy-auto-toggle"
-                onClick={() => setStyleEditorOpen((prev) => !prev)}
-                disabled={busy}
-              >
-                {styleEditorOpen ? '收起互动设置' : '互动设置'}
-              </button>
-              {styleEditorOpen && (
-                <div className="clippy-style-editor">
-                  <label htmlFor="clippy-style-prompt">助手风格提示（延迟保存）</label>
-                  <textarea
-                    id="clippy-style-prompt"
-                    rows={3}
-                    value={assistantStyleDraft}
-                    onChange={(event) => setAssistantStyleDraft(event.target.value)}
-                    onBlur={commitAssistantStyleDraft}
-                    placeholder={CLIPPY_STYLE_PROMPT_DEFAULT}
-                  />
-                  <label className="clippy-style-check">
-                    <input
-                      type="checkbox"
-                      checked={animationProtocolEnabled}
-                      onChange={(event) => setAnimationProtocolEnabled(event.target.checked)}
-                    />
-                    <span>启用动画标签协议（支持回答开头使用 [Thinking] 等标签）</span>
-                  </label>
-                  <label className="clippy-style-check">
-                    <input
-                      type="checkbox"
-                      checked={openResponsesEnabled}
-                      onChange={(event) => void updateOpenResponsesSetting(event.target.checked)}
-                      disabled={busy}
-                    />
-                    <span>启用 Open Responses 协议（支持更丰富推理与工具上下文）</span>
-                  </label>
-                  <p className="clippy-style-note">
-                    可用动画标签：{CLIPPY_ANIMATION_HINT_KEYS.join(', ')}
-                  </p>
-                </div>
-              )}
-            </div>
-            <div className="clippy-skill-manager">
-              <div className="clippy-skill-manager-header">
-                <div>
-                  <h4 className="clippy-mini-title">Skills</h4>
-                  <p>
-                    内置 {builtinSkillCount} 条，已存储自定义 {customSkillsOnly.length}/{SKILL_STORAGE_MAX_COUNT} 条
-                  </p>
-                </div>
-                <div className="clippy-skill-manager-actions">
-                  <button
-                    className="btn btn-secondary clippy-auto-toggle"
-                    onClick={() => setSkillEditorOpen((prev) => !prev)}
-                    disabled={busy}
-                  >
-                    {skillEditorOpen ? '收起技能面板' : '技能面板'}
-                  </button>
-                  <button className="btn btn-primary clippy-auto-toggle" onClick={beginCreateCustomSkill} disabled={busy}>
-                    新增技能
-                  </button>
-                </div>
-              </div>
-
-              {skillEditorOpen && (
-                <div className="clippy-skill-editor">
-                  <label htmlFor="clippy-skill-name">技能名称</label>
-                  <input
-                    id="clippy-skill-name"
-                    value={skillDraftName}
-                    onChange={(event) => setSkillDraftName(event.target.value)}
-                    placeholder="例如：code-review"
-                  />
-                  <label htmlFor="clippy-skill-description">技能描述</label>
-                  <textarea
-                    id="clippy-skill-description"
-                    rows={2}
-                    value={skillDraftDescription}
-                    onChange={(event) => setSkillDraftDescription(event.target.value)}
-                    placeholder="简要说明该技能用途与适用场景。"
-                  />
-                  <label htmlFor="clippy-skill-prompt">技能提示词</label>
-                  <textarea
-                    id="clippy-skill-prompt"
-                    rows={4}
-                    value={skillDraftPrompt}
-                    onChange={(event) => setSkillDraftPrompt(event.target.value)}
-                    placeholder="用于约束模型输出风格与步骤。可为空，系统将使用默认提示词。"
-                  />
-                  <label htmlFor="clippy-skill-model">绑定模型（可选）</label>
-                  <input
-                    id="clippy-skill-model"
-                    list="clippy-skill-model-options"
-                    value={skillDraftModel}
-                    onChange={(event) => setSkillDraftModel(event.target.value)}
-                    placeholder="留空则使用默认模型"
-                  />
-                  <datalist id="clippy-skill-model-options">
-                    {skillModelOptions.map((item) => (
-                      <option key={item} value={item} />
-                    ))}
-                  </datalist>
-                  <div className="clippy-skill-editor-actions">
-                    <button
-                      className="btn btn-primary"
-                      onClick={saveCustomSkillDraft}
-                      disabled={busy || !skillDraftName.trim()}
-                    >
-                      保存技能
-                    </button>
-                    <button
-                      className="btn btn-secondary"
-                      onClick={() => {
-                        resetSkillDraft()
-                        setSkillEditorOpen(false)
-                      }}
-                    >
-                      取消
-                    </button>
-                    {editingCustomSkill ? (
-                      <button
-                        className="btn btn-secondary"
-                        type="button"
-                        onClick={() => deleteCustomSkillDraft(editingCustomSkill)}
-                      >
-                        删除当前编辑技能
-                      </button>
-                    ) : null}
-                  </div>
-                  {editingCustomSkill ? (
-                    <p className="clippy-skill-note">
-                      正在编辑：{editingCustomSkill}
-                    </p>
-                  ) : null}
-                </div>
-              )}
-
-              <div className="clippy-skill-list">
-                <div className="clippy-mini-list-title">自定义技能</div>
-                {customSkillsOnly.length === 0 ? (
-                  <p className="clippy-empty-state">暂无自定义技能。</p>
-                ) : (
-                  <div className="clippy-skill-grid">
-                    {customSkillsOnly.map((skill) => (
-                      <article key={skill.name} className="clippy-skill-item">
-                        <div className="clippy-skill-item-header">
-                          <strong>{skill.name}</strong>
-                          <div className="clippy-skill-item-actions">
-                            <button
-                              className="btn btn-secondary"
-                              onClick={() => applySkillDraftToForm(skill)}
-                              disabled={busy}
-                            >
-                              编辑
-                            </button>
-                            <button
-                              className="btn btn-secondary"
-                              onClick={() => deleteCustomSkillDraft(skill.name)}
-                              disabled={busy}
-                            >
-                              删除
-                            </button>
-                          </div>
-                        </div>
-                        <p>{skill.description || '自定义技能'}</p>
-                        <p className="clippy-skill-meta">
-                          {skill.boundModel ? `绑定模型：${skill.boundModel}` : '未绑定模型'}
-                        </p>
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="clippy-skill-list">
-                <div className="clippy-mini-list-title">内置技能（只读）</div>
-                {builtinSkillsOnly.length === 0 ? (
-                  <p className="clippy-empty-state">暂无内置技能。</p>
-                ) : (
-                  <div className="clippy-skill-grid">
-                    {builtinSkillsOnly.slice(0, 6).map((skill) => (
-                      <article key={skill.name} className="clippy-skill-item">
-                        <div className="clippy-skill-item-header">
-                          <strong>{skill.name}</strong>
-                        </div>
-                        <p>{skill.description || '内置技能'}</p>
-                        <p className="clippy-skill-meta">
-                          {skill.tags.length ? `标签：${skill.tags.join(', ')}` : '无标签'}
-                        </p>
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-            {agentError ? <p className="clippy-agent-error">模型连接提示：{agentError}</p> : null}
-          </div>
-
-          <div className="clippy-suggestions">
-            {suggestions.slice(0, 4).map((item) => (
-              <article key={item.id} className={`clippy-suggestion ${item.severity}`}>
-                <div className="clippy-suggestion-title">{item.title}</div>
-                <p>{item.detail}</p>
-                <div className="clippy-action-row">
-                  {item.actions.map((action) => (
-                    <button
-                      key={action.id}
-                      className="btn btn-secondary"
-                      onClick={() => executeAction(action)}
-                      disabled={busy}
-                    >
-                      {action.label}
-                    </button>
-                  ))}
-                </div>
-              </article>
-            ))}
-          </div>
 
           {suggestedCommands.length > 0 && (
             <div className="clippy-tools">
@@ -2452,15 +2070,6 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
               ))}
             </div>
             <div className="clippy-quick-row">
-              <button className="btn btn-secondary" onClick={() => askByText('给我成本建议')} disabled={busy}>
-                成本建议
-              </button>
-              <button className="btn btn-secondary" onClick={() => askByText('现在稳定吗')} disabled={busy}>
-                稳定性
-              </button>
-              <button className="btn btn-secondary" onClick={() => askByText('下一步我该做什么')} disabled={busy}>
-                下一步
-              </button>
               <button
                 className="btn btn-secondary clippy-auto-toggle"
                 onClick={() => setShowSkillCommandHints((prev) => !prev)}
@@ -2471,17 +2080,71 @@ export default function ClippyAssistant({ masterPassword, onNavigate }: ClippyAs
               </button>
             </div>
             <form className="clippy-ask-form" onSubmit={onSubmitAsk}>
+              <div className="clippy-model-use-bar">
+                <div className="clippy-model-use-header">
+                  <span>{selectedModelUseLabel}</span>
+                  <button
+                    className="btn btn-secondary clippy-model-refresh-btn"
+                    type="button"
+                    onClick={() => void refreshModelTestCatalog()}
+                    disabled={busy}
+                  >
+                    刷新
+                  </button>
+                </div>
+                <div className="clippy-model-use-controls">
+                  <label htmlFor="clippy-model-use-provider">
+                    供应商
+                    <select
+                      id="clippy-model-use-provider"
+                      value={modelTestSelection.provider}
+                      onChange={(event) => updateModelTestProvider(event.target.value)}
+                      disabled={busy || modelTestEntries.length === 0}
+                    >
+                      {modelTestEntries.length === 0 ? (
+                        <option value="">暂无供应商</option>
+                      ) : (
+                        modelTestEntries.map((entry) => (
+                          <option key={entry.provider} value={entry.provider}>
+                            {entry.providerLabel}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </label>
+                  <label htmlFor="clippy-model-use-model">
+                    模型
+                    <select
+                      id="clippy-model-use-model"
+                      value={modelTestSelection.model}
+                      onChange={(event) => updateModelTestModel(event.target.value)}
+                      disabled={busy || !selectedModelEntry}
+                    >
+                      {!selectedModelEntry ? (
+                        <option value="">暂无模型</option>
+                      ) : (
+                        selectedModelEntry.models.map((model) => (
+                          <option key={model} value={model}>
+                            {model}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </label>
+                </div>
+              </div>
               <div className="clippy-ask-input-row">
                 <input
                   ref={askInputRef}
                   value={askInput}
                   onChange={(event) => setAskInput(event.target.value)}
-                  placeholder="问 Clippy：比如“我现在最该优化什么？”；技能：$skill code-review --model gpt-5-codex ...；Python：$py print(1)；能力：$mykey gateway.status"
+                  placeholder={modelTestSelection.model ? `使用 ${modelTestSelection.model} 提问...` : '选择模型后输入问题...'}
                 />
                 <button className="btn btn-primary" type="submit" disabled={busy || !askInput.trim()}>
-                  {busy ? '思考中...' : '发送'}
+                  {busy ? '使用中...' : '使用模型'}
                 </button>
               </div>
+              {agentError ? <p className="clippy-agent-error">模型调用提示：{agentError}</p> : null}
               {showSkillCommandHints ? (
                 <section className="clippy-skill-command-panel">
                   <div className="clippy-skill-command-header">

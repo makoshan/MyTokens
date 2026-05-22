@@ -148,6 +148,54 @@ export function encodeErc20TransferCall(to: string, amount: string, decimals: nu
   return `0xa9059cbb${normalizedTo.padStart(64, '0')}${amountHex.padStart(64, '0')}`
 }
 
+// Max uint256, used to approve a router once instead of per-swap.
+export const MAX_UINT256 = (2n ** 256n - 1n).toString()
+
+export function encodeErc20ApproveCall(spender: string, amountBaseUnits: string): string {
+  const normalizedSpender = normalizeEvmAddress(spender).slice(2).toLowerCase()
+  const amountHex = BigInt(amountBaseUnits).toString(16)
+  return `0x095ea7b3${normalizedSpender.padStart(64, '0')}${amountHex.padStart(64, '0')}`
+}
+
+export function encodeErc20AllowanceCall(owner: string, spender: string): string {
+  const o = normalizeEvmAddress(owner).slice(2).toLowerCase()
+  const s = normalizeEvmAddress(spender).slice(2).toLowerCase()
+  return `0xdd62ed3e${o.padStart(64, '0')}${s.padStart(64, '0')}`
+}
+
+// Build a raw EVM tx input for an arbitrary contract call (used for Uniswap swap
+// calldata, where `value`/`data` come straight from the routing API in wei).
+export function buildRawCallInput(input: {
+  to: string
+  valueWei: string
+  data: string
+  nonce: string
+  gasLimit: string
+  chainId: string
+  gasPrice?: string
+  maxFeePerGas?: string
+  maxPriorityFeePerGas?: string
+}) {
+  const base = {
+    nonce: input.nonce.trim(),
+    gasLimit: input.gasLimit.trim(),
+    to: normalizeEvmAddress(input.to),
+    value: (input.valueWei || '0').trim(),
+    chainId: input.chainId.trim(),
+    data: input.data.trim(),
+  }
+  if (input.maxFeePerGas?.trim() || input.maxPriorityFeePerGas?.trim()) {
+    return {
+      ...base,
+      txType: '02',
+      maxFeePerGas: input.maxFeePerGas?.trim() || '0',
+      maxPriorityFeePerGas: input.maxPriorityFeePerGas?.trim() || '0',
+      accessList: [],
+    }
+  }
+  return { ...base, gasPrice: input.gasPrice?.trim() || '0' }
+}
+
 export function buildErc20TransferInput(input: {
   contractAddress: string
   to: string

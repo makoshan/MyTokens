@@ -1,25 +1,51 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use axum::response::IntoResponse;
+use std::collections::{HashMap, HashSet};
+use std::net::{Ipv4Addr, TcpListener};
 use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::Manager;
+use tauri::{ipc::CapabilityBuilder, Manager, Url};
 use tauri::WebviewUrl;
 use tauri::WebviewWindowBuilder;
 use tauri_plugin_global_shortcut::ShortcutState;
 use tauri_plugin_log::{Target, TargetKind};
+use tokio::net::TcpListener as TokioTcpListener;
 
 mod commands;
 mod gateway;
+mod operator_key;
+#[cfg(target_os = "macos")]
+mod passkey_native;
 mod provider_defaults;
 mod secret_store;
 pub mod stt;
 mod usage;
-mod vault;
+pub mod vault;
 pub mod vault_crypto;
 mod voice_input;
 
 use vault::Vault;
+
+const LOCALHOST_UI_PORT: u16 = 14378;
+pub const PASSKEY_BRIDGE_PORT: u16 = 14379;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyBridgeResult {
+    pub credential_id: String,
+    pub user_id: String,
+    pub rp_id: String,
+    pub prf_salt: String,
+    pub prf_key_hex: String,
+}
+
+#[derive(Debug, Default)]
+pub struct PasskeyBridgeState {
+    pending_tokens: Mutex<HashSet<String>>,
+    results: Mutex<HashMap<String, PasskeyBridgeResult>>,
+}
 
 pub struct AppState {
     vault: Arc<Mutex<Vault>>,
@@ -27,6 +53,164 @@ pub struct AppState {
     gateway: Arc<Mutex<gateway::GatewayRuntime>>,
     quick_runtime: Arc<Mutex<QuickRuntimeState>>,
     voice_runtime: Arc<voice_input::VoiceInputRuntime>,
+    passkey_bridge: Arc<PasskeyBridgeState>,
+}
+
+fn ensure_main_window(app: &tauri::App) -> Result<(), tauri::Error> {
+    if app.get_webview_window("main").is_some() {
+        return Ok(());
+    }
+
+    let url = if cfg!(debug_assertions) {
+        "http://localhost:3000".parse().unwrap()
+    } else {
+        let url: Url = format!("http://localhost:{LOCALHOST_UI_PORT}")
+            .parse()
+            .unwrap();
+        app.add_capability(
+            CapabilityBuilder::new("localhost-ui")
+                .remote(url.to_string())
+                .window("main"),
+        )?;
+        url
+    };
+
+    WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+        .title("MyKey - AI 资产保险箱")
+        .inner_size(1200.0, 800.0)
+        .min_inner_size(800.0, 600.0)
+        .resizable(true)
+        .fullscreen(false)
+        .devtools(true)
+        .build()?;
+
+    Ok(())
+}
+
+fn passkey_bridge_html() -> &'static str {
+    r#"<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8" />
+<title>MyKey Passkey</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f8fafc;color:#101a44}
+main{max-width:720px;margin:12vh auto;padding:32px;background:#fff;border:1px solid #e5e7eb;border-radius:18px;box-shadow:0 18px 60px rgba(15,23,42,.08)}
+h1{margin:0 0 12px;font-size:28px}p{color:#64748b;line-height:1.6}.btn{border:0;border-radius:999px;background:#0b7cff;color:white;font-size:18px;font-weight:700;padding:14px 24px;cursor:pointer}.msg{margin-top:18px;padding:12px 14px;border-radius:12px;background:#eef6ff;color:#1d4ed8;white-space:pre-wrap;word-break:break-word}.err{background:#fee2e2;color:#991b1b}
+</style>
+<main>
+  <h1>MyKey Passkey</h1>
+  <p>这个页面使用系统浏览器完成 WebAuthn PRF，然后把一次性结果回传给本机 MyKey。</p>
+  <button class="btn" id="run">继续</button>
+  <div class="msg" id="msg">等待操作…</div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id)
+const params = new URLSearchParams(location.search)
+const token = params.get('token') || ''
+const mode = params.get('mode') || 'register'
+const credentialId = params.get('credentialId') || ''
+const prfSalt = params.get('prfSalt') || ''
+const rpId = params.get('rpId') || ''
+function randomBytes(length){ const b = new Uint8Array(length); crypto.getRandomValues(b); return b }
+function b64url(bytes){ let s=''; bytes.forEach((x)=>s+=String.fromCharCode(x)); return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'') }
+function b64(bytes){ let s=''; bytes.forEach((x)=>s+=String.fromCharCode(x)); return btoa(s).replace(/=+$/,'') }
+function b64urlToBytes(value){ const padded=value.replace(/-/g,'+').replace(/_/g,'/').padEnd(Math.ceil(value.length/4)*4,'='); const bin=atob(padded); const out=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++)out[i]=bin.charCodeAt(i); return out }
+function b64ToBytes(value){ const padded=value.replace(/-/g,'+').replace(/_/g,'/').padEnd(Math.ceil(value.length/4)*4,'='); const bin=atob(padded); const out=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++)out[i]=bin.charCodeAt(i); return out }
+function hex(buf){ return Array.from(new Uint8Array(buf)).map((x)=>x.toString(16).padStart(2,'0')).join('') }
+async function postResult(result){
+  const res = await fetch('/passkey-bridge/result', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ token, result }) })
+  if(!res.ok) throw new Error(await res.text())
+}
+async function register(){
+  const salt = randomBytes(32)
+  const userIdBytes = randomBytes(32)
+  const cred = await navigator.credentials.create({ publicKey: {
+    challenge: randomBytes(32),
+    rp: { name: 'MyKey' },
+    user: { id: userIdBytes, name: 'MyKey Vault', displayName: 'MyKey Vault' },
+    pubKeyCredParams: [{ type:'public-key', alg:-7 }, { type:'public-key', alg:-257 }],
+    authenticatorSelection: { residentKey:'preferred', userVerification:'required' },
+    extensions: { prf: { eval: { first: salt } } }
+  }})
+  const prf = cred.getClientExtensionResults().prf?.results?.first
+  if(!prf) throw new Error('这个 passkey 没有返回 PRF 结果。')
+  await postResult({ credentialId: b64url(new Uint8Array(cred.rawId)), userId: b64url(userIdBytes), rpId: '', prfSalt: b64(salt), prfKeyHex: hex(prf) })
+}
+async function login(){
+  const cred = await navigator.credentials.get({ publicKey: {
+    challenge: randomBytes(32),
+    ...(rpId ? { rpId } : {}),
+    allowCredentials: [{ type:'public-key', id:b64urlToBytes(credentialId) }],
+    userVerification:'required',
+    extensions: { prf: { eval: { first: b64ToBytes(prfSalt) } } }
+  }})
+  const prf = cred.getClientExtensionResults().prf?.results?.first
+  if(!prf) throw new Error('这个 passkey 没有返回 PRF 结果。')
+  await postResult({ credentialId, userId:'', rpId, prfSalt, prfKeyHex: hex(prf) })
+}
+$('run').onclick = async () => {
+  $('run').disabled = true
+  $('msg').className = 'msg'
+  $('msg').textContent = '正在唤起系统 passkey…'
+  try {
+    if (!window.PublicKeyCredential || !navigator.credentials) throw new Error('当前浏览器不支持 WebAuthn。')
+    if (mode === 'login') await login(); else await register()
+    $('msg').textContent = '完成。可以回到 MyKey 继续。'
+  } catch (err) {
+    $('msg').className = 'msg err'
+    $('msg').textContent = String(err)
+    $('run').disabled = false
+  }
+}
+</script>
+</html>"#
+}
+
+async fn passkey_bridge_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(passkey_bridge_html())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PasskeyBridgePost {
+    token: String,
+    result: PasskeyBridgeResult,
+}
+
+async fn passkey_bridge_result(
+    axum::extract::State(state): axum::extract::State<Arc<PasskeyBridgeState>>,
+    axum::Json(payload): axum::Json<PasskeyBridgePost>,
+) -> impl axum::response::IntoResponse {
+    let accepted = {
+        let mut tokens = state.pending_tokens.lock().unwrap_or_else(|e| e.into_inner());
+        tokens.remove(&payload.token)
+    };
+    if !accepted {
+        return (axum::http::StatusCode::FORBIDDEN, "invalid token").into_response();
+    }
+    state
+        .results
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(payload.token, payload.result);
+    (axum::http::StatusCode::OK, "ok").into_response()
+}
+
+fn start_passkey_bridge_server(state: Arc<PasskeyBridgeState>) {
+    let Ok(std_listener) = TcpListener::bind((Ipv4Addr::LOCALHOST, PASSKEY_BRIDGE_PORT)) else {
+        return;
+    };
+    let _ = std_listener.set_nonblocking(true);
+    tauri::async_runtime::spawn(async move {
+        let Ok(listener) = TokioTcpListener::from_std(std_listener) else {
+            return;
+        };
+        let app = axum::Router::new()
+            .route("/passkey-bridge", axum::routing::get(passkey_bridge_page))
+            .route("/passkey-bridge/result", axum::routing::post(passkey_bridge_result))
+            .with_state(state);
+        let _ = axum::serve(listener, app).await;
+    });
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -130,6 +314,12 @@ fn cycle_claude_code_model(app: &tauri::AppHandle) {
 
 fn setup_tray(app: &tauri::App) -> Result<(), tauri::Error> {
     let handle = app.handle();
+    let tray_icon = app.default_window_icon().cloned().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "default app icon missing for tray",
+        )
+    })?;
     let show = MenuItem::with_id(handle, "tray_show", "显示 MyKey", true, None::<&str>)?;
     let hide = MenuItem::with_id(handle, "tray_hide", "隐藏 MyKey", true, None::<&str>)?;
     let toggle_voice = MenuItem::with_id(
@@ -164,6 +354,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), tauri::Error> {
     )?;
 
     TrayIconBuilder::new()
+        .icon(tray_icon)
+        .tooltip("MyKey")
         .menu(&menu)
         .on_menu_event(
             |app, event: tauri::menu::MenuEvent| match event.id().as_ref() {
@@ -670,9 +862,11 @@ pub fn run() {
         gateway: Arc::new(Mutex::new(gateway::GatewayRuntime::default())),
         quick_runtime: Arc::new(Mutex::new(QuickRuntimeState::default())),
         voice_runtime: Arc::new(voice_input::VoiceInputRuntime::default()),
+        passkey_bridge: Arc::new(PasskeyBridgeState::default()),
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_localhost::Builder::new(LOCALHOST_UI_PORT).build())
         .manage(app_state)
         .setup(|app| {
             // Always enable file logs so users can debug permission/hotkey issues without DevTools.
@@ -695,6 +889,11 @@ pub fn run() {
             }
             app.handle().plugin(log_builder.build())?;
             app.handle().plugin(tauri_plugin_dialog::init())?;
+            ensure_main_window(app)?;
+            {
+                let state = app.handle().state::<AppState>();
+                start_passkey_bridge_server(Arc::clone(&state.passkey_bridge));
+            }
             #[cfg(target_os = "macos")]
             {
                 // Required for PanelBuilder on macOS; registers WebviewPanelManager state.
@@ -777,10 +976,16 @@ pub fn run() {
             commands::add_passkey_prf_unlock_method,
             commands::authenticate_with_passkey_prf,
             commands::authenticate_with_recovery_key,
+            commands::begin_passkey_browser_bridge,
+            commands::consume_passkey_browser_bridge_result,
+            commands::passkey_native_available,
+            commands::passkey_native_register,
+            commands::passkey_native_assert,
             commands::mykey_capabilities,
             commands::mykey_command,
             commands::add_credential,
             commands::get_credentials,
+            commands::get_credential_secret,
             commands::update_credential,
             commands::delete_credential,
             commands::get_credential_project_labels,
@@ -797,11 +1002,21 @@ pub fn run() {
             commands::add_crypto_account,
             commands::add_crypto_token,
             commands::update_crypto_token_balance,
+            commands::upsert_crypto_tokens_batch,
             commands::delete_crypto_wallet,
             commands::query_crypto_native_balance,
             commands::get_crypto_evm_fee_defaults,
             commands::query_crypto_erc20_balance,
             commands::discover_alchemy_erc20_tokens,
+            commands::fetch_alchemy_portfolio_tokens,
+            commands::fetch_alchemy_nfts,
+            commands::fetch_alchemy_transfers,
+            commands::crypto_evm_call,
+            commands::uniswap_swap_quote,
+            commands::fetch_token_info,
+            commands::verify_trustwallet_token_asset,
+            commands::get_wallet_api_keys,
+            commands::set_wallet_api_key,
             commands::discover_oklink_address_assets,
             commands::broadcast_crypto_raw_transaction,
             commands::get_providers,
@@ -809,6 +1024,7 @@ pub fn run() {
             commands::set_provider_active,
             commands::delete_provider,
             commands::test_provider_endpoint,
+            commands::test_ai_model,
             commands::get_prompts,
             commands::upsert_prompt,
             commands::delete_prompt,
@@ -845,6 +1061,7 @@ pub fn run() {
             commands::restore_backup,
             commands::delete_backup,
             commands::open_path,
+            commands::open_external_url,
             commands::get_quick_action_settings,
             commands::set_quick_action_settings,
             commands::register_quick_hotkeys,
@@ -880,6 +1097,10 @@ pub fn run() {
             commands::auto_scan_projects,
             commands::clear_project_data,
             commands::compute_gateway_admin_request,
+            commands::compute_gateway_operator_connect,
+            commands::compute_gateway_operator_request,
+            commands::get_compute_gateway_settings,
+            commands::set_compute_gateway_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

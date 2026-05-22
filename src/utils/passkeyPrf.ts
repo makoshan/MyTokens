@@ -1,5 +1,6 @@
 export interface PasskeyPrfRegistration {
   credentialId: string
+  userId: string
   rpId: string
   prfSalt: string
   prfKeyHex: string
@@ -17,6 +18,14 @@ function bytesToBase64Url(bytes: Uint8Array) {
     binary += String.fromCharCode(byte)
   })
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = ''
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte)
+  })
+  return btoa(binary).replace(/=+$/, '')
 }
 
 function base64UrlToBytes(value: string) {
@@ -105,8 +114,66 @@ export async function createPasskeyPrfKey(walletName: string): Promise<PasskeyPr
 
   return {
     credentialId,
+    userId: bytesToBase64Url(userId),
     rpId: rpId || '',
     prfSalt: bytesToBase64Url(salt),
+    prfKeyHex,
+  }
+}
+
+export async function createVaultPasskeyPrfKey(name = 'MyKey Vault'): Promise<PasskeyPrfRegistration> {
+  if (!isPasskeyPrfAvailable()) {
+    throw new Error('WebAuthn PRF is not available in this webview.')
+  }
+  const rpId = getRpId()
+  const salt = randomBytes(32)
+  const userId = randomBytes(32)
+  const credential = (await navigator.credentials.create({
+    publicKey: {
+      challenge: randomBytes(32),
+      rp: {
+        name: 'MyKey',
+        ...(rpId ? { id: rpId } : {}),
+      },
+      user: {
+        id: userId,
+        name,
+        displayName: name,
+      },
+      pubKeyCredParams: [
+        { type: 'public-key', alg: -7 },
+        { type: 'public-key', alg: -257 },
+      ],
+      authenticatorSelection: {
+        residentKey: 'preferred',
+        userVerification: 'required',
+      },
+      extensions: {
+        prf: {
+          eval: { first: salt },
+        },
+      },
+    },
+  } as CredentialCreationOptions)) as PublicKeyCredential | null
+
+  if (!credential) {
+    throw new Error('Passkey creation was cancelled.')
+  }
+
+  const credentialId = bytesToBase64Url(new Uint8Array(credential.rawId))
+  const prfSalt = bytesToBase64(salt)
+  let prfKeyHex = ''
+  try {
+    prfKeyHex = prfResultToHex(credential)
+  } catch {
+    prfKeyHex = await getPasskeyPrfKey(credentialId, prfSalt, rpId)
+  }
+
+  return {
+    credentialId,
+    userId: bytesToBase64Url(userId),
+    rpId: rpId || '',
+    prfSalt,
     prfKeyHex,
   }
 }

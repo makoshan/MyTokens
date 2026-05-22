@@ -140,6 +140,36 @@ contract MyKeyComputeCredit {
         _burn(from, value, memo);
     }
 
+    /// @notice Domain tag mixed into the transferWithSig digest so a burnWithSig
+    ///         signature can never be replayed as a transfer (and vice versa),
+    ///         even though both share the per-owner nonce.
+    bytes32 public constant TRANSFER_WITH_SIG_TAG = keccak256("MYC.transferWithSig.v1");
+
+    /// @notice Transfer `value` of `from`'s MYC to `to`, authorized by `from`'s
+    ///         EIP-191 personal_sign. A relayer submits this and pays gas, so
+    ///         `from` never needs ETH (hides crypto from ordinary users). Replay
+    ///         protected by the shared nonce + the transfer domain tag.
+    /// @dev digest = keccak256(abi.encode(TRANSFER_WITH_SIG_TAG, from, to, value,
+    ///      nonce, deadline, chainId, address(this))); signed = personal_sign(digest).
+    function transferWithSig(
+        address from,
+        address to,
+        uint256 value,
+        uint256 deadline,
+        bytes calldata sig
+    ) external {
+        if (block.timestamp > deadline) revert SigExpired();
+        uint256 nonce = nonces[from];
+        bytes32 digest = keccak256(
+            abi.encode(TRANSFER_WITH_SIG_TAG, from, to, value, nonce, deadline, block.chainid, address(this))
+        );
+        bytes32 ethHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", digest));
+        address signer = _recover(ethHash, sig);
+        if (signer == address(0) || signer != from) revert BadSignature();
+        nonces[from] = nonce + 1;
+        _transfer(from, to, value);
+    }
+
     function _recover(bytes32 hash, bytes calldata sig) internal pure returns (address) {
         if (sig.length != 65) return address(0);
         bytes32 r;

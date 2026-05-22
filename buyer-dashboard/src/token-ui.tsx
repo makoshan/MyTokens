@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode, TableHTMLAttributes } from 'react'
+import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode, TableHTMLAttributes, TdHTMLAttributes, ThHTMLAttributes } from 'react'
 
 function cx(...classes: Array<string | false | null | undefined>): string {
   return classes.filter(Boolean).join(' ')
@@ -86,11 +86,11 @@ export function TableRow({ className, ...props }: HTMLAttributes<HTMLTableRowEle
   return <tr data-slot="table-row" className={className} {...props} />
 }
 
-export function TableHead({ className, ...props }: HTMLAttributes<HTMLTableCellElement>) {
+export function TableHead({ className, ...props }: ThHTMLAttributes<HTMLTableCellElement>) {
   return <th data-slot="table-head" className={className} {...props} />
 }
 
-export function TableCell({ className, ...props }: HTMLAttributes<HTMLTableCellElement>) {
+export function TableCell({ className, ...props }: TdHTMLAttributes<HTMLTableCellElement>) {
   return <td data-slot="table-cell" className={className} {...props} />
 }
 

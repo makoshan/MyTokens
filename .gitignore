@@ -26,3 +26,14 @@ image*.png
 image copy*.png
 Docs_code/
 src/assets/
+
+# Foundry build artifacts
+contracts/cache/
+contracts/out/
+
+# D1 database backups — may contain encrypted provider tokens / account data
+cloud-gateway/backup-*.sql
+
+# Local agent / tooling scratch
+.claude/
+.playwright-mcp/

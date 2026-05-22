@@ -26,6 +26,9 @@ export type CryptoPortfolioWallet = {
   name: string
   walletType: string
   secretKind: string
+  passkeyCredentialId?: string | null
+  passkeyRpId?: string | null
+  passkeyPrfSalt?: string | null
   createdAt: string
   updatedAt: string
   isActive: boolean
@@ -56,6 +59,10 @@ export type CryptoWalletRow = {
   chainCount: number
   balanceText: string
 }
+
+export type TrustWalletTokenStatus = 'verified' | 'missing'
+
+export type TrustWalletTokenStatusMap = Record<string, TrustWalletTokenStatus>
 
 export type CryptoWalletFormState = {
   name: string
@@ -126,6 +133,26 @@ export function getAccountTokens(
     if (token.accountId) return token.accountId === account.id
     return token.chain === account.chain && token.network === account.network
   })
+}
+
+export function filterTrustWalletVerifiedTokens<T extends CryptoPortfolioToken>(
+  tokens: T[],
+  statusByTokenId: TrustWalletTokenStatusMap
+): T[] {
+  return tokens.filter((token) => {
+    if (!token.contractAddress) return true
+    return statusByTokenId[token.id] === 'verified'
+  })
+}
+
+export function withTrustWalletVerifiedTokens<T extends CryptoPortfolioWallet>(
+  wallets: T[],
+  statusByTokenId: TrustWalletTokenStatusMap
+): T[] {
+  return wallets.map((wallet) => ({
+    ...wallet,
+    tokens: filterTrustWalletVerifiedTokens(wallet.tokens, statusByTokenId),
+  }))
 }
 
 export function buildCryptoPortfolioSummary(wallets: CryptoPortfolioWallet[]) {

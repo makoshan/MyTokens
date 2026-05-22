@@ -8,6 +8,7 @@ use crate::{
     OpencodeConfigSnapshot, Project, PromptTemplate, ProviderAppBindingInput, ProviderConfig,
     ProviderDetails, ProviderEndpointInput, ProviderEnvVarInput, QuickActionHistoryRecord,
     QuickActionResult, QuickActionSettings, VoiceInputHistoryRecord,
+    PasskeyBridgeResult, PASSKEY_BRIDGE_PORT,
 };
 use base64::Engine as _;
 use regex::Regex;
@@ -24,6 +25,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+use uuid::Uuid;
 use walkdir::WalkDir;
 
 #[derive(Debug, Serialize)]
@@ -31,6 +33,13 @@ use walkdir::WalkDir;
 pub struct VaultUnlockBootstrap {
     pub created: bool,
     pub recovery_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyBridgeStart {
+    pub token: String,
+    pub url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +76,14 @@ pub struct CryptoErc20BalanceResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ComputeGatewayVaultSettings {
+    pub gateway_url: String,
+    pub admin_token: String,
+    pub source: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AlchemyDiscoveredToken {
     pub contract_address: String,
     pub symbol: String,
@@ -85,6 +102,105 @@ pub struct OklinkDiscoveredToken {
     pub price_usd: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WalletApiKeys {
+    pub alchemy: String,
+    pub oklink: String,
+    pub alchemy_source: String,
+    pub oklink_source: String,
+    pub env_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlchemyPortfolioToken {
+    pub network: String,
+    pub chain: String,
+    pub chain_network: String,
+    pub contract_address: Option<String>,
+    pub symbol: String,
+    pub decimals: i64,
+    pub balance: String,
+    pub balance_raw: String,
+    pub price_usd: Option<String>,
+    pub value_usd: Option<String>,
+    pub is_spam: bool,
+    pub logo: Option<String>,
+    pub contract_checksum: Option<String>,
+    pub trust_wallet_verified: bool,
+    pub trust_wallet_info_url: Option<String>,
+    pub trust_wallet_logo_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenInfo {
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+    pub description: Option<String>,
+    pub website: Option<String>,
+    pub explorer: Option<String>,
+    pub source: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustWalletTokenAsset {
+    pub verified: bool,
+    pub chain: String,
+    pub contract_checksum: Option<String>,
+    pub info_url: Option<String>,
+    pub logo_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlchemyNft {
+    pub network: String,
+    pub chain: String,
+    pub chain_network: String,
+    pub contract_address: String,
+    pub token_id: String,
+    pub token_type: String,
+    pub name: String,
+    pub collection: Option<String>,
+    pub image_url: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlchemyTransfer {
+    pub network: String,
+    pub chain: String,
+    pub chain_network: String,
+    pub hash: String,
+    pub block_num: String,
+    pub from_address: String,
+    pub to_address: Option<String>,
+    pub value: Option<String>,
+    pub asset: Option<String>,
+    pub category: String,
+    pub direction: String,
+    pub timestamp: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UniswapSwapQuote {
+    pub amount_in: String,
+    pub amount_out: String,
+    pub amount_out_min: String,
+    pub quote_decimals: Option<String>,
+    pub estimated_gas: Option<String>,
+    pub to: String,
+    pub calldata: String,
+    pub value: String,
+    pub router: String,
+    pub source: String,
+}
+
 #[tauri::command]
 pub fn set_master_password(password: String, state: State<'_, AppState>) -> Result<bool, String> {
     let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
@@ -94,8 +210,15 @@ pub fn set_master_password(password: String, state: State<'_, AppState>) -> Resu
 
 #[tauri::command]
 pub fn authenticate(password: String, state: State<'_, AppState>) -> Result<bool, String> {
-    let vault = state.vault.lock().map_err(|e| e.to_string())?;
-    Ok(vault.authenticate(&password))
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    let ok = vault.authenticate(&password);
+    if ok {
+        // Set up at-rest encryption for the secret store: creates the vault crypto
+        // header on first unlock (master-password-only vaults never had one), then
+        // migrates any plaintext secrets to AES-256-GCM ciphertext.
+        vault.ensure_secret_encryption(&password);
+    }
+    Ok(ok)
 }
 
 #[tauri::command]
@@ -173,6 +296,130 @@ pub fn authenticate_with_recovery_key(
 }
 
 #[tauri::command]
+pub fn begin_passkey_browser_bridge(
+    mode: String,
+    credential_id: Option<String>,
+    prf_salt: Option<String>,
+    rp_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<PasskeyBridgeStart, String> {
+    let mode = match mode.trim() {
+        "login" => "login",
+        _ => "register",
+    };
+    let token = Uuid::new_v4().to_string();
+    state
+        .passkey_bridge
+        .pending_tokens
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(token.clone());
+
+    let mut url = format!(
+        "http://localhost:{}/passkey-bridge?token={}&mode={}",
+        PASSKEY_BRIDGE_PORT, token, mode
+    );
+    if let Some(value) = credential_id.filter(|v| !v.trim().is_empty()) {
+        url.push_str("&credentialId=");
+        url.push_str(&url_encode(&value));
+    }
+    if let Some(value) = prf_salt.filter(|v| !v.trim().is_empty()) {
+        url.push_str("&prfSalt=");
+        url.push_str(&url_encode(&value));
+    }
+    if let Some(value) = rp_id.filter(|v| !v.trim().is_empty()) {
+        url.push_str("&rpId=");
+        url.push_str(&url_encode(&value));
+    }
+
+    Ok(PasskeyBridgeStart { token, url })
+}
+
+#[tauri::command]
+pub fn consume_passkey_browser_bridge_result(
+    token: String,
+    state: State<'_, AppState>,
+) -> Result<Option<PasskeyBridgeResult>, String> {
+    Ok(state
+        .passkey_bridge
+        .results
+        .lock()
+        .map_err(|e| e.to_string())?
+        .remove(&token))
+}
+
+/// Whether the native macOS passkey path (Apple AuthenticationServices) is usable
+/// on this platform. Note: a `true` here does not guarantee the call will succeed —
+/// that still requires the app to be signed with the Associated Domains entitlement.
+#[tauri::command]
+pub fn passkey_native_available() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::passkey_native::is_available()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Register a new platform passkey bound to `rp_id` and derive its PRF key,
+/// returning the same shape as the browser bridge so callers are interchangeable.
+#[tauri::command]
+pub fn passkey_native_register(
+    app: tauri::AppHandle,
+    rp_id: String,
+    user_name: Option<String>,
+    prf_salt: Option<String>,
+) -> Result<PasskeyBridgeResult, String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::passkey_native::register(
+            &app,
+            &rp_id,
+            user_name.as_deref().unwrap_or("MyKey"),
+            prf_salt.as_deref(),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, rp_id, user_name, prf_salt);
+        Err("native passkey is only available on macOS".to_string())
+    }
+}
+
+/// Assert an existing platform passkey and re-derive its PRF key.
+#[tauri::command]
+pub fn passkey_native_assert(
+    app: tauri::AppHandle,
+    rp_id: String,
+    credential_id: String,
+    prf_salt: String,
+) -> Result<PasskeyBridgeResult, String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::passkey_native::assert(&app, &rp_id, &credential_id, &prf_salt)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, rp_id, credential_id, prf_salt);
+        Err("native passkey is only available on macOS".to_string())
+    }
+}
+
+fn url_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
+#[tauri::command]
 pub fn add_credential(
     provider: String,
     name: String,
@@ -204,6 +451,21 @@ pub fn get_credentials(
     }
 
     Ok(vault.get_credentials())
+}
+
+/// Full (decrypted) key for one stored credential. Lets the compute-gateway
+/// console auto-fill an upstream token from the vault instead of retyping it.
+#[tauri::command]
+pub fn get_credential_secret(
+    credential_id: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    Ok(vault.get_credential_secret(&credential_id))
 }
 
 #[tauri::command]
@@ -4269,6 +4531,18 @@ pub struct EndpointSpeedTestResult {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AiModelTestResult {
+    pub provider: String,
+    pub model: String,
+    pub success: bool,
+    pub status_code: Option<u16>,
+    pub latency_ms: i64,
+    pub text: String,
+    pub tested_url: Option<String>,
+}
+
 fn parse_headers(raw: Option<&str>) -> HeaderMap {
     let mut headers = HeaderMap::new();
     let Some(input) = raw else {
@@ -4299,6 +4573,36 @@ fn parse_headers(raw: Option<&str>) -> HeaderMap {
     }
 
     headers
+}
+
+fn provider_endpoint_url(base_url: &str, path: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.ends_with("/v1") {
+        format!("{}/{}", base, path.trim_start_matches('/'))
+    } else {
+        format!("{}/v1/{}", base, path.trim_start_matches('/'))
+    }
+}
+
+fn extract_model_test_text(value: &Value) -> Option<String> {
+    if let Some(text) = extract_codex_text(value) {
+        return Some(text);
+    }
+
+    if let Some(items) = value.get("content").and_then(|item| item.as_array()) {
+        let chunks = items
+            .iter()
+            .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if !chunks.is_empty() {
+            return Some(chunks.join("\n"));
+        }
+    }
+
+    None
 }
 
 fn command_exists(command: &str) -> bool {
@@ -5168,6 +5472,196 @@ pub async fn test_provider_endpoint(
 }
 
 #[tauri::command]
+pub async fn test_ai_model(
+    provider: String,
+    model: String,
+    prompt: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<AiModelTestResult, String> {
+    let provider_id = provider.trim().to_string();
+    let model_name = model.trim().to_string();
+    let prompt_text = prompt.trim().to_string();
+    if provider_id.is_empty() {
+        return Err("Provider is empty".to_string());
+    }
+    if model_name.is_empty() {
+        return Err("Model is empty".to_string());
+    }
+    if prompt_text.is_empty() {
+        return Err("Prompt is empty".to_string());
+    }
+
+    let (provider_config, credential_key) = {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+        let config = vault
+            .get_provider_config(&provider_id)
+            .ok_or_else(|| format!("Provider not found: {}", provider_id))?;
+        let key = {
+            let configured = config.api_key.trim().to_string();
+            if configured.is_empty() {
+                vault
+                    .get_latest_api_credential_for_provider(&provider_id)
+                    .map(|item| item.key)
+                    .unwrap_or_default()
+            } else {
+                configured
+            }
+        };
+        (config, key)
+    };
+
+    let primary_endpoint = provider_config
+        .endpoints
+        .iter()
+        .find(|item| item.is_primary)
+        .or_else(|| provider_config.endpoints.first());
+    let endpoint_base = primary_endpoint
+        .map(|item| item.base_url.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .or_else(|| {
+            let base = provider_config.base_url.trim().to_string();
+            if base.is_empty() {
+                None
+            } else {
+                Some(base)
+            }
+        })
+        .or_else(|| match provider_id.as_str() {
+            "openai" => Some("https://api.openai.com".to_string()),
+            "anthropic" | "claude-code" | "anthropic-cli" => {
+                Some("https://api.anthropic.com".to_string())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| format!("Provider {} has no base URL", provider_id))?;
+
+    let timeout_secs = provider_config
+        .details
+        .test_timeout_secs
+        .or_else(|| primary_endpoint.and_then(|item| item.timeout_ms.map(|ms| ms / 1000)))
+        .unwrap_or(60)
+        .clamp(1, 180) as u64;
+    let timeout = Duration::from_secs(timeout_secs);
+    let mut request_headers =
+        parse_headers(primary_endpoint.and_then(|item| item.headers.as_deref()));
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let is_anthropic = matches!(
+        provider_id.as_str(),
+        "anthropic" | "claude-code" | "anthropic-cli"
+    ) || endpoint_base.contains("anthropic.com");
+    let tested_url = if is_anthropic {
+        provider_endpoint_url(&endpoint_base, "messages")
+    } else {
+        provider_endpoint_url(&endpoint_base, "chat/completions")
+    };
+
+    let started = Instant::now();
+    let response = if is_anthropic {
+        if !credential_key.is_empty() && !request_headers.contains_key("x-api-key") {
+            if let Ok(value) = HeaderValue::from_str(&credential_key) {
+                request_headers.insert("x-api-key", value);
+            }
+        }
+        if !request_headers.contains_key("anthropic-version") {
+            request_headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        }
+        let payload = json!({
+            "model": model_name,
+            "max_tokens": 256,
+            "messages": [
+                { "role": "user", "content": prompt_text }
+            ]
+        });
+        client
+            .post(&tested_url)
+            .headers(request_headers)
+            .header("content-type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+    } else {
+        if !credential_key.is_empty() {
+            if !request_headers.contains_key(AUTHORIZATION) {
+                let bearer = format!("Bearer {}", credential_key);
+                if let Ok(value) = HeaderValue::from_str(&bearer) {
+                    request_headers.insert(AUTHORIZATION, value);
+                }
+            }
+            if !request_headers.contains_key("x-api-key") {
+                if let Ok(value) = HeaderValue::from_str(&credential_key) {
+                    request_headers.insert("x-api-key", value);
+                }
+            }
+        }
+        let payload = json!({
+            "model": model_name,
+            "messages": [
+                { "role": "user", "content": prompt_text }
+            ],
+            "stream": false,
+        });
+        client
+            .post(&tested_url)
+            .headers(request_headers)
+            .header("content-type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+    }
+    .map_err(|e| format!("无法连接供应商：{}", e))?;
+
+    let latency_ms = started.elapsed().as_millis() as i64;
+    let status = response.status();
+    let status_code = status.as_u16();
+    let raw = response.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<Value>(&raw).ok();
+    if !status.is_success() {
+        let detail = parsed
+            .as_ref()
+            .and_then(extract_error_message)
+            .unwrap_or_else(|| truncate_text(&raw, 220));
+        return Ok(AiModelTestResult {
+            provider: provider_id,
+            model: model_name,
+            success: false,
+            status_code: Some(status_code),
+            latency_ms,
+            text: detail,
+            tested_url: Some(tested_url),
+        });
+    }
+
+    let text = parsed
+        .as_ref()
+        .and_then(extract_model_test_text)
+        .unwrap_or_else(|| {
+            let fallback = truncate_text(&raw, 400);
+            if fallback.is_empty() {
+                "模型返回为空".to_string()
+            } else {
+                fallback
+            }
+        });
+    Ok(AiModelTestResult {
+        provider: provider_id,
+        model: model_name,
+        success: true,
+        status_code: Some(status_code),
+        latency_ms,
+        text,
+        tested_url: Some(tested_url),
+    })
+}
+
+#[tauri::command]
 pub fn set_provider_active(
     provider: String,
     is_active: bool,
@@ -5638,6 +6132,141 @@ pub async fn compute_gateway_admin_request(
     Ok(text)
 }
 
+/// Multi-tenant: register/login this operator with the gateway using the local
+/// signing key (generated + kept in the vault). Signs an EIP-191 challenge; the
+/// gateway recovers the address and issues an operator session, stored locally.
+#[tauri::command]
+pub async fn compute_gateway_operator_connect(
+    gateway_url: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let (privkey, address) = {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+        let key = match vault.get_or_create_operator_key() {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("[op-connect] get_or_create_operator_key FAILED: {e}");
+                return Err(e);
+            }
+        };
+        let addr = crate::operator_key::address_from_key(&key)?;
+        (key, addr)
+    };
+    eprintln!("[op-connect] operator address={address}");
+    let issued = chrono::Local::now().to_rfc3339();
+    let challenge = format!("MyKey operator auth\naddress: {address}\nissued: {issued}");
+    let sig = crate::operator_key::eip191_sign(&privkey, &challenge)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = format!("{}/operator/register", gateway_url.trim_end_matches('/'));
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(json!({ "address": address, "challenge": challenge, "sig": sig }).to_string())
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("operator_register HTTP {}: {}", status.as_u16(), text));
+    }
+    let body: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let session = body
+        .get("session_token")
+        .and_then(Value::as_str)
+        .ok_or("operator_register missing session_token")?
+        .to_string();
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        vault.set_operator_session(&session)?;
+    }
+    Ok(json!({ "operator_id": body.get("operator_id"), "address": address }))
+}
+
+/// Make an operator-scoped gateway request using the stored operator session.
+#[tauri::command]
+pub async fn compute_gateway_operator_request(
+    gateway_url: String,
+    method: String,
+    path: String,
+    body: Option<String>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let session = {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+        vault
+            .get_operator_session()?
+            .ok_or("operator_not_connected")?
+    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = format!("{}{}", gateway_url.trim_end_matches('/'), path);
+    let mut req = match method.to_uppercase().as_str() {
+        "GET" => client.get(&url),
+        "POST" => client.post(&url),
+        "PATCH" => client.patch(&url),
+        other => return Err(format!("unsupported method: {other}")),
+    };
+    req = req
+        .header("x-operator-session", session)
+        .header("Content-Type", "application/json");
+    if let Some(payload) = body {
+        req = req.body(payload);
+    }
+    let response = req.send().await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("gateway HTTP {}: {}", status.as_u16(), text));
+    }
+    Ok(text)
+}
+
+#[tauri::command]
+pub fn get_compute_gateway_settings(
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<ComputeGatewayVaultSettings, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    let (gateway_url, admin_token) = vault.get_compute_gateway_settings()?;
+    Ok(ComputeGatewayVaultSettings {
+        gateway_url,
+        admin_token,
+        source: "vault".to_string(),
+    })
+}
+
+#[tauri::command]
+pub fn set_compute_gateway_settings(
+    gateway_url: String,
+    admin_token: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    vault.set_compute_gateway_settings(&gateway_url, &admin_token)
+}
+
 #[tauri::command]
 pub fn backup_now(
     target_dir: Option<String>,
@@ -5729,6 +6358,41 @@ pub fn open_path(path: String) -> Result<bool, String> {
     let status = cmd.status().map_err(|e| e.to_string())?;
     if !status.success() {
         return Err(format!("Failed to open path: {}", target.display()));
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<bool, String> {
+    let trimmed = url.trim();
+    if !trimmed.starts_with(&format!("http://localhost:{}/", PASSKEY_BRIDGE_PORT)) {
+        return Err("Refusing to open non-MyKey URL".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut command = Command::new("/usr/bin/open");
+        command.arg(trimmed);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", trimmed]);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut command = Command::new("xdg-open");
+        command.arg(trimmed);
+        command
+    };
+
+    let status = cmd.status().map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(format!("Failed to open URL: {trimmed}"));
     }
     Ok(true)
 }
@@ -5861,6 +6525,56 @@ pub fn update_crypto_token_balance(
         return Err("Invalid master password".to_string());
     }
     vault.update_crypto_token_balance(&token_id, balance)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CryptoTokenUpsert {
+    token_id: Option<String>,
+    wallet_id: String,
+    account_id: Option<String>,
+    chain: String,
+    network: String,
+    symbol: String,
+    contract_address: Option<String>,
+    decimals: Option<i64>,
+    balance: Option<String>,
+}
+
+/// Upsert many crypto tokens in a single call, authenticating the vault ONCE.
+/// add_crypto_token / update_crypto_token_balance each run an argon2 verify in
+/// authenticate(); a full-chain scan returning N tokens did N serial argon2
+/// verifies on the frontend and froze the Crypto view. This does exactly one.
+#[tauri::command]
+pub fn upsert_crypto_tokens_batch(
+    items: Vec<CryptoTokenUpsert>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<CryptoToken>, String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    let mut results = Vec::with_capacity(items.len());
+    for item in items {
+        let token = match item.token_id {
+            Some(token_id) => {
+                vault.update_crypto_token_balance(&token_id, item.balance.unwrap_or_default())?
+            }
+            None => vault.add_crypto_token(
+                item.wallet_id,
+                item.account_id,
+                item.chain,
+                item.network,
+                item.symbol,
+                item.contract_address,
+                item.decimals,
+                item.balance,
+            )?,
+        };
+        results.push(token);
+    }
+    Ok(results)
 }
 
 #[tauri::command]
@@ -6244,6 +6958,1355 @@ pub async fn discover_oklink_address_assets(
     }
 
     Ok(discovered)
+}
+
+/// Resolve the wallet's Alchemy/OKLink API keys. Priority: hand-editable `.env`
+/// (wallet-keys.env beside the vault) over the encrypted vault copy. Returns the raw
+/// keys plus the source so the UI can show where each came from.
+#[tauri::command]
+pub fn get_wallet_api_keys(
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<WalletApiKeys, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    let env = vault.wallet_env_keys();
+    let resolve = |env_name: &str, vault_name: &str| -> (String, String) {
+        if let Some(value) = env
+            .get(env_name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return (value, "env".to_string());
+        }
+        if let Some(value) = vault.get_wallet_api_key_vault(vault_name) {
+            return (value, "vault".to_string());
+        }
+        (String::new(), "none".to_string())
+    };
+    let (alchemy, alchemy_source) = resolve("ALCHEMY_API_KEY", "alchemy");
+    let (oklink, oklink_source) = resolve("OKLINK_API_KEY", "oklink");
+    Ok(WalletApiKeys {
+        alchemy,
+        oklink,
+        alchemy_source,
+        oklink_source,
+        env_path: vault.wallet_env_path_string(),
+    })
+}
+
+/// Persist a wallet API key into the encrypted vault. `.env` always wins on read,
+/// so a vault value is only used when `.env` does not define that key.
+#[tauri::command]
+pub fn set_wallet_api_key(
+    name: String,
+    value: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    let name = name.trim().to_ascii_lowercase();
+    if name != "alchemy" && name != "oklink" {
+        return Err("Unknown wallet API key name".to_string());
+    }
+    vault.set_wallet_api_key(&name, &value)
+}
+
+/// Multi-chain token + native balance discovery via Alchemy's Portfolio (Data) API.
+/// One REST call returns every requested network's holdings with metadata and USD prices,
+/// so the wallet can pull "all tokens across all chains" without a per-chain RPC loop.
+#[tauri::command]
+pub async fn fetch_alchemy_portfolio_tokens(
+    api_key: String,
+    owner_address: String,
+    networks: Vec<String>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<AlchemyPortfolioToken>, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err("Alchemy API key is required".to_string());
+    }
+    let owner_address = normalize_evm_address(&owner_address)?;
+    let networks: Vec<String> = networks
+        .into_iter()
+        .map(|network| network.trim().to_string())
+        .filter(|network| !network.is_empty())
+        .collect();
+    if networks.is_empty() {
+        return Err("At least one Alchemy network id is required".to_string());
+    }
+
+    // 15s per-request cap: portfolio POST + per-token TrustWallet verify share this
+    // client. 40s let a single Cloudflare-gated TrustWallet call stall the whole
+    // serial scan; 15s fails slow calls fast (token just shows unverified).
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = format!("https://api.g.alchemy.com/data/v1/{api_key}/assets/tokens/by-address");
+
+    let mut discovered = Vec::new();
+    let mut page_key: Option<String> = None;
+    for _ in 0..10 {
+        let mut body = json!({
+            "addresses": [{ "address": owner_address, "networks": networks }],
+            "withMetadata": true,
+            "withPrices": true,
+            "includeNativeTokens": true,
+        });
+        if let Some(ref key) = page_key {
+            body["pageKey"] = json!(key);
+        }
+        let response = client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = response.status();
+        let text = response.text().await.map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            return Err(format!("Alchemy Portfolio HTTP error {status}: {text}"));
+        }
+        let payload: Value =
+            serde_json::from_str(&text).map_err(|e| format!("Invalid Portfolio response: {e}"))?;
+        let data = payload.get("data").cloned().unwrap_or(Value::Null);
+        if let Some(tokens) = data.get("tokens").and_then(Value::as_array) {
+            // Verify TrustWallet assets with bounded concurrency instead of a serial
+            // per-token await. The serial verify against the Cloudflare-gated endpoint
+            // (up to 300 tokens, each capped at 15s) was the dominant cause of the
+            // Crypto view hanging on scan. 12-at-a-time keeps it polite to GitHub raw.
+            const VERIFY_CONCURRENCY: usize = 12;
+            let parsed: Vec<AlchemyPortfolioToken> =
+                tokens.iter().filter_map(parse_portfolio_token).collect();
+            let mut parsed_iter = parsed.into_iter();
+            loop {
+                let batch: Vec<AlchemyPortfolioToken> =
+                    parsed_iter.by_ref().take(VERIFY_CONCURRENCY).collect();
+                if batch.is_empty() {
+                    break;
+                }
+                let mut handles = Vec::with_capacity(batch.len());
+                for token in batch {
+                    if token.is_spam {
+                        // Spam tokens are returned unverified (frontend hides them);
+                        // no need to spend a TrustWallet request on them.
+                        discovered.push(token);
+                        continue;
+                    }
+                    let client = client.clone();
+                    handles.push(tokio::spawn(async move {
+                        let mut token = token;
+                        let asset = verify_trustwallet_asset_with_client(
+                            &client,
+                            &token.chain,
+                            token.contract_address.as_deref(),
+                        )
+                        .await;
+                        token.trust_wallet_verified = asset.verified;
+                        token.trust_wallet_info_url = asset.info_url;
+                        token.trust_wallet_logo_url = asset.logo_url;
+                        token.contract_checksum =
+                            asset.contract_checksum.or(token.contract_checksum);
+                        token
+                    }));
+                }
+                for handle in handles {
+                    if let Ok(token) = handle.await {
+                        discovered.push(token);
+                    }
+                }
+            }
+        }
+        page_key = data
+            .get("pageKey")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(str::to_string);
+        if page_key.is_none() || discovered.len() >= 300 {
+            break;
+        }
+    }
+    Ok(discovered)
+}
+
+/// Map an Alchemy network id (e.g. `eth-mainnet`, `matic-mainnet`) to the app's
+/// (chain, network) pair. Polygon is returned as `matic-mainnet` even when requested
+/// as `polygon-mainnet`, so both aliases are handled.
+fn map_alchemy_network(network: &str) -> (String, String) {
+    let pair = match network {
+        "eth-mainnet" => ("ETHEREUM", "MAINNET"),
+        "eth-sepolia" => ("ETHEREUM", "SEPOLIA"),
+        "base-mainnet" => ("BASE", "MAINNET"),
+        "base-sepolia" => ("BASE", "SEPOLIA"),
+        "arb-mainnet" => ("ARBITRUM", "MAINNET"),
+        "arb-sepolia" => ("ARBITRUM", "SEPOLIA"),
+        "opt-mainnet" => ("OPTIMISM", "MAINNET"),
+        "opt-sepolia" => ("OPTIMISM", "SEPOLIA"),
+        "matic-mainnet" | "polygon-mainnet" => ("POLYGON", "MAINNET"),
+        "matic-amoy" | "polygon-amoy" => ("POLYGON", "AMOY"),
+        other => return (other.to_ascii_uppercase(), "MAINNET".to_string()),
+    };
+    (pair.0.to_string(), pair.1.to_string())
+}
+
+fn native_symbol_for_chain(chain: &str) -> &'static str {
+    match chain {
+        "POLYGON" => "MATIC",
+        _ => "ETH",
+    }
+}
+
+/// Map the app chain to the trustwallet/assets blockchain folder name.
+fn trustwallet_chain(chain: &str) -> Option<&'static str> {
+    match chain {
+        "ETHEREUM" => Some("ethereum"),
+        "BASE" => Some("base"),
+        "ARBITRUM" => Some("arbitrum"),
+        "OPTIMISM" => Some("optimism"),
+        "POLYGON" => Some("polygon"),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TrustWalletAssetUrls {
+    info_url: String,
+    logo_url: String,
+}
+
+const TRUSTWALLET_RAW_BASE: &str =
+    "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains";
+
+fn trustwallet_asset_urls(
+    chain: &str,
+    contract_checksum: Option<&str>,
+) -> Option<TrustWalletAssetUrls> {
+    let normalized_chain = chain.trim().to_ascii_uppercase();
+    let tw = trustwallet_chain(&normalized_chain)?;
+    let base = match contract_checksum
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(checksum) => format!("{TRUSTWALLET_RAW_BASE}/{tw}/assets/{checksum}"),
+        None => format!("{TRUSTWALLET_RAW_BASE}/{tw}/info"),
+    };
+    Some(TrustWalletAssetUrls {
+        info_url: format!("{base}/info.json"),
+        logo_url: format!("{base}/logo.png"),
+    })
+}
+
+async fn trustwallet_url_exists(client: &reqwest::Client, url: &str) -> bool {
+    match client.head(url).send().await {
+        Ok(response) if response.status().is_success() => return true,
+        Ok(response) if response.status() != reqwest::StatusCode::METHOD_NOT_ALLOWED => {
+            return false
+        }
+        _ => {}
+    }
+    client
+        .get(url)
+        .send()
+        .await
+        .map(|response| response.status().is_success())
+        .unwrap_or(false)
+}
+
+async fn verify_trustwallet_asset_with_client(
+    client: &reqwest::Client,
+    chain: &str,
+    contract_address: Option<&str>,
+) -> TrustWalletTokenAsset {
+    let chain = chain.trim().to_ascii_uppercase();
+    let contract_checksum = contract_address
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| normalize_evm_address(value).ok())
+        .map(|value| to_eip55_checksum(&value));
+    let Some(urls) = trustwallet_asset_urls(&chain, contract_checksum.as_deref()) else {
+        return TrustWalletTokenAsset {
+            verified: false,
+            chain,
+            contract_checksum,
+            info_url: None,
+            logo_url: None,
+        };
+    };
+    let info_ok = trustwallet_url_exists(client, &urls.info_url).await;
+    let logo_ok = if info_ok {
+        trustwallet_url_exists(client, &urls.logo_url).await
+    } else {
+        false
+    };
+    TrustWalletTokenAsset {
+        verified: info_ok && logo_ok,
+        chain,
+        contract_checksum,
+        info_url: Some(urls.info_url),
+        logo_url: Some(urls.logo_url),
+    }
+}
+
+/// EIP-55 mixed-case checksum of a 0x-prefixed 20-byte address (used to build
+/// trustwallet/imToken asset URLs, which key off the checksummed address).
+fn to_eip55_checksum(address: &str) -> String {
+    use sha3::{Digest, Keccak256};
+    let lower = address.trim_start_matches("0x").to_ascii_lowercase();
+    if lower.len() != 40 || !lower.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return address.to_string();
+    }
+    let hash = Keccak256::digest(lower.as_bytes());
+    let mut out = String::with_capacity(42);
+    out.push_str("0x");
+    for (i, c) in lower.chars().enumerate() {
+        if c.is_ascii_digit() {
+            out.push(c);
+        } else {
+            let byte = hash[i / 2];
+            let nibble = if i % 2 == 0 { byte >> 4 } else { byte & 0x0f };
+            out.push(if nibble >= 8 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            });
+        }
+    }
+    out
+}
+
+/// Heuristic scam-airdrop detector for ERC-20 symbol/name. Scam tokens smuggle a
+/// call-to-action into the metadata (a URL, "claim/reward/airdrop" bait, t.me links,
+/// emoji) or use absurdly long names. Legit tickers are short and contain none of this.
+/// Conservative on TLDs (only the ones that actually show up in spam) to avoid flagging
+/// real names like "yearn.finance".
+fn looks_like_spam(symbol: &str, name: &str) -> bool {
+    let hay = format!("{symbol} {name}").to_lowercase();
+    const NEEDLES: &[&str] = &[
+        "http",
+        "://",
+        "www.",
+        "t.me",
+        ".com",
+        ".xyz",
+        ".vercel",
+        ".supply",
+        ".gifts",
+        ".team",
+        ".tech",
+        ".ltd",
+        ".click",
+        ".eth.li",
+        ".cc/",
+        "claim",
+        "reward",
+        "airdrop",
+        "redeem",
+        "voucher",
+        "giveaway",
+        "bonus",
+        "visit ",
+        "access ",
+        "swap for",
+        "get reward",
+        "entry ticket",
+        "🎁",
+        "✅",
+    ];
+    if NEEDLES.iter().any(|needle| hay.contains(needle)) {
+        return true;
+    }
+    let trimmed = symbol.trim();
+    let len = trimmed.chars().count();
+    // Absurdly long "symbols" are sentences; legit tickers are short.
+    if len > 20 {
+        return true;
+    }
+    // Multi-word symbols ("BIU BULL", "$ CLAIM") are almost always spam.
+    if len > 6 && trimmed.contains(' ') {
+        return true;
+    }
+    false
+}
+
+fn parse_portfolio_token(item: &Value) -> Option<AlchemyPortfolioToken> {
+    let network = item.get("network").and_then(Value::as_str)?.to_string();
+    let (chain, chain_network) = map_alchemy_network(&network);
+
+    let balance_hex = item.get("tokenBalance").and_then(Value::as_str)?;
+    let balance_raw = hex_quantity_to_decimal(balance_hex).ok()?;
+    if balance_raw == "0" {
+        return None;
+    }
+
+    let contract_address = item
+        .get("tokenAddress")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| normalize_evm_address(value).ok());
+
+    let metadata = item.get("tokenMetadata").cloned().unwrap_or(Value::Null);
+    let decimals = metadata
+        .get("decimals")
+        .and_then(Value::as_i64)
+        .unwrap_or(18)
+        .clamp(0, 36);
+    let symbol = metadata
+        .get("symbol")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_uppercase)
+        .unwrap_or_else(|| {
+            if contract_address.is_none() {
+                native_symbol_for_chain(&chain).to_string()
+            } else {
+                "TOKEN".to_string()
+            }
+        });
+
+    let token_name = metadata.get("name").and_then(Value::as_str).unwrap_or("");
+    // Native coins are never spam; only flag contract tokens.
+    let is_spam = contract_address.is_some() && looks_like_spam(&symbol, token_name);
+
+    let logo = metadata
+        .get("logo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let contract_checksum = contract_address.as_deref().map(to_eip55_checksum);
+
+    let balance = format_base_unit_decimal(&balance_raw, decimals);
+
+    let price_usd = item
+        .get("tokenPrices")
+        .and_then(Value::as_array)
+        .and_then(|prices| {
+            prices
+                .iter()
+                .find(|price| price.get("currency").and_then(Value::as_str) == Some("usd"))
+                .or_else(|| prices.first())
+        })
+        .and_then(|price| price.get("value").and_then(Value::as_str))
+        .map(str::to_string);
+
+    let value_usd = match (price_usd.as_deref(), balance.parse::<f64>()) {
+        (Some(price), Ok(amount)) => price
+            .parse::<f64>()
+            .ok()
+            .map(|price| format!("{:.2}", price * amount)),
+        _ => None,
+    };
+
+    Some(AlchemyPortfolioToken {
+        network,
+        chain,
+        chain_network,
+        contract_address,
+        symbol,
+        decimals,
+        balance,
+        balance_raw,
+        price_usd,
+        value_usd,
+        is_spam,
+        logo,
+        contract_checksum,
+        trust_wallet_verified: false,
+        trust_wallet_info_url: None,
+        trust_wallet_logo_url: None,
+    })
+}
+
+#[tauri::command]
+pub async fn verify_trustwallet_token_asset(
+    chain: String,
+    contract_address: Option<String>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<TrustWalletTokenAsset, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(verify_trustwallet_asset_with_client(&client, &chain, contract_address.as_deref()).await)
+}
+
+/// Fetch a token's name/description/links from trustwallet/assets (then imToken
+/// token-profile as fallback). Both key off the EIP-55 checksummed contract address.
+#[tauri::command]
+pub async fn fetch_token_info(
+    chain: String,
+    contract_address: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<TokenInfo, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let chain = chain.trim().to_ascii_uppercase();
+    let checksum = to_eip55_checksum(&normalize_evm_address(&contract_address)?);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let fetch_json = |url: String| {
+        let client = client.clone();
+        async move {
+            let resp = client.get(&url).send().await.ok()?;
+            if !resp.status().is_success() {
+                return None;
+            }
+            resp.json::<Value>().await.ok()
+        }
+    };
+
+    // 1) Trust Wallet info.json
+    if let Some(tw) = trustwallet_chain(&chain) {
+        let url = format!(
+            "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/{tw}/assets/{checksum}/info.json"
+        );
+        if let Some(json) = fetch_json(url).await {
+            let get = |key: &str| {
+                json.get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty() && *value != "-")
+                    .map(str::to_string)
+            };
+            return Ok(TokenInfo {
+                name: get("name"),
+                symbol: get("symbol"),
+                description: get("description"),
+                website: get("website"),
+                explorer: get("explorer"),
+                source: "trustwallet".to_string(),
+            });
+        }
+    }
+
+    // 2) imToken token-profile (Ethereum ERC-20 only)
+    if chain == "ETHEREUM" {
+        let url = format!(
+            "https://raw.githubusercontent.com/consenlabs/token-profile/master/erc20/{checksum}.json"
+        );
+        if let Some(json) = fetch_json(url).await {
+            let get = |key: &str| {
+                json.get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            };
+            let overview = json
+                .get("overview")
+                .and_then(|o| o.get("en"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| get("description"));
+            return Ok(TokenInfo {
+                name: get("name"),
+                symbol: get("symbol"),
+                description: overview,
+                website: get("website"),
+                explorer: json
+                    .get("links")
+                    .and_then(|l| l.get("explorer"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                source: "imtoken".to_string(),
+            });
+        }
+    }
+
+    Err("未在 Trust Wallet / imToken 资料库中找到该代币的介绍。".to_string())
+}
+
+/// Build the Alchemy JSON-RPC URL for a network id (host prefix, e.g. `eth-mainnet`).
+fn alchemy_network_rpc_url(network: &str, api_key: &str) -> String {
+    format!("https://{network}.g.alchemy.com/v2/{api_key}")
+}
+
+/// Convert `ipfs://`/`ar://` media URIs to an HTTPS gateway so `<img>` can load them.
+fn normalize_media_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if let Some(rest) = trimmed.strip_prefix("ipfs://") {
+        let rest = rest.strip_prefix("ipfs/").unwrap_or(rest);
+        return format!("https://ipfs.io/ipfs/{rest}");
+    }
+    if let Some(rest) = trimmed.strip_prefix("ar://") {
+        return format!("https://arweave.net/{rest}");
+    }
+    trimmed.to_string()
+}
+
+/// NFTs owned by an address across the given Alchemy networks (NFT API v3).
+#[tauri::command]
+pub async fn fetch_alchemy_nfts(
+    api_key: String,
+    owner_address: String,
+    networks: Vec<String>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<AlchemyNft>, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err("Alchemy API key is required".to_string());
+    }
+    let owner_address = normalize_evm_address(&owner_address)?;
+    let networks: Vec<String> = networks
+        .into_iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if networks.is_empty() {
+        return Err("At least one Alchemy network id is required".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut out = Vec::new();
+    for network in &networks {
+        if out.len() >= 120 {
+            break;
+        }
+        let url = format!(
+            "https://{network}.g.alchemy.com/nft/v3/{api_key}/getNFTsForOwner?owner={owner_address}&withMetadata=true&pageSize=40&excludeFilters[]=SPAM"
+        );
+        let response = match client.get(&url).send().await {
+            Ok(resp) => resp,
+            Err(_) => continue,
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(payload) = response.json::<Value>().await else {
+            continue;
+        };
+        let (chain, chain_network) = map_alchemy_network(network);
+        if let Some(items) = payload.get("ownedNfts").and_then(Value::as_array) {
+            for item in items {
+                let Some(contract_address) = item
+                    .get("contract")
+                    .and_then(|c| c.get("address"))
+                    .and_then(Value::as_str)
+                    .and_then(|v| normalize_evm_address(v).ok())
+                else {
+                    continue;
+                };
+                let token_id = item
+                    .get("tokenId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let token_type = item
+                    .get("tokenType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("UNKNOWN")
+                    .to_string();
+                let collection = item
+                    .get("contract")
+                    .and_then(|c| c.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        item.get("collection")
+                            .and_then(|c| c.get("name"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    });
+                let name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        let label = collection.clone().unwrap_or_else(|| "NFT".to_string());
+                        if token_id.is_empty() {
+                            label
+                        } else {
+                            format!("{label} #{}", token_id_short(&token_id))
+                        }
+                    });
+                let image = item.get("image").cloned().unwrap_or(Value::Null);
+                let image_url = ["thumbnailUrl", "cachedUrl", "pngUrl", "originalUrl"]
+                    .iter()
+                    .find_map(|key| {
+                        image
+                            .get(*key)
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                    })
+                    .map(normalize_media_url);
+                let description = item
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.chars().take(280).collect::<String>());
+                out.push(AlchemyNft {
+                    network: network.clone(),
+                    chain: chain.clone(),
+                    chain_network: chain_network.clone(),
+                    contract_address,
+                    token_id,
+                    token_type,
+                    name,
+                    collection,
+                    image_url,
+                    description,
+                });
+                if out.len() >= 120 {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn token_id_short(token_id: &str) -> String {
+    if token_id.len() > 8 {
+        format!("{}…", &token_id[..6])
+    } else {
+        token_id.to_string()
+    }
+}
+
+/// Recent asset transfers (sent + received) for an address across Alchemy networks.
+/// Uses `alchemy_getAssetTransfers`; merges both directions and sorts newest first.
+#[tauri::command]
+pub async fn fetch_alchemy_transfers(
+    api_key: String,
+    owner_address: String,
+    networks: Vec<String>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<AlchemyTransfer>, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err("Alchemy API key is required".to_string());
+    }
+    let owner_address = normalize_evm_address(&owner_address)?;
+    let owner_lower = owner_address.to_ascii_lowercase();
+    let networks: Vec<String> = networks
+        .into_iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if networks.is_empty() {
+        return Err("At least one Alchemy network id is required".to_string());
+    }
+
+    let categories = json!(["external", "erc20", "erc721", "erc1155"]);
+    let mut out: Vec<(u128, AlchemyTransfer)> = Vec::new();
+
+    for network in &networks {
+        let rpc_url = alchemy_network_rpc_url(network, api_key);
+        let (chain, chain_network) = map_alchemy_network(network);
+        for direction_key in ["fromAddress", "toAddress"] {
+            let mut params = serde_json::Map::new();
+            params.insert("fromBlock".to_string(), json!("0x0"));
+            params.insert("toBlock".to_string(), json!("latest"));
+            params.insert(direction_key.to_string(), json!(owner_address));
+            params.insert("category".to_string(), categories.clone());
+            params.insert("withMetadata".to_string(), json!(true));
+            params.insert("excludeZeroValue".to_string(), json!(false));
+            params.insert("maxCount".to_string(), json!("0x19"));
+            params.insert("order".to_string(), json!("desc"));
+            let response =
+                match call_evm_rpc(&rpc_url, "alchemy_getAssetTransfers", json!([params])).await {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                };
+            let Some(transfers) = response
+                .get("result")
+                .and_then(|r| r.get("transfers"))
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            for item in transfers {
+                let Some(hash) = item.get("hash").and_then(Value::as_str) else {
+                    continue;
+                };
+                let from = item
+                    .get("from")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let to = item.get("to").and_then(Value::as_str).map(str::to_string);
+                let from_lc = from.to_ascii_lowercase();
+                let to_lc = to.as_deref().unwrap_or("").to_ascii_lowercase();
+                let direction = if from_lc == owner_lower && to_lc == owner_lower {
+                    "self"
+                } else if from_lc == owner_lower {
+                    "out"
+                } else {
+                    "in"
+                };
+                let block_hex = item
+                    .get("blockNum")
+                    .and_then(Value::as_str)
+                    .unwrap_or("0x0");
+                let block_sort =
+                    u128::from_str_radix(block_hex.strip_prefix("0x").unwrap_or(block_hex), 16)
+                        .unwrap_or(0);
+                let value = item.get("value").and_then(|v| {
+                    if v.is_number() {
+                        Some(v.to_string())
+                    } else {
+                        v.as_str().map(str::to_string)
+                    }
+                });
+                let asset = item
+                    .get("asset")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string);
+                let timestamp = item
+                    .get("metadata")
+                    .and_then(|m| m.get("blockTimestamp"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let category = item
+                    .get("category")
+                    .and_then(Value::as_str)
+                    .unwrap_or("external")
+                    .to_string();
+                out.push((
+                    block_sort,
+                    AlchemyTransfer {
+                        network: network.clone(),
+                        chain: chain.clone(),
+                        chain_network: chain_network.clone(),
+                        hash: hash.to_string(),
+                        block_num: block_sort.to_string(),
+                        from_address: from,
+                        to_address: to,
+                        value,
+                        asset,
+                        category,
+                        direction: direction.to_string(),
+                        timestamp,
+                    },
+                ));
+            }
+        }
+    }
+
+    // Dedupe by hash+direction+asset (a tx can appear in both from/to scans), newest first.
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for (_, transfer) in out {
+        let key = format!(
+            "{}|{}|{}",
+            transfer.hash,
+            transfer.direction,
+            transfer.asset.clone().unwrap_or_default()
+        );
+        if seen.insert(key) {
+            result.push(transfer);
+        }
+        if result.len() >= 80 {
+            break;
+        }
+    }
+    Ok(result)
+}
+
+/// Generic read-only `eth_call` proxy (e.g. ERC-20 allowance/decimals). Returns the
+/// raw hex result. Write paths still go through sign + broadcast.
+#[tauri::command]
+pub async fn crypto_evm_call(
+    rpc_url: String,
+    to: String,
+    data: String,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let to = normalize_evm_address(&to)?;
+    let data = normalize_hex_payload(&data, "call data")?;
+    let response = call_evm_rpc(
+        &rpc_url,
+        "eth_call",
+        json!([{ "to": to, "data": data }, "latest"]),
+    )
+    .await?;
+    response
+        .get("result")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| rpc_error_message(&response))
+}
+
+// --- Uniswap on-chain (V3) ABI encoding helpers ---
+
+fn swap_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        s.push_str(&format!("{byte:02x}"));
+    }
+    s
+}
+
+fn word_u128(value: u128) -> [u8; 32] {
+    let mut word = [0u8; 32];
+    word[16..32].copy_from_slice(&value.to_be_bytes());
+    word
+}
+
+fn word_address(addr: &str) -> Result<[u8; 32], String> {
+    let normalized = normalize_evm_address(addr)?;
+    let raw = &normalized[2..];
+    let mut word = [0u8; 32];
+    for i in 0..20 {
+        word[12 + i] = u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16)
+            .map_err(|_| "bad address byte".to_string())?;
+    }
+    Ok(word)
+}
+
+/// Parse the first 32-byte ABI word of an `eth_call` result as a u128 amount.
+fn parse_first_word_u128(result: &str) -> Option<u128> {
+    let raw = result.strip_prefix("0x").unwrap_or(result);
+    if raw.len() < 64 {
+        return None;
+    }
+    let trimmed = raw[..64].trim_start_matches('0');
+    if trimmed.is_empty() {
+        return Some(0);
+    }
+    // Skip tiers whose output overflows u128 (astronomically large; effectively never).
+    u128::from_str_radix(trimmed, 16).ok()
+}
+
+fn uniswap_weth(chain_id: u64) -> Option<&'static str> {
+    Some(match chain_id {
+        1 => "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        8453 => "0x4200000000000000000000000000000000000006",
+        42161 => "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+        10 => "0x4200000000000000000000000000000000000006",
+        137 => "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+        _ => return None,
+    })
+}
+
+fn uniswap_quoter_v2(chain_id: u64) -> Option<&'static str> {
+    Some(match chain_id {
+        8453 => "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
+        1 | 42161 | 10 | 137 => "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
+        _ => return None,
+    })
+}
+
+fn uniswap_router02(chain_id: u64) -> Option<&'static str> {
+    Some(match chain_id {
+        8453 => "0x2626664c2603336E57B271c5C0b26F421741e481",
+        1 | 42161 | 10 | 137 => "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
+        _ => return None,
+    })
+}
+
+fn encode_exact_input_single(
+    token_in: &str,
+    token_out: &str,
+    fee: u32,
+    recipient: &str,
+    amount_in: u128,
+    amount_out_min: u128,
+) -> Result<Vec<u8>, String> {
+    let mut data = vec![0x04, 0xe4, 0x5a, 0xaf]; // exactInputSingle((...))
+    data.extend_from_slice(&word_address(token_in)?);
+    data.extend_from_slice(&word_address(token_out)?);
+    data.extend_from_slice(&word_u128(fee as u128));
+    data.extend_from_slice(&word_address(recipient)?);
+    data.extend_from_slice(&word_u128(amount_in));
+    data.extend_from_slice(&word_u128(amount_out_min));
+    data.extend_from_slice(&word_u128(0)); // sqrtPriceLimitX96
+    Ok(data)
+}
+
+fn encode_unwrap_weth9(amount_min: u128, recipient: &str) -> Result<Vec<u8>, String> {
+    let mut data = vec![0x49, 0x40, 0x4b, 0x7c]; // unwrapWETH9(uint256,address)
+    data.extend_from_slice(&word_u128(amount_min));
+    data.extend_from_slice(&word_address(recipient)?);
+    Ok(data)
+}
+
+fn encode_multicall(elems: &[Vec<u8>]) -> Vec<u8> {
+    let mut data = vec![0xac, 0x96, 0x50, 0xd8]; // multicall(bytes[])
+    data.extend_from_slice(&word_u128(0x20)); // offset to array
+    data.extend_from_slice(&word_u128(elems.len() as u128)); // array length
+    let mut offset = (elems.len() as u128) * 32;
+    let mut tails: Vec<u8> = Vec::new();
+    for elem in elems {
+        data.extend_from_slice(&word_u128(offset));
+        let padded = ((elem.len() + 31) / 32) * 32;
+        tails.extend_from_slice(&word_u128(elem.len() as u128));
+        let mut bytes = elem.clone();
+        bytes.resize(padded, 0);
+        tails.extend_from_slice(&bytes);
+        offset += 32 + padded as u128;
+    }
+    data.extend_from_slice(&tails);
+    data
+}
+
+/// Self-contained Uniswap V3 quote/swap built from QuoterV2 + SwapRouter02 (no
+/// external API). Quotes the best of the 0.05% / 0.3% / 1% fee tiers, then returns
+/// the SwapRouter02 calldata. Native input is wrapped automatically; native output
+/// goes through `multicall([swap, unwrapWETH9])`.
+async fn onchain_uniswap_quote(
+    rpc_url: &str,
+    chain_id: u64,
+    token_in: &str,
+    token_out: &str,
+    amount_in: u128,
+    recipient: &str,
+    slippage_bps: u32,
+) -> Result<UniswapSwapQuote, String> {
+    if rpc_url.trim().is_empty() {
+        return Err("on-chain Uniswap quote needs an RPC URL".to_string());
+    }
+    let weth = uniswap_weth(chain_id)
+        .ok_or_else(|| format!("Uniswap V3 not configured for chainId {chain_id}"))?;
+    let quoter = uniswap_quoter_v2(chain_id)
+        .ok_or_else(|| format!("Uniswap V3 not configured for chainId {chain_id}"))?;
+    let router = uniswap_router02(chain_id)
+        .ok_or_else(|| format!("Uniswap V3 not configured for chainId {chain_id}"))?;
+
+    let native_in = token_in.eq_ignore_ascii_case("ETH");
+    let native_out = token_out.eq_ignore_ascii_case("ETH");
+    let quote_in = if native_in { weth } else { token_in };
+    let quote_out = if native_out { weth } else { token_out };
+
+    let mut best: Option<(u128, u32)> = None;
+    for fee in [500u32, 3000, 10000] {
+        let mut data = vec![0xc6, 0xa5, 0x02, 0x6a]; // quoteExactInputSingle((...))
+        data.extend_from_slice(&word_address(quote_in)?);
+        data.extend_from_slice(&word_address(quote_out)?);
+        data.extend_from_slice(&word_u128(amount_in));
+        data.extend_from_slice(&word_u128(fee as u128));
+        data.extend_from_slice(&word_u128(0));
+        let calldata = format!("0x{}", swap_hex(&data));
+        let response = match call_evm_rpc(
+            rpc_url,
+            "eth_call",
+            json!([{ "to": quoter, "data": calldata }, "latest"]),
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let Some(result) = response.get("result").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(out) = parse_first_word_u128(result) else {
+            continue;
+        };
+        if out == 0 {
+            continue;
+        }
+        if best.map(|(b, _)| out > b).unwrap_or(true) {
+            best = Some((out, fee));
+        }
+    }
+
+    let (amount_out, fee) = best.ok_or_else(|| {
+        "No Uniswap V3 pool/liquidity for this pair on this chain (try a different token or chain).".to_string()
+    })?;
+    let amount_out_min = (amount_out / 10000) * (10000 - slippage_bps as u128);
+
+    // SwapRouter02's ADDRESS_THIS sentinel keeps WETH in the router so unwrapWETH9 can run.
+    let swap_recipient = if native_out {
+        "0x0000000000000000000000000000000000000002"
+    } else {
+        recipient
+    };
+    let exact = encode_exact_input_single(
+        quote_in,
+        quote_out,
+        fee,
+        swap_recipient,
+        amount_in,
+        amount_out_min,
+    )?;
+    let calldata_bytes = if native_out {
+        let unwrap = encode_unwrap_weth9(amount_out_min, recipient)?;
+        encode_multicall(&[exact, unwrap])
+    } else {
+        exact
+    };
+    let value = if native_in {
+        amount_in.to_string()
+    } else {
+        "0".to_string()
+    };
+
+    Ok(UniswapSwapQuote {
+        amount_in: amount_in.to_string(),
+        amount_out: amount_out.to_string(),
+        amount_out_min: amount_out_min.to_string(),
+        quote_decimals: None,
+        estimated_gas: None,
+        to: router.to_string(),
+        calldata: format!("0x{}", swap_hex(&calldata_bytes)),
+        value,
+        router: format!("SwapRouter02 (fee {fee})"),
+        source: "onchain-uniswap-v3".to_string(),
+    })
+}
+
+/// Quote a swap via the Uniswap routing API (returns ready-to-sign methodParameters).
+/// Only used when a gateway `api_base` is configured — the public endpoint is WAF-gated.
+async fn routing_api_quote(
+    api_base: &str,
+    chain_id: &str,
+    token_in: &str,
+    token_out: &str,
+    amount: &str,
+    recipient: &str,
+    slippage_bps: u32,
+    api_key: Option<&str>,
+) -> Result<UniswapSwapQuote, String> {
+    let slippage_pct = format!("{:.2}", slippage_bps as f64 / 100.0);
+    let deadline = (chrono::Utc::now().timestamp() + 1200).to_string();
+    let url = format!("{}/quote", api_base.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut request = client
+        .get(&url)
+        .query(&[
+            ("protocols", "v3,v2,mixed"),
+            ("tokenInAddress", token_in),
+            ("tokenInChainId", chain_id),
+            ("tokenOutAddress", token_out),
+            ("tokenOutChainId", chain_id),
+            ("amount", amount),
+            ("type", "exactIn"),
+            ("recipient", recipient),
+            ("slippageTolerance", slippage_pct.as_str()),
+            ("deadline", deadline.as_str()),
+            ("enableUniversalRouter", "false"),
+        ])
+        .header("origin", "https://app.uniswap.org")
+        .header("referer", "https://app.uniswap.org/")
+        .header("x-request-source", "uniswap-web")
+        .header(
+            "user-agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        );
+    if let Some(key) = api_key.map(str::trim).filter(|k| !k.is_empty()) {
+        request = request.header("x-api-key", key);
+    }
+    let response = request.send().await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "Uniswap routing API HTTP {status}: {}",
+            text.chars().take(200).collect::<String>()
+        ));
+    }
+    let payload: Value =
+        serde_json::from_str(&text).map_err(|e| format!("Invalid routing API response: {e}"))?;
+    let method = payload
+        .get("methodParameters")
+        .ok_or_else(|| "Routing API returned no executable route.".to_string())?;
+    let calldata = method
+        .get("calldata")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Routing API route missing calldata".to_string())?
+        .to_string();
+    let to = method
+        .get("to")
+        .and_then(Value::as_str)
+        .and_then(|v| normalize_evm_address(v).ok())
+        .ok_or_else(|| "Routing API route missing router address".to_string())?;
+    let value_hex = method.get("value").and_then(Value::as_str).unwrap_or("0x0");
+    let value = hex_quantity_to_decimal(value_hex).unwrap_or_else(|_| "0".to_string());
+    let amount_out = payload
+        .get("quote")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| "0".to_string());
+    let amount_out_min = amount_out
+        .parse::<u128>()
+        .ok()
+        .map(|out| (out / 10000) * (10000 - slippage_bps as u128))
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "0".to_string());
+    Ok(UniswapSwapQuote {
+        amount_in: amount.to_string(),
+        amount_out,
+        amount_out_min,
+        quote_decimals: payload
+            .get("quoteDecimals")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        estimated_gas: payload
+            .get("gasUseEstimate")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        to,
+        calldata,
+        value,
+        router: "SwapRouter02".to_string(),
+        source: "uniswap-routing-api".to_string(),
+    })
+}
+
+/// Swap quote + ready-to-sign calldata. Prefers the Uniswap routing API when a
+/// gateway `api_base` is configured (best multi-hop pricing); otherwise — and as a
+/// fallback if the API fails — uses the self-contained on-chain Uniswap V3 path.
+/// `token_in`/`token_out` may be the literal `ETH` for the native coin.
+#[tauri::command]
+pub async fn uniswap_swap_quote(
+    rpc_url: String,
+    chain_id: String,
+    token_in: String,
+    token_out: String,
+    amount_in: String,
+    recipient: String,
+    slippage_bps: Option<u32>,
+    api_base: Option<String>,
+    api_key: Option<String>,
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<UniswapSwapQuote, String> {
+    {
+        let vault = state.vault.lock().map_err(|e| e.to_string())?;
+        if !vault.authenticate(&master_password) {
+            return Err("Invalid master password".to_string());
+        }
+    }
+    let chain_id_str = chain_id.trim().to_string();
+    let chain_id_num = chain_id_str
+        .parse::<u64>()
+        .map_err(|_| "chainId must be a decimal integer".to_string())?;
+    let normalize_token = |token: &str| -> Result<String, String> {
+        let t = token.trim();
+        if t.eq_ignore_ascii_case("eth") || t.eq_ignore_ascii_case("native") {
+            Ok("ETH".to_string())
+        } else {
+            normalize_evm_address(t)
+        }
+    };
+    let token_in = normalize_token(&token_in)?;
+    let token_out = normalize_token(&token_out)?;
+    if token_in == token_out {
+        return Err("Swap tokens must differ".to_string());
+    }
+    let recipient = normalize_evm_address(&recipient)?;
+    let amount = amount_in.trim().to_string();
+    if amount.is_empty() || amount.parse::<u128>().is_err() {
+        return Err("amountIn must be a base-unit decimal".to_string());
+    }
+    let amount_num: u128 = amount.parse().unwrap();
+    let slippage = slippage_bps.unwrap_or(50).clamp(1, 5000);
+
+    let configured_base = api_base
+        .map(|b| b.trim().trim_end_matches('/').to_string())
+        .filter(|b| !b.is_empty());
+
+    // Prefer a configured routing-API gateway; fall back to on-chain on any failure.
+    if let Some(base) = configured_base {
+        match routing_api_quote(
+            &base,
+            &chain_id_str,
+            &token_in,
+            &token_out,
+            &amount,
+            &recipient,
+            slippage,
+            api_key.as_deref(),
+        )
+        .await
+        {
+            Ok(quote) => return Ok(quote),
+            Err(routing_err) => {
+                match onchain_uniswap_quote(
+                    &rpc_url, chain_id_num, &token_in, &token_out, amount_num, &recipient, slippage,
+                )
+                .await
+                {
+                    Ok(quote) => return Ok(quote),
+                    Err(onchain_err) => {
+                        return Err(format!(
+                            "routing API failed ({routing_err}); on-chain fallback failed ({onchain_err})"
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    onchain_uniswap_quote(
+        &rpc_url,
+        chain_id_num,
+        &token_in,
+        &token_out,
+        amount_num,
+        &recipient,
+        slippage,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -7607,5 +9670,43 @@ fn format_env_value(value: &str) -> String {
         format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trustwallet_asset_urls_build_contract_info_and_logo_paths() {
+        let urls = trustwallet_asset_urls(
+            "ETHEREUM",
+            Some("0xdAC17F958D2ee523a2206206994597C13D831ec7"),
+        )
+        .expect("ethereum contract token should have trustwallet urls");
+
+        assert_eq!(
+            urls.info_url,
+            "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0xdAC17F958D2ee523a2206206994597C13D831ec7/info.json"
+        );
+        assert_eq!(
+            urls.logo_url,
+            "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0xdAC17F958D2ee523a2206206994597C13D831ec7/logo.png"
+        );
+    }
+
+    #[test]
+    fn trustwallet_asset_urls_build_native_chain_info_and_logo_paths() {
+        let urls = trustwallet_asset_urls("BASE", None)
+            .expect("base native token should have trustwallet urls");
+
+        assert_eq!(
+            urls.info_url,
+            "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/info/info.json"
+        );
+        assert_eq!(
+            urls.logo_url,
+            "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/info/logo.png"
+        );
     }
 }

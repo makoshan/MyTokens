@@ -15,15 +15,25 @@
     "src/utils/project.ts",
     "src/types/project.ts",
     "src/utils/assetVault.ts",
+    "src/utils/cryptoTransactions.ts",
     "src/utils/alchemyRpc.ts",
     "src/utils/cryptoPortfolio.ts",
+    "src/utils/cryptoWalletCache.ts",
     "src/utils/oklinkApi.ts",
     "src/utils/computeGateway.ts",
+    "src/utils/homeNavigation.ts",
+    "src/utils/clippyModelTesting.ts",
+    "src/utils/vaultUnlock.ts",
     "src/types/compute.ts",
     "tests/assetVault.test.ts",
+    "tests/cryptoTransactions.test.ts",
     "tests/alchemyRpc.test.ts",
     "tests/cryptoPortfolio.test.ts",
+    "tests/cryptoWalletCache.test.ts",
     "tests/oklinkApi.test.ts",
-    "tests/computeGateway.test.ts"
+    "tests/computeGateway.test.ts",
+    "tests/homeNavigation.test.ts",
+    "tests/vaultUnlock.test.ts",
+    "tests/clippyModelTesting.test.ts"
   ]
 }

@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const VAULT_CRYPTO_HEADER_META_KEY: &str = "vault_crypto_header";
+const COMPUTE_GATEWAY_URL_META_KEY: &str = "compute_gateway_url";
 
 fn is_watch_only_crypto_wallet(wallet_type: &str, secret_kind: &str) -> bool {
     secret_kind.trim() == "watch_only" || wallet_type.trim().to_ascii_lowercase().contains("watch")
@@ -184,12 +185,83 @@ impl Vault {
                     }
                 }
                 let _ = self.secret_manager.unlock_all(password);
+                self.unlock_secret_store_key(password);
                 true
             } else {
-                false
+                self.unlock_secret_store_key_with_passkey_prf(password)
+                    .map(|_| true)
+                    .unwrap_or(false)
             }
         } else {
-            false
+            self.unlock_secret_store_key_with_passkey_prf(password)
+                .map(|_| true)
+                .unwrap_or(false)
+        }
+    }
+
+    /// Unwrap the vault data key and hand it to the secret store so secret values
+    /// are AES-256-GCM encrypted at rest (no longer relying on the OS keychain).
+    /// Best-effort: a brand-new vault has no crypto header yet, so secrets stay
+    /// plaintext until the header is created and the next unlock runs.
+    fn unlock_secret_store_key(&self, password: &str) {
+        if let Ok(Some(header)) = self.load_vault_crypto_header() {
+            if let Ok(vault_key) = unlock_vault_key(
+                &header,
+                crate::vault_crypto::VaultUnlockRequest::MasterPassword(password),
+            ) {
+                self.secret_manager.set_vault_key(vault_key);
+                self.secret_manager.migrate_plaintext_secrets();
+            }
+        }
+    }
+
+    fn unlock_secret_store_key_with_passkey_prf(&self, prf_key_hex: &str) -> Result<(), String> {
+        let Some(header) = self.load_vault_crypto_header()? else {
+            return Err("Vault unlock methods are not configured".to_string());
+        };
+        let vault_key = unlock_vault_key(
+            &header,
+            crate::vault_crypto::VaultUnlockRequest::PasskeyPrfKeyHex(prf_key_hex),
+        )?;
+        self.secret_manager.set_vault_key(vault_key);
+        self.secret_manager.migrate_plaintext_secrets();
+        Ok(())
+    }
+
+    /// Ensure the secret store can encrypt at rest. Unlike `unlock_secret_store_key`
+    /// this CREATES the vault crypto header if it is missing (master-password-only
+    /// vaults never had one), so existing plaintext secrets get migrated. Requires
+    /// `&mut` because it may persist a freshly created header.
+    pub fn ensure_secret_encryption(&mut self, password: &str) {
+        let Ok(header) = self.ensure_vault_crypto_header(password) else {
+            return;
+        };
+        if let Ok(vault_key) = unlock_vault_key(
+            &header,
+            crate::vault_crypto::VaultUnlockRequest::MasterPassword(password),
+        ) {
+            self.secret_manager.set_vault_key(vault_key);
+            self.secret_manager.migrate_plaintext_secrets();
+            // One-time scrub: VACUUM clears plaintext bytes left in freed pages and
+            // the WAL after migrating secrets to ciphertext. Guarded by a meta flag
+            // so it runs exactly once (VACUUM is not worth repeating every unlock).
+            let scrubbed: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'secrets_vacuumed')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !scrubbed {
+                let _ = self
+                    .conn
+                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;");
+                let _ = self.conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('secrets_vacuumed', '1')",
+                    [],
+                );
+            }
         }
     }
 
@@ -210,6 +282,9 @@ impl Vault {
 
         let (header, recovery_key) = create_vault_header(master_password)?;
         self.save_vault_crypto_header(&header)?;
+        // Header now exists: unwrap the data key so the secret store encrypts at
+        // rest, and migrate any secrets written plaintext earlier this session.
+        self.unlock_secret_store_key(master_password);
         Ok(Some(recovery_key))
     }
 
@@ -267,10 +342,9 @@ impl Vault {
     }
 
     pub fn authenticate_with_passkey_prf(&self, prf_key_hex: &str) -> Result<bool, String> {
-        let Some(header) = self.load_vault_crypto_header()? else {
-            return Ok(false);
-        };
-        Ok(unlock_vault_key(&header, VaultUnlockRequest::PasskeyPrfKeyHex(prf_key_hex)).is_ok())
+        Ok(self
+            .unlock_secret_store_key_with_passkey_prf(prf_key_hex)
+            .is_ok())
     }
 
     pub fn authenticate_with_recovery_key(&self, recovery_key: &str) -> Result<bool, String> {
@@ -643,6 +717,15 @@ impl Vault {
             resolved.key = secret.value;
         }
         resolved
+    }
+
+    /// Full (decrypted) secret value for a credential id. Used by flows that reuse
+    /// a stored key, e.g. auto-filling the compute-gateway upstream token.
+    pub fn get_credential_secret(&self, credential_id: &str) -> Option<String> {
+        self.secret_manager
+            .get(credential_id)
+            .ok()
+            .map(|secret| secret.value)
     }
 
     fn decorate_provider(&self, provider: &ProviderConfig) -> ProviderConfig {
@@ -1294,54 +1377,48 @@ impl Vault {
                 toml::Value::String(db_path.to_string_lossy().to_string()),
             );
 
-            #[cfg(target_os = "macos")]
-            {
-                let mut keychain_config = HashMap::new();
-                keychain_config.insert(
-                    "service".to_string(),
-                    toml::Value::String("com.mykey.desktop".to_string()),
-                );
-                return Ok(SecretStoreConfig {
-                    primary: "keychain".to_string(),
-                    providers: vec![
-                        SecretStoreProviderConfig {
-                            name: "keychain".to_string(),
-                            kind: "keyring".to_string(),
-                            config: keychain_config,
-                            priority: 0,
-                        },
-                        SecretStoreProviderConfig {
-                            name: "local".to_string(),
-                            kind: "sqlite".to_string(),
-                            config: local_config,
-                            priority: 10,
-                        },
-                    ],
-                });
-            }
-
-            #[cfg(not(target_os = "macos"))]
-            {
-                Ok(SecretStoreConfig {
-                    primary: "local".to_string(),
-                    providers: vec![SecretStoreProviderConfig {
-                        name: "local".to_string(),
-                        kind: "sqlite".to_string(),
-                        config: local_config,
-                        priority: 0,
-                    }],
-                })
-            }
+            // This app IS the token vault: secrets live in its own encrypted
+            // SQLite, never the OS keychain. macOS previously used the keychain as
+            // primary, but keychain items are scoped to the app's code signature,
+            // so unsigned rebuilds collided with "item already exists" and couldn't
+            // update prior entries. Same in-app store on every platform now.
+            Ok(SecretStoreConfig {
+                primary: "local".to_string(),
+                providers: vec![SecretStoreProviderConfig {
+                    name: "local".to_string(),
+                    kind: "sqlite".to_string(),
+                    config: local_config,
+                    priority: 0,
+                }],
+            })
         }
     }
 
     fn open_db() -> Result<(Connection, PathBuf), String> {
-        let mut base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-        base.push("MyKey");
-        std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
-        let db_path = base.join("vault.db");
+        // `MYKEY_VAULT_DB` (full path to the SQLite file) overrides the default
+        // location. Used by the headless `mykey` CLI to target an alternate or
+        // throwaway vault without touching the desktop app's `~/Library/.../MyKey/vault.db`.
+        let db_path = match std::env::var("MYKEY_VAULT_DB") {
+            Ok(p) if !p.trim().is_empty() => {
+                let path = PathBuf::from(shellexpand::tilde(p.trim()).to_string());
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                path
+            }
+            _ => {
+                let mut base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+                base.push("MyKey");
+                std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+                base.join("vault.db")
+            }
+        };
         let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
         conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| e.to_string())?;
+        // Coexist with a running desktop app (WAL allows concurrent readers +
+        // one writer); wait instead of erroring if the DB is briefly locked.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| e.to_string())?;
         Ok((conn, db_path))
     }
@@ -5042,6 +5119,148 @@ impl Vault {
             .any(|path| path.exists())
     }
 
+    /// Path to the hand-editable wallet key file, alongside the vault DB.
+    pub fn wallet_env_path_string(&self) -> String {
+        self.wallet_env_path().to_string_lossy().to_string()
+    }
+
+    fn wallet_env_path(&self) -> std::path::PathBuf {
+        self.db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("wallet-keys.env")
+    }
+
+    /// Parse the wallet `.env` file into an UPPERCASE-keyed map. Missing file -> empty map.
+    pub fn wallet_env_keys(&self) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        let Ok(content) = std::fs::read_to_string(self.wallet_env_path()) else {
+            return map;
+        };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            if let Some((key, value)) = line.split_once('=') {
+                let value = value.trim().trim_matches('"').trim_matches('\'');
+                map.insert(key.trim().to_ascii_uppercase(), value.to_string());
+            }
+        }
+        map
+    }
+
+    fn wallet_secret_id(name: &str) -> String {
+        format!("wallet_api_key:{name}")
+    }
+
+    fn compute_gateway_admin_token_secret_id() -> String {
+        "compute_gateway:admin_token".to_string()
+    }
+
+    pub fn set_compute_gateway_settings(
+        &self,
+        gateway_url: &str,
+        admin_token: &str,
+    ) -> Result<(), String> {
+        self.meta_set(COMPUTE_GATEWAY_URL_META_KEY, gateway_url.trim())?;
+        let token = admin_token.trim();
+        let id = Self::compute_gateway_admin_token_secret_id();
+        if token.is_empty() {
+            let _ = self.secret_manager.delete(&id);
+            return Ok(());
+        }
+        let secret = Secret {
+            value: token.to_string(),
+            metadata: SecretMetadata {
+                provider: "sqlite".to_string(),
+                created_at: None,
+                updated_at: None,
+                tags: Vec::new(),
+                note: Some("compute_gateway_admin_token".to_string()),
+            },
+        };
+        self.secret_manager
+            .set(&id, &secret)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn get_compute_gateway_settings(&self) -> Result<(String, String), String> {
+        let gateway_url = self
+            .meta_get(COMPUTE_GATEWAY_URL_META_KEY)?
+            .unwrap_or_default();
+        let admin_token = self
+            .secret_manager
+            .get(&Self::compute_gateway_admin_token_secret_id())
+            .ok()
+            .map(|secret| secret.value)
+            .unwrap_or_default();
+        Ok((gateway_url, admin_token))
+    }
+
+    /// The operator's local secp256k1 identity (generated once, kept encrypted).
+    /// Used to sign the multi-tenant gateway's auth challenge.
+    pub fn get_or_create_operator_key(&self) -> Result<[u8; 32], String> {
+        let id = "operator_signing_key";
+        if let Ok(secret) = self.secret_manager.get(id) {
+            return hex_to_32(&secret.value);
+        }
+        let key = crate::operator_key::random_signing_key();
+        let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        let secret = Secret {
+            value: hex,
+            metadata: SecretMetadata {
+                provider: "sqlite".to_string(),
+                created_at: None,
+                updated_at: None,
+                tags: Vec::new(),
+                note: Some("operator_signing_key".to_string()),
+            },
+        };
+        self.secret_manager.set(id, &secret).map_err(|e| e.to_string())?;
+        Ok(key)
+    }
+
+    pub fn set_operator_session(&self, token: &str) -> Result<(), String> {
+        self.meta_set("operator_session", token)
+    }
+
+    pub fn get_operator_session(&self) -> Result<Option<String>, String> {
+        self.meta_get("operator_session")
+    }
+
+    /// Store a wallet API key in the encrypted secret store. Empty value clears it.
+    pub fn set_wallet_api_key(&self, name: &str, value: &str) -> Result<(), String> {
+        let id = Self::wallet_secret_id(name);
+        let value = value.trim();
+        if value.is_empty() {
+            let _ = self.secret_manager.delete(&id);
+            return Ok(());
+        }
+        let secret = Secret {
+            value: value.to_string(),
+            metadata: SecretMetadata {
+                provider: "sqlite".to_string(),
+                created_at: None,
+                updated_at: None,
+                tags: Vec::new(),
+                note: Some("wallet_api_key".to_string()),
+            },
+        };
+        self.secret_manager
+            .set(&id, &secret)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn get_wallet_api_key_vault(&self, name: &str) -> Option<String> {
+        self.secret_manager
+            .get(&Self::wallet_secret_id(name))
+            .ok()
+            .map(|secret| secret.value)
+            .filter(|value| !value.trim().is_empty())
+    }
+
     fn meta_get(&self, key: &str) -> Result<Option<String>, String> {
         let mut stmt = self
             .conn
@@ -6132,6 +6351,18 @@ fn normalize_hotkey(value: &str, fallback: &str) -> String {
     normalize_non_empty(&compact, fallback)
 }
 
+fn hex_to_32(hex: &str) -> Result<[u8; 32], String> {
+    let hex = hex.trim();
+    if hex.len() != 64 {
+        return Err("invalid operator key length".to_string());
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
 fn bool_to_int(value: bool) -> i64 {
     if value {
         1
@@ -6180,7 +6411,13 @@ mod tests {
     #[test]
     fn watch_only_crypto_wallet_does_not_require_secret_material() {
         assert!(is_watch_only_crypto_wallet("hardware-watch", "watch_only"));
-        assert!(is_watch_only_crypto_wallet("watch-address", "keystore_json"));
-        assert!(!is_watch_only_crypto_wallet("tcx-wasm:password", "keystore_json"));
+        assert!(is_watch_only_crypto_wallet(
+            "watch-address",
+            "keystore_json"
+        ));
+        assert!(!is_watch_only_crypto_wallet(
+            "tcx-wasm:password",
+            "keystore_json"
+        ));
     }
 }

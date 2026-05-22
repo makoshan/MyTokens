@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1000" viewBox="0 0 1440 1000" font-family="Inter, 'Noto Sans SC', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef4fc"/>
+    </linearGradient>
+    <linearGradient id="hub" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#007fff"/>
+      <stop offset="1" stop-color="#0cc5ff"/>
+    </linearGradient>
+    <filter id="card" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#111d4a" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#007fff"/>
+    </marker>
+    <style>
+      .h1   { font-size: 30px; font-weight: 800; fill: #111d4a; letter-spacing: -0.02em; }
+      .sub  { font-size: 15px; font-weight: 500; fill: #475467; }
+      .zone { font-size: 12px; font-weight: 800; fill: #007fff; letter-spacing: 0.10em; }
+      .ct   { font-size: 19px; font-weight: 800; fill: #111d4a; letter-spacing: -0.01em; }
+      .ctw  { font-size: 19px; font-weight: 800; fill: #ffffff; letter-spacing: -0.01em; }
+      .li   { font-size: 14px; font-weight: 600; fill: #111d4a; }
+      .liw  { font-size: 14px; font-weight: 600; fill: #ffffff; }
+      .mut  { font-size: 13px; font-weight: 500; fill: #475467; }
+      .mutw { font-size: 13px; font-weight: 500; fill: #d8ecff; }
+      .lbl  { font-size: 12px; font-weight: 700; fill: #007fff; }
+      .pill { font-size: 12px; font-weight: 700; fill: #006cd9; }
+      .warn { font-size: 13px; font-weight: 700; fill: #b54708; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1440" height="1000" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="80" y="58" class="h1">MyKey 系统架构</text>
+  <text x="80" y="86" class="sub">本地优先的 AI 资产保险箱 + 多租户算力网关 · 把你授权的上游 AI 额度安全分享给信任的朋友</text>
+  <!-- alpha badge -->
+  <rect x="1140" y="38" width="220" height="34" rx="17" fill="#fff7ed" stroke="#f9b878"/>
+  <text x="1162" y="60" class="warn">⚠ Alpha · Sepolia 测试网</text>
+
+  <!-- ===================== Operator · MyKey Desktop ===================== -->
+  <g filter="url(#card)">
+    <rect x="80" y="116" width="760" height="184" rx="18" fill="#f8f9fa" stroke="#ecedf1"/>
+    <rect x="80" y="116" width="6" height="184" rx="3" fill="#007fff"/>
+  </g>
+  <text x="108" y="146" class="zone">运营者 OPERATOR</text>
+  <text x="108" y="172" class="ct">MyKey Desktop · macOS (Tauri + React)</text>
+  <text x="108" y="210" class="li">🔐 密钥库 · Argon2 + AES-256-GCM · 本地 SQLite</text>
+  <text x="108" y="236" class="li">🌐 算力网关运营台 · 共享上游 AI Token / 邀请朋友 / 发红包</text>
+  <text x="108" y="262" class="li">💰 Crypto 钱包 · 多链组合 (Alchemy / OKLink) · 收发 · Swap · NFT</text>
+  <text x="108" y="288" class="li">📎 Clippy 助手 · 🎙 Fn 语音输入 · 🔑 原生 Passkey (WebAuthn PRF, 实验)</text>
+
+  <!-- arrow Operator -> Gateway -->
+  <path d="M 230 300 L 230 372" stroke="#007fff" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+  <rect x="250" y="316" width="430" height="44" rx="10" fill="#e7f1fc" stroke="#bcd9f7"/>
+  <text x="268" y="334" class="pill">EVM keypair 注册 / 登录 → operator session</text>
+  <text x="268" y="352" class="mut">上传加密的上游 Token，自动建渠道 · 定价 · 路由（多租户隔离）</text>
+
+  <!-- ===================== Gateway · Cloudflare Worker ===================== -->
+  <g filter="url(#card)">
+    <rect x="80" y="372" width="900" height="262" rx="18" fill="url(#hub)"/>
+  </g>
+  <text x="112" y="404" class="mutw" font-weight="800" letter-spacing="0.10em">CLOUDFLARE WORKER · 单部署多租户</text>
+  <text x="112" y="432" class="ctw">MyKey Compute Gateway</text>
+
+  <g>
+    <rect x="112" y="452" width="400" height="160" rx="12" fill="#ffffff" fill-opacity="0.16"/>
+    <text x="132" y="480" class="liw">🔁 OpenAI / Anthropic 兼容 relay</text>
+    <text x="132" y="502" class="mutw">/v1/responses · /v1/messages · /v1/models · SSE 流式</text>
+    <text x="132" y="528" class="liw">💵 计费 · per-account µUSD · reserve / settle / refund</text>
+    <text x="132" y="550" class="mutw">Account Durable Object：并发安全 · alarm 自动退款</text>
+    <text x="132" y="576" class="liw">🧱 多租户隔离 (operator_id) · D1</text>
+    <text x="132" y="598" class="mutw">加密 vault (MASTER_KEY_V1) · 每个运营者的 Token 互不可见</text>
+  </g>
+  <g>
+    <rect x="540" y="452" width="416" height="160" rx="12" fill="#ffffff" fill-opacity="0.16"/>
+    <text x="560" y="480" class="liw">🛡 Admin 控制台 · 审计日志</text>
+    <text x="560" y="502" class="mutw">IP allowlist (含 IPv6) · per-account 限流 · GitHub Actions 部署</text>
+    <text x="560" y="528" class="liw">🔗 链上校验 · burn-to-credit</text>
+    <text x="560" y="550" class="mutw">读链验证单笔 burn 的 tx hash → 充值额度（去重防重放）</text>
+    <text x="560" y="576" class="liw">⛽ Relayer 代付池 · gasless</text>
+    <text x="560" y="598" class="mutw">transferWithSig / burnWithSig — 朋友签名，平台代付 gas</text>
+  </g>
+
+  <!-- arrow Gateway -> Providers -->
+  <path d="M 980 470 L 1058 470" stroke="#007fff" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="988" y="462" class="lbl">解密上游 Token</text>
+
+  <!-- ===================== Upstream AI Providers ===================== -->
+  <g filter="url(#card)">
+    <rect x="1060" y="372" width="300" height="262" rx="18" fill="#f8f9fa" stroke="#ecedf1"/>
+    <rect x="1060" y="372" width="6" height="262" rx="3" fill="#0cc5ff"/>
+  </g>
+  <text x="1088" y="404" class="zone">上游 AI PROVIDERS</text>
+  <text x="1088" y="430" class="ct">运营者授权的算力</text>
+  <g>
+    <rect x="1088" y="448" width="246" height="40" rx="10" fill="#ffffff" stroke="#ecedf1"/>
+    <text x="1106" y="473" class="li">百炼 / Qwen3</text>
+    <rect x="1088" y="496" width="246" height="40" rx="10" fill="#ffffff" stroke="#ecedf1"/>
+    <text x="1106" y="521" class="li">Kimi</text>
+    <rect x="1088" y="544" width="246" height="40" rx="10" fill="#ffffff" stroke="#ecedf1"/>
+    <text x="1106" y="569" class="li">OpenAI</text>
+    <rect x="1088" y="592" width="246" height="40" rx="10" fill="#ffffff" stroke="#ecedf1"/>
+    <text x="1106" y="617" class="li">Anthropic</text>
+  </g>
+
+  <!-- arrows Gateway -> Friend & Gateway -> Chain -->
+  <path d="M 360 634 L 360 706" stroke="#007fff" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="376" y="676" class="lbl">/dashboard/* · passkey session</text>
+  <path d="M 760 634 L 760 706" stroke="#007fff" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="776" y="676" class="lbl">链上读 / Relayer 代付</text>
+
+  <!-- ===================== Friend · Buyer Dashboard ===================== -->
+  <g filter="url(#card)">
+    <rect x="80" y="710" width="640" height="232" rx="18" fill="#f8f9fa" stroke="#ecedf1"/>
+    <rect x="80" y="710" width="6" height="232" rx="3" fill="#007fff"/>
+  </g>
+  <text x="108" y="740" class="zone">朋友 FRIEND · 浏览器</text>
+  <text x="108" y="766" class="ct">买家网页 Dashboard (Vite SPA)</text>
+  <text x="108" y="802" class="li">🎁 红包 / 邀请欢迎流程 — 一键领取额度</text>
+  <text x="108" y="828" class="li">🔑 Passkey 钱包 — 由 PRF 确定性派生，无需助记词</text>
+  <text x="108" y="854" class="li">⚡ 免 gas 兑换 (burnWithSig) · 💵 USDT 充值额度</text>
+  <text x="108" y="880" class="li">💬 AI 对话 — 无需 API key 直接试用上游模型</text>
+  <text x="108" y="906" class="li">🧩 MyKey API Key — OpenAI 兼容客户端接入 (sk-mykey_*)</text>
+
+  <!-- ===================== On-chain ===================== -->
+  <g filter="url(#card)">
+    <rect x="740" y="710" width="620" height="232" rx="18" fill="#f8f9fa" stroke="#ecedf1"/>
+    <rect x="740" y="710" width="6" height="232" rx="3" fill="#0cc5ff"/>
+  </g>
+  <text x="768" y="740" class="zone">链上 ON-CHAIN · SEPOLIA 测试网</text>
+  <text x="768" y="766" class="ct">额度凭证，非投资品</text>
+  <g>
+    <rect x="768" y="786" width="566" height="44" rx="10" fill="#ffffff" stroke="#ecedf1"/>
+    <text x="788" y="813" class="li">🪙 MYC · 算力额度代币 (ERC-20 / TIP-20) — 1 MYC ≈ $1，烧币得额度</text>
+    <rect x="768" y="838" width="566" height="44" rx="10" fill="#ffffff" stroke="#ecedf1"/>
+    <text x="788" y="865" class="li">⛽ Relayer 代付池 — 朋友体验不到 gas / 钱包细节</text>
+    <rect x="768" y="890" width="566" height="40" rx="10" fill="#ffffff" stroke="#ecedf1"/>
+    <text x="788" y="916" class="mut">💵 USDT 测试币 (MockStablecoin) — 可选的额度充值入口</text>
+  </g>
+</svg>

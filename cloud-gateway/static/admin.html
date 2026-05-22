@@ -1,0 +1,1007 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>MyKey Compute · Admin</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+<style>
+:root {
+  --bg: #ffffff;
+  --panel: #f8f9fa;
+  --panel-alt: #f0f1f3;
+  --surface-blue: #e7f1fc;
+  --surface-blue-info: #d0f0fa;
+  --border: #ecedf1;
+  --border-strong: #cfd2db;
+  --text: #111d4a;
+  --muted: #99a1af;
+  --muted-strong: #475467;
+  --accent: #007fff;
+  --accent-dark: #006cd9;
+  --accent-active: #0052a5;
+  --accent-soft: #e7f1fc;
+  --brand-secondary: #0cc5ff;
+  --shadow: 0 8px 24px rgba(17, 29, 74, 0.08);
+  --shadow-soft: 0 6px 16px rgba(17, 29, 74, 0.06);
+  --shadow-cta: 0 12px 28px rgba(0, 127, 255, 0.2);
+  --status-healthy: #228e42;
+  --status-warning: #c74700;
+  --status-critical: #c40918;
+  --status-depleted: #99a1af;
+  --status-healthy-bg: #daf1e1;
+  --status-warning-bg: #fae3d7;
+  --status-critical-bg: #f8dadc;
+  --status-depleted-bg: #f0f1f3;
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  font-family: 'Inter', 'Noto Sans SC', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; cursor: pointer; border: 0; background: transparent; color: inherit; }
+input, select, textarea { font: inherit; color: inherit; }
+table { border-collapse: collapse; width: 100%; }
+code { font-family: var(--mono); font-size: 0.85em; color: var(--accent-dark); background: var(--accent-soft); padding: 1px 6px; border-radius: var(--radius-sm); }
+
+/* ====== Auth gate ====== */
+.auth-gate {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px;
+  background: linear-gradient(160deg, #f6fbff 0%, #ffffff 60%);
+}
+.auth-card {
+  width: 100%;
+  max-width: 420px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow);
+  padding: 32px;
+}
+.auth-card h1 { font-size: 22px; font-weight: 600; margin-bottom: 4px; }
+.auth-card .eyebrow { color: var(--accent); font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 8px; }
+.auth-card p { color: var(--muted-strong); margin-bottom: 20px; }
+.auth-card label { display: block; font-size: 12px; font-weight: 600; color: var(--muted-strong); margin-bottom: 6px; }
+.auth-card input { width: 100%; }
+.auth-card .actions { margin-top: 16px; display: flex; gap: 8px; align-items: center; }
+.auth-card .hint { font-size: 12px; color: var(--muted); margin-top: 14px; }
+
+/* ====== Shell ====== */
+.shell { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+.sidebar {
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+.brand { display: flex; align-items: center; gap: 12px; padding: 0 8px; }
+.brand-mark {
+  width: 36px; height: 36px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--accent), var(--brand-secondary));
+  color: #fff; font-weight: 700; display: grid; place-items: center;
+  box-shadow: var(--shadow-soft);
+}
+.brand-text { line-height: 1.15; }
+.brand-text span { display: block; font-size: 11px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+.brand-text strong { display: block; font-size: 15px; font-weight: 700; }
+.nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  color: var(--muted-strong);
+  font-weight: 500;
+  text-align: left;
+  transition: background 0.12s, color 0.12s;
+}
+.nav-item:hover { background: var(--panel-alt); color: var(--text); }
+.nav-item.active { background: var(--surface-blue); color: var(--accent-active); font-weight: 600; }
+.nav-item .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--muted); }
+.nav-item.active .dot { background: var(--accent); }
+.sidebar-footer { padding: 12px 8px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+.sidebar-footer .row { display: flex; justify-content: space-between; align-items: center; }
+.sidebar-footer button { color: var(--accent); font-weight: 600; }
+
+/* ====== Workspace ====== */
+.workspace { padding: 28px 32px 64px; overflow-x: auto; }
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+.page-header h1 { font-size: 22px; font-weight: 600; }
+.page-header .eyebrow { color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 4px; }
+.page-header p { color: var(--muted-strong); margin-top: 6px; max-width: 640px; }
+
+/* ====== KPI grid ====== */
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.kpi {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 18px 20px;
+  box-shadow: var(--shadow-soft);
+}
+.kpi .label { font-size: 12px; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; font-weight: 600; }
+.kpi .value { font-size: 24px; font-weight: 700; margin-top: 6px; }
+.kpi .sub { font-size: 12px; color: var(--muted-strong); margin-top: 4px; }
+
+/* ====== Panel + table ====== */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+.panel-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.panel-header h2 { font-size: 15px; font-weight: 600; }
+.panel-header .panel-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.panel-body { padding: 0; }
+.panel-empty { padding: 32px; text-align: center; color: var(--muted); }
+
+table.data { width: 100%; }
+table.data th, table.data td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+table.data th { font-size: 11px; color: var(--muted); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; background: var(--bg); position: sticky; top: 0; }
+table.data tr:last-child td { border-bottom: 0; }
+table.data tbody tr:hover { background: var(--bg); }
+table.data td.mono, table.data td .mono { font-family: var(--mono); font-size: 12px; color: var(--muted-strong); }
+table.data td .mono.id { color: var(--text); }
+
+/* ====== Buttons ====== */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 34px; padding: 0 16px;
+  border-radius: var(--radius-pill);
+  font-weight: 600; font-size: 13px;
+  background: var(--panel-alt); color: var(--text);
+  border: 1px solid var(--border);
+  transition: background 0.12s, box-shadow 0.12s;
+}
+.btn:hover { background: var(--panel); }
+.btn.primary { background: var(--accent); color: #fff; border-color: transparent; box-shadow: var(--shadow-cta); }
+.btn.primary:hover { background: var(--accent-dark); }
+.btn.primary:active { background: var(--accent-active); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--accent); padding: 0 8px; height: 28px; }
+.btn.ghost:hover { background: var(--accent-soft); }
+.btn.danger { color: var(--status-critical); }
+.btn.danger:hover { background: var(--status-critical-bg); }
+.btn.sm { height: 28px; padding: 0 12px; font-size: 12px; }
+
+/* ====== Chips / Badges ====== */
+.chip {
+  display: inline-flex; align-items: center;
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--panel-alt);
+  color: var(--muted-strong);
+}
+.chip.healthy { background: var(--status-healthy-bg); color: var(--status-healthy); }
+.chip.warning { background: var(--status-warning-bg); color: var(--status-warning); }
+.chip.critical { background: var(--status-critical-bg); color: var(--status-critical); }
+.chip.depleted { background: var(--status-depleted-bg); color: var(--status-depleted); }
+.chip.info { background: var(--surface-blue); color: var(--accent-active); }
+
+/* ====== Form / inputs ====== */
+input[type=text], input[type=password], input[type=number], select, textarea {
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  outline: none;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+textarea { height: auto; padding: 10px 12px; font-family: var(--mono); font-size: 12px; resize: vertical; min-height: 80px; }
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 127, 255, 0.14);
+}
+.form-grid { display: grid; gap: 14px; }
+.form-grid label { display: block; }
+.form-grid label > span { display: block; font-size: 12px; font-weight: 600; color: var(--muted-strong); margin-bottom: 6px; }
+.form-grid label > span small { font-weight: 400; color: var(--muted); margin-left: 6px; }
+.form-grid .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+/* ====== Modal ====== */
+dialog {
+  border: 0;
+  padding: 0;
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+  box-shadow: 0 24px 60px rgba(17, 29, 74, 0.2);
+  max-width: 560px;
+  width: calc(100% - 32px);
+}
+dialog::backdrop { background: rgba(17, 29, 74, 0.36); backdrop-filter: blur(2px); }
+dialog .modal-header { padding: 18px 22px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+dialog .modal-header h3 { font-size: 16px; font-weight: 600; }
+dialog .modal-body { padding: 20px 22px; }
+dialog .modal-footer { padding: 14px 22px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; background: var(--panel); }
+dialog .close-x { color: var(--muted); font-size: 18px; line-height: 1; }
+.error-banner { background: var(--status-critical-bg); color: var(--status-critical); padding: 10px 14px; border-radius: var(--radius-md); font-size: 13px; margin-bottom: 12px; }
+
+/* ====== Toast ====== */
+.toast-tray { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column; gap: 10px; z-index: 1000; }
+.toast {
+  background: var(--text); color: #fff;
+  padding: 12px 16px; border-radius: var(--radius-md);
+  font-size: 13px; font-weight: 500;
+  box-shadow: var(--shadow);
+  max-width: 360px;
+  animation: toast-in 0.18s ease;
+}
+.toast.ok { background: var(--status-healthy); }
+.toast.err { background: var(--status-critical); }
+@keyframes toast-in { from { transform: translateY(8px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+/* ====== Skeleton / loading ====== */
+.skeleton { background: linear-gradient(90deg, var(--panel-alt), var(--panel), var(--panel-alt)); background-size: 200% 100%; animation: pulse 1.4s linear infinite; border-radius: var(--radius-md); height: 14px; }
+@keyframes pulse { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+.muted { color: var(--muted); }
+.muted-strong { color: var(--muted-strong); }
+.flex { display: flex; }
+.gap-2 { gap: 8px; }
+.gap-3 { gap: 12px; }
+.right { margin-left: auto; }
+.center { text-align: center; }
+.spacer-y { height: 16px; }
+.empty-cell { color: var(--muted); }
+
+/* responsive */
+@media (max-width: 800px) {
+  .shell { grid-template-columns: 1fr; }
+  .sidebar { position: relative; height: auto; flex-direction: row; align-items: center; flex-wrap: wrap; }
+  .nav { flex-direction: row; flex-wrap: wrap; flex: 1 0 100%; }
+  .nav-item { padding: 6px 10px; }
+  .sidebar-footer { width: 100%; border-top: 1px solid var(--border); }
+}
+</style>
+</head>
+<body>
+
+<div id="root"></div>
+
+<dialog id="modal">
+  <form id="modal-form" method="dialog">
+    <div class="modal-header">
+      <h3 id="modal-title">Title</h3>
+      <button type="button" class="close-x" data-dismiss="modal" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-footer">
+      <button type="button" class="btn" data-dismiss="modal">Cancel</button>
+      <button type="submit" class="btn primary" id="modal-submit">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast-tray" id="toast-tray" aria-live="polite"></div>
+
+<script>
+//===========================================================================
+// MyKey Compute Admin — vanilla single-file SPA. Reuses design tokens from
+// `design.md` / `src/index.css`. Each page is a render function that fetches
+// from /admin/* and writes into #root. Auth via ADMIN_TOKEN in localStorage.
+//===========================================================================
+const LS_TOKEN_KEY = 'mykey_admin_token';
+const fmt = {
+  microUsd: (n) => {
+    if (n == null) return '—';
+    const usd = Number(n) / 1_000_000;
+    return '$' + usd.toFixed(usd >= 10 ? 2 : usd >= 1 ? 3 : 4);
+  },
+  pct: (n) => n == null ? '—' : (Number(n) * 100).toFixed(2) + '%',
+  num: (n) => n == null ? '—' : Number(n).toLocaleString(),
+  date: (s) => s ? new Date(s).toLocaleString() : '—',
+  truncate: (s, n = 24) => !s ? '' : (s.length > n ? s.slice(0, n) + '…' : s),
+};
+
+function $(sel, root = document) { return root.querySelector(sel); }
+function el(tag, attrs = {}, children = []) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v;
+    else if (k === 'style' && typeof v === 'object') Object.assign(e.style, v);
+    else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
+    else if (k === 'html') e.innerHTML = v;
+    else if (v !== null && v !== undefined && v !== false) e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of (Array.isArray(children) ? children : [children])) {
+    if (c == null || c === false) continue;
+    e.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(c) : c);
+  }
+  return e;
+}
+
+// ---- Toast ----
+function toast(message, kind = 'ok') {
+  const t = el('div', { class: 'toast ' + (kind === 'err' ? 'err' : 'ok') }, [message]);
+  $('#toast-tray').appendChild(t);
+  setTimeout(() => t.remove(), 3600);
+}
+
+// ---- API client ----
+function getToken() { return localStorage.getItem(LS_TOKEN_KEY) || ''; }
+function setToken(t) { localStorage.setItem(LS_TOKEN_KEY, t); }
+function clearToken() { localStorage.removeItem(LS_TOKEN_KEY); }
+
+async function api(path, init = {}) {
+  const res = await fetch(path, {
+    ...init,
+    headers: {
+      'authorization': 'Bearer ' + getToken(),
+      'content-type': 'application/json',
+      ...(init.headers || {}),
+    },
+  });
+  const text = await res.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = { raw: text }; }
+  if (!res.ok) {
+    const err = new Error(body?.error?.code || ('http_' + res.status));
+    err.status = res.status; err.body = body;
+    throw err;
+  }
+  return body;
+}
+
+// ---- Modal helper ----
+function openModal({ title, fields, submitLabel = 'Save', onSubmit }) {
+  $('#modal-title').textContent = title;
+  $('#modal-submit').textContent = submitLabel;
+  const body = $('#modal-body'); body.innerHTML = '';
+  const formGrid = el('div', { class: 'form-grid' });
+  const inputs = {};
+  for (const f of fields) {
+    const label = el('label', {}, [
+      el('span', {}, [f.label, f.hint ? el('small', {}, [' ' + f.hint]) : null].filter(Boolean)),
+    ]);
+    let input;
+    if (f.type === 'textarea') input = el('textarea', { placeholder: f.placeholder || '' });
+    else if (f.type === 'select') {
+      input = el('select');
+      for (const opt of f.options) input.appendChild(el('option', { value: opt.value }, [opt.label]));
+    } else input = el('input', { type: f.type || 'text', placeholder: f.placeholder || '' });
+    if (f.value != null) input.value = f.value;
+    inputs[f.name] = input;
+    label.appendChild(input);
+    formGrid.appendChild(label);
+  }
+  body.appendChild(formGrid);
+  const dlg = $('#modal');
+  const form = $('#modal-form');
+  const errSlot = el('div'); body.insertBefore(errSlot, formGrid);
+
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const values = Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, v.value]));
+    errSlot.innerHTML = '';
+    $('#modal-submit').disabled = true;
+    try {
+      await onSubmit(values);
+      dlg.close();
+    } catch (err) {
+      errSlot.innerHTML = '';
+      errSlot.appendChild(el('div', { class: 'error-banner' }, [err.message + (err.body?.error?.message ? ' — ' + err.body.error.message : '')]));
+    } finally {
+      $('#modal-submit').disabled = false;
+    }
+  };
+  dlg.querySelectorAll('[data-dismiss=modal]').forEach((b) => b.onclick = () => dlg.close());
+  dlg.showModal();
+}
+
+// ---- Auth gate ----
+function renderAuth(errorMsg) {
+  const root = $('#root');
+  root.innerHTML = '';
+  const card = el('div', { class: 'auth-card' }, [
+    el('div', { class: 'eyebrow' }, ['MyKey Compute']),
+    el('h1', {}, ['Admin Console']),
+    el('p', {}, ['Sign in with the ADMIN_TOKEN you uploaded via `wrangler secret put`.']),
+    errorMsg ? el('div', { class: 'error-banner' }, [errorMsg]) : null,
+    el('label', {}, ['Admin token']),
+    el('input', { type: 'password', id: 'auth-token', placeholder: 'paste ADMIN_TOKEN' }),
+    el('div', { class: 'actions' }, [
+      el('button', { class: 'btn primary', type: 'button', onclick: tryAuth }, ['Sign in']),
+    ]),
+    el('div', { class: 'hint' }, [
+      'Token lives in browser localStorage. Sign out clears it.',
+    ]),
+  ].filter(Boolean));
+  root.appendChild(el('div', { class: 'auth-gate' }, [card]));
+  setTimeout(() => $('#auth-token')?.focus(), 30);
+  $('#auth-token').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryAuth(); });
+}
+
+async function tryAuth() {
+  const value = $('#auth-token').value.trim();
+  if (!value) return;
+  setToken(value);
+  try {
+    // Probe with the cheapest authenticated GET.
+    await api('/admin/accounts');
+    boot();
+  } catch (err) {
+    clearToken();
+    renderAuth(err.status === 401 ? 'Invalid admin token.' : err.message);
+  }
+}
+
+function logout() {
+  clearToken();
+  state.route = 'overview';
+  renderAuth();
+}
+
+// ---- App state ----
+const state = {
+  route: 'overview',
+  data: {
+    accounts: null,
+    channels: null,
+    routing: null,
+    pricing: null,
+    creditRequests: null,
+    auditLog: null,
+  },
+};
+
+const ROUTES = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'channels', label: 'Channels' },
+  { id: 'routing', label: 'Routing' },
+  { id: 'pricing', label: 'Pricing' },
+  { id: 'accounts', label: 'Accounts' },
+  { id: 'usage', label: 'Logs' },
+  { id: 'topups', label: 'MYC top-ups' },
+  { id: 'credit-requests', label: 'Credit requests' },
+  { id: 'audit-log', label: 'Audit log' },
+];
+
+function navigate(route) {
+  state.route = route;
+  render();
+}
+
+// ---- Shell ----
+function renderShell() {
+  const root = $('#root');
+  root.innerHTML = '';
+  const shell = el('div', { class: 'shell' });
+  // Sidebar
+  const side = el('aside', { class: 'sidebar' }, [
+    el('div', { class: 'brand' }, [
+      el('div', { class: 'brand-mark' }, ['M']),
+      el('div', { class: 'brand-text' }, [
+        el('span', {}, ['MyKey']),
+        el('strong', {}, ['Compute · Admin']),
+      ]),
+    ]),
+    el('nav', { class: 'nav' }, ROUTES.map((r) => el('button', {
+      class: 'nav-item' + (state.route === r.id ? ' active' : ''),
+      onclick: () => navigate(r.id),
+    }, [el('span', { class: 'dot' }), r.label]))),
+    el('div', { class: 'sidebar-footer' }, [
+      el('div', { class: 'row' }, [
+        el('span', {}, ['Signed in']),
+        el('button', { onclick: logout }, ['Sign out']),
+      ]),
+    ]),
+  ]);
+  const workspace = el('section', { class: 'workspace', id: 'workspace' });
+  shell.appendChild(side);
+  shell.appendChild(workspace);
+  root.appendChild(shell);
+}
+
+// ---- Page renderers ----
+async function render() {
+  renderShell();
+  const ws = $('#workspace');
+  try {
+    if (state.route === 'overview') await renderOverview(ws);
+    else if (state.route === 'channels') await renderChannels(ws);
+    else if (state.route === 'routing') await renderRouting(ws);
+    else if (state.route === 'pricing') await renderPricing(ws);
+    else if (state.route === 'accounts') await renderAccounts(ws);
+    else if (state.route === 'usage') await renderUsage(ws);
+    else if (state.route === 'topups') await renderTopups(ws);
+    else if (state.route === 'credit-requests') await renderCreditRequests(ws);
+    else if (state.route === 'audit-log') await renderAuditLog(ws);
+  } catch (err) {
+    if (err.status === 401) { logout(); return; }
+    ws.appendChild(el('div', { class: 'error-banner' }, ['Load failed: ' + err.message]));
+  }
+}
+
+function pageHeader(title, description, actions = []) {
+  return el('div', { class: 'page-header' }, [
+    el('div', {}, [
+      el('div', { class: 'eyebrow' }, ['MyKey Compute · Admin']),
+      el('h1', {}, [title]),
+      description ? el('p', {}, [description]) : null,
+    ].filter(Boolean)),
+    actions.length ? el('div', { class: 'flex gap-2' }, actions) : null,
+  ].filter(Boolean));
+}
+
+function kpi(label, value, sub) {
+  return el('div', { class: 'kpi' }, [
+    el('div', { class: 'label' }, [label]),
+    el('div', { class: 'value' }, [String(value)]),
+    sub ? el('div', { class: 'sub' }, [sub]) : null,
+  ].filter(Boolean));
+}
+
+function emptyPanel(text) { return el('div', { class: 'panel-empty' }, [text]); }
+function chipFor(status) {
+  const map = { active: 'healthy', degraded: 'warning', exhausted: 'depleted', paused: 'warning', disabled: 'depleted', revoked: 'critical', pending: 'info', approved: 'healthy', rejected: 'critical' };
+  return el('span', { class: 'chip ' + (map[status] || '') }, [status]);
+}
+
+// ---- Overview ----
+async function renderOverview(root) {
+  root.appendChild(pageHeader('Overview', 'Snapshot of accounts, upstream channels, and pending requests.'));
+  root.appendChild(el('div', { class: 'kpi-grid' }, [
+    kpi('Loading', '…'), kpi('Loading', '…'), kpi('Loading', '…'),
+  ]));
+  const [accounts, channels, routing, creditRequests] = await Promise.all([
+    api('/admin/accounts'),
+    api('/admin/provider-tokens'),
+    api('/admin/routing-rules'),
+    api('/admin/credit-requests'),
+  ]);
+  state.data.accounts = accounts.data;
+  state.data.channels = channels.data;
+  state.data.routing = routing.data;
+  state.data.creditRequests = creditRequests.data;
+
+  const totalBalance = (accounts.data || []).reduce((s, a) => s + (a.balance_micro_usd || 0), 0);
+  const activeChannels = (channels.data || []).filter((c) => c.status === 'active').length;
+  const pendingCredits = (creditRequests.data || []).filter((c) => c.status === 'pending').length;
+
+  root.innerHTML = '';
+  root.appendChild(pageHeader('Overview', 'Snapshot of accounts, upstream channels, and pending requests.'));
+  root.appendChild(el('div', { class: 'kpi-grid' }, [
+    kpi('Accounts', accounts.data.length, 'across all groups'),
+    kpi('Channels', `${activeChannels}/${channels.data.length}`, 'active / total provider tokens'),
+    kpi('Routing rules', routing.data.length, 'model → token bindings'),
+    kpi('Balance pool', fmt.microUsd(totalBalance), 'sum of buyer balances'),
+    kpi('Pending credits', pendingCredits, 'awaiting your decision'),
+  ]));
+  // Recent accounts table
+  root.appendChild(el('div', { class: 'spacer-y' }));
+  root.appendChild(buildPanel('Accounts', 'Most recent first.', accountTable(accounts.data.slice(0, 10))));
+}
+
+function buildPanel(title, sub, body, actions = null) {
+  return el('div', { class: 'panel' }, [
+    el('div', { class: 'panel-header' }, [
+      el('div', {}, [el('h2', {}, [title]), sub ? el('div', { class: 'panel-sub' }, [sub]) : null].filter(Boolean)),
+      actions,
+    ]),
+    el('div', { class: 'panel-body' }, [body]),
+  ]);
+}
+
+// ---- Channels ----
+async function renderChannels(root) {
+  root.appendChild(pageHeader('Channels', 'Upstream provider tokens. Each row holds an encrypted API key, a base URL (for non-default hosts), and the list of models it serves.', [
+    el('button', { class: 'btn primary', onclick: () => openAddChannel() }, ['+ Add channel']),
+  ]));
+  const { data } = await api('/admin/provider-tokens');
+  state.data.channels = data;
+  if (!data.length) { root.appendChild(buildPanel('Channels', null, emptyPanel('No channels yet. Add one to start routing traffic.'))); return; }
+
+  const rows = data.map((c) => el('tr', {}, [
+    el('td', {}, [el('div', { class: 'mono id' }, [c.id]), c.label ? el('div', { class: 'mono', style: { fontSize: '11px', color: 'var(--muted)' } }, [c.label]) : null].filter(Boolean)),
+    el('td', {}, [c.provider]),
+    el('td', {}, [c.adapter]),
+    el('td', {}, [c.base_url ? el('span', { class: 'mono' }, [fmt.truncate(c.base_url, 38)]) : el('span', { class: 'muted' }, ['default'])]),
+    el('td', {}, [(c.models || []).map((m) => el('span', { class: 'chip', style: { marginRight: '4px' } }, [m]))]),
+    el('td', {}, [chipFor(c.status)]),
+    el('td', {}, [fmt.num(c.latency_ms) + ' ms']),
+    el('td', {}, [
+      el('button', {
+        class: 'btn ghost sm' + (c.status === 'active' ? ' danger' : ''),
+        onclick: () => toggleChannel(c.id, c.status),
+      }, [c.status === 'active' ? 'Disable' : 'Enable']),
+    ]),
+  ]));
+  const table = el('table', { class: 'data' }, [
+    el('thead', {}, [el('tr', {}, ['ID / label', 'Provider', 'Adapter', 'Base URL', 'Models', 'Status', 'Latency', ''].map((h) => el('th', {}, [h])))]),
+    el('tbody', {}, rows),
+  ]);
+  root.appendChild(buildPanel(`Channels (${data.length})`, null, table));
+}
+
+function openAddChannel() {
+  openModal({
+    title: 'Add channel',
+    submitLabel: 'Create',
+    fields: [
+      { name: 'id', label: 'ID', hint: '(optional)', placeholder: 'tok_…' },
+      { name: 'label', label: 'Label', placeholder: 'e.g. bailian-team-1' },
+      { name: 'provider', label: 'Provider', placeholder: 'bailian / openai / anthropic / kimi …' },
+      { name: 'adapter', label: 'Adapter', placeholder: 'anthropic / openai (which protocol parser)' },
+      { name: 'base_url', label: 'Base URL', hint: '(blank = upstream default)', placeholder: 'https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic' },
+      { name: 'plaintext', label: 'Upstream API key', placeholder: 'sk-…', type: 'password' },
+      { name: 'models', label: 'Models', hint: '(comma-separated)', placeholder: 'qwen3.6-plus' },
+    ],
+    onSubmit: async (v) => {
+      const body = {
+        provider: v.provider.trim(),
+        label: v.label.trim(),
+        adapter: v.adapter.trim() || v.provider.trim(),
+        plaintext: v.plaintext.trim(),
+        models: v.models.split(',').map((s) => s.trim()).filter(Boolean),
+      };
+      if (v.id.trim()) body.id = v.id.trim();
+      if (v.base_url.trim()) body.base_url = v.base_url.trim();
+      await api('/admin/provider-tokens', { method: 'POST', body: JSON.stringify(body) });
+      toast('Channel created');
+      render();
+    },
+  });
+}
+
+// ---- Routing ----
+async function renderRouting(root) {
+  root.appendChild(pageHeader('Routing rules', 'When a buyer asks for a model, the rule with matching account_group + requested_model picks which channel to use.', [
+    el('button', { class: 'btn primary', onclick: () => openAddRoute() }, ['+ Add rule']),
+  ]));
+  const { data } = await api('/admin/routing-rules');
+  state.data.routing = data;
+  if (!data.length) { root.appendChild(buildPanel('Routes', null, emptyPanel('No routing rules yet.'))); return; }
+  const rows = data.map((r) => el('tr', {}, [
+    el('td', {}, [el('span', { class: 'mono id' }, [r.id])]),
+    el('td', {}, [r.account_group]),
+    el('td', {}, [el('span', { class: 'mono' }, [r.requested_model]), r.requested_provider ? el('div', { class: 'mono muted', style: { fontSize: '11px' } }, ['provider=' + r.requested_provider]) : null].filter(Boolean)),
+    el('td', {}, [el('span', { class: 'mono' }, [r.provider_token_id])]),
+    el('td', {}, [el('span', { class: 'mono' }, [r.actual_provider_model])]),
+    el('td', {}, ['p=' + r.priority + ' w=' + r.weight]),
+    el('td', {}, [chipFor(r.status)]),
+  ]));
+  const table = el('table', { class: 'data' }, [
+    el('thead', {}, [el('tr', {}, ['ID', 'Group', 'Requested', 'Token', 'Upstream model', 'Pri/Wgt', 'Status'].map((h) => el('th', {}, [h])))]),
+    el('tbody', {}, rows),
+  ]);
+  root.appendChild(buildPanel(`Routes (${data.length})`, null, table));
+}
+
+function openAddRoute() {
+  const channels = state.data.channels || [];
+  openModal({
+    title: 'Add routing rule',
+    submitLabel: 'Create',
+    fields: [
+      { name: 'id', label: 'ID', hint: '(optional)' },
+      { name: 'account_group', label: 'Account group', placeholder: 'default', value: 'default' },
+      { name: 'requested_model', label: 'Requested model', placeholder: 'qwen3.6-plus' },
+      { name: 'requested_provider', label: 'Requested provider', hint: '(usually matches adapter name)', placeholder: 'anthropic' },
+      { name: 'provider_token_id', label: 'Provider token ID', placeholder: 'tok-bailian-default', type: 'select', options: [{ value: '', label: '(pick a channel)' }, ...channels.map((c) => ({ value: c.id, label: c.id + ' — ' + c.label }))] },
+      { name: 'actual_provider_model', label: 'Upstream model', hint: '(model name the upstream expects)', placeholder: 'qwen3.6-plus' },
+      { name: 'priority', label: 'Priority', placeholder: '1', type: 'number' },
+      { name: 'weight', label: 'Weight', placeholder: '1', type: 'number' },
+    ],
+    onSubmit: async (v) => {
+      const body = {
+        account_group: v.account_group.trim() || 'default',
+        requested_model: v.requested_model.trim(),
+        provider_token_id: v.provider_token_id.trim(),
+        actual_provider_model: v.actual_provider_model.trim() || v.requested_model.trim(),
+        priority: Number(v.priority) || 1,
+        weight: Number(v.weight) || 1,
+      };
+      if (v.id.trim()) body.id = v.id.trim();
+      if (v.requested_provider.trim()) body.requested_provider = v.requested_provider.trim();
+      await api('/admin/routing-rules', { method: 'POST', body: JSON.stringify(body) });
+      toast('Routing rule created');
+      render();
+    },
+  });
+}
+
+// ---- Pricing ----
+async function renderPricing(root) {
+  root.appendChild(pageHeader('Price book', 'Per-(provider, model) prices in micro-USD per 1M tokens. Used to compute buyer cost and upstream cost.', [
+    el('button', { class: 'btn primary', onclick: () => openAddPrice() }, ['+ Add price']),
+  ]));
+  const { data } = await api('/admin/price-book');
+  state.data.pricing = data;
+  if (!data.length) { root.appendChild(buildPanel('Prices', null, emptyPanel('No price rows yet.'))); return; }
+  const rows = data.map((p) => el('tr', {}, [
+    el('td', {}, [el('span', { class: 'mono id' }, [p.id])]),
+    el('td', {}, [p.provider]),
+    el('td', {}, [el('span', { class: 'mono' }, [p.model])]),
+    el('td', { class: 'mono' }, [fmt.microUsd(p.sell_input_micro_usd_per_1m_tokens / 1) + ' in']),
+    el('td', { class: 'mono' }, [fmt.microUsd(p.sell_output_micro_usd_per_1m_tokens / 1) + ' out']),
+    el('td', { class: 'mono' }, [fmt.microUsd(p.upstream_input_micro_usd_per_1m_tokens)]),
+    el('td', { class: 'mono' }, [fmt.microUsd(p.upstream_output_micro_usd_per_1m_tokens)]),
+    el('td', {}, [p.enabled ? chipFor('active') : chipFor('disabled')]),
+  ]));
+  const table = el('table', { class: 'data' }, [
+    el('thead', {}, [el('tr', {}, ['ID', 'Provider', 'Model', 'Sell in /1M', 'Sell out /1M', 'Cost in /1M', 'Cost out /1M', 'Enabled'].map((h) => el('th', {}, [h])))]),
+    el('tbody', {}, rows),
+  ]);
+  root.appendChild(buildPanel(`Prices (${data.length})`, '$ figures are per 1M tokens.', table));
+}
+
+function openAddPrice() {
+  openModal({
+    title: 'Add price row',
+    submitLabel: 'Create',
+    fields: [
+      { name: 'id', label: 'ID', hint: '(optional)' },
+      { name: 'provider', label: 'Provider', placeholder: 'bailian' },
+      { name: 'model', label: 'Model', placeholder: 'qwen3.6-plus' },
+      { name: 'sell_input', label: 'Sell input (µUSD / 1M tokens)', placeholder: '4500000', type: 'number' },
+      { name: 'sell_output', label: 'Sell output (µUSD / 1M tokens)', placeholder: '22500000', type: 'number' },
+      { name: 'upstream_input', label: 'Upstream input (µUSD / 1M tokens)', placeholder: '1', type: 'number' },
+      { name: 'upstream_output', label: 'Upstream output (µUSD / 1M tokens)', placeholder: '1', type: 'number' },
+    ],
+    onSubmit: async (v) => {
+      const body = {
+        provider: v.provider.trim(),
+        model: v.model.trim(),
+        version: 1,
+        sell_input_micro_usd_per_1m_tokens: Number(v.sell_input) || 0,
+        sell_output_micro_usd_per_1m_tokens: Number(v.sell_output) || 0,
+        upstream_input_micro_usd_per_1m_tokens: Number(v.upstream_input) || 0,
+        upstream_output_micro_usd_per_1m_tokens: Number(v.upstream_output) || 0,
+      };
+      if (v.id.trim()) body.id = v.id.trim();
+      await api('/admin/price-book', { method: 'POST', body: JSON.stringify(body) });
+      toast('Price row created');
+      render();
+    },
+  });
+}
+
+// ---- Accounts ----
+function accountTable(rows) {
+  if (!rows || !rows.length) return emptyPanel('No accounts.');
+  const tbody = el('tbody', {}, rows.map((a) => el('tr', {}, [
+    el('td', {}, [el('div', { class: 'mono id' }, [a.id]), a.display_name ? el('div', { style: { fontSize: '11px', color: 'var(--muted-strong)' } }, [a.display_name]) : null].filter(Boolean)),
+    el('td', {}, [a.account_group]),
+    el('td', {}, [chipFor(a.status)]),
+    el('td', { class: 'mono' }, [fmt.microUsd(a.balance_micro_usd)]),
+    el('td', { class: 'mono' }, [fmt.microUsd(a.reserved_micro_usd)]),
+    el('td', {}, [a.default_provider + (a.default_model ? ' / ' + a.default_model : '')]),
+    el('td', {}, [
+      el('button', { class: 'btn ghost sm', onclick: () => openManualCredit(a) }, ['Credit']),
+      el('button', { class: 'btn ghost sm', onclick: () => openCreateInvite(a) }, ['Invite']),
+    ]),
+  ])));
+  return el('table', { class: 'data' }, [
+    el('thead', {}, [el('tr', {}, ['ID / name', 'Group', 'Status', 'Balance', 'Reserved', 'Default model', ''].map((h) => el('th', {}, [h])))]),
+    tbody,
+  ]);
+}
+
+async function renderAccounts(root) {
+  root.appendChild(pageHeader('Accounts', 'Each account = one buyer namespace. Issue API keys, top up balance, send invite links.', [
+    el('button', { class: 'btn primary', onclick: () => openCreateAccount() }, ['+ New account']),
+  ]));
+  const { data } = await api('/admin/accounts');
+  state.data.accounts = data;
+  root.appendChild(buildPanel(`Accounts (${data.length})`, null, accountTable(data)));
+}
+
+function openCreateAccount() {
+  openModal({
+    title: 'Create account',
+    submitLabel: 'Create',
+    fields: [
+      { name: 'display_name', label: 'Display name', placeholder: 'Friend Agent' },
+      { name: 'account_group', label: 'Account group', value: 'friends', placeholder: 'friends' },
+      { name: 'default_provider', label: 'Default provider', placeholder: 'bailian' },
+      { name: 'default_model', label: 'Default model', placeholder: 'qwen3.6-plus' },
+    ],
+    onSubmit: async (v) => {
+      const body = {
+        display_name: v.display_name.trim(),
+        account_group: v.account_group.trim() || 'default',
+      };
+      if (v.default_provider.trim()) body.default_provider = v.default_provider.trim();
+      if (v.default_model.trim()) body.default_model = v.default_model.trim();
+      await api('/admin/accounts', { method: 'POST', body: JSON.stringify(body) });
+      toast('Account created');
+      render();
+    },
+  });
+}
+
+function openManualCredit(account) {
+  openModal({
+    title: 'Manual credit · ' + account.display_name,
+    submitLabel: 'Credit',
+    fields: [
+      { name: 'amount', label: 'Amount (µUSD)', placeholder: '5000000', hint: '(1 USD = 1,000,000 µUSD)', type: 'number', value: '1000000' },
+    ],
+    onSubmit: async (v) => {
+      await api('/admin/accounts/' + account.id + '/manual-credit', {
+        method: 'POST',
+        body: JSON.stringify({ amount_micro_usd: Number(v.amount) || 0 }),
+      });
+      toast('Credit applied');
+      render();
+    },
+  });
+}
+
+async function openCreateInvite(account) {
+  try {
+    const r = await api('/admin/accounts/' + account.id + '/invites', { method: 'POST', body: '{}' });
+    const url = r.invite_url;
+    openModal({
+      title: 'Invite link · ' + account.display_name,
+      submitLabel: 'Done',
+      fields: [
+        { name: 'invite_url', label: 'Invite URL', hint: '(valid until ' + fmt.date(r.expires_at) + ')', value: url, placeholder: '' },
+      ],
+      onSubmit: async () => {
+        await navigator.clipboard?.writeText(url).catch(() => {});
+        toast('Copied');
+      },
+    });
+  } catch (err) {
+    toast('Invite failed: ' + err.message, 'err');
+  }
+}
+
+// ---- Usage / Logs ----
+async function renderUsage(root) {
+  root.appendChild(pageHeader('Logs', 'Cross-account request log. Newest first. Shows account, model, status, latency, and revenue / upstream cost.'));
+  const { data } = await api('/admin/usage?limit=200');
+  if (!data.length) { root.appendChild(buildPanel('Requests', null, emptyPanel('No requests logged yet.'))); return; }
+  const rows = data.map((r) => el('tr', {}, [
+    el('td', { class: 'mono' }, [fmt.date(r.created_at)]),
+    el('td', {}, [el('span', { class: 'mono', style: { fontSize: '11px' } }, [r.account_id])]),
+    el('td', {}, [r.provider + ' / ', el('span', { class: 'mono' }, [r.model])]),
+    el('td', {}, [el('span', { class: 'mono', style: { fontSize: '11px' } }, [r.provider_token_id || '—'])]),
+    el('td', {}, [r.status_code === 200 ? chipFor('active') : chipFor(r.error_code ? 'critical' : 'depleted')]),
+    el('td', { class: 'mono' }, [fmt.num(r.input_tokens) + ' / ' + fmt.num(r.output_tokens)]),
+    el('td', { class: 'mono' }, [fmt.microUsd(r.sell_cost_micro_usd)]),
+    el('td', { class: 'mono' }, [fmt.num(r.latency_ms) + ' ms']),
+  ]));
+  const table = el('table', { class: 'data' }, [
+    el('thead', {}, [el('tr', {}, ['Time', 'Account', 'Model', 'Channel', 'Status', 'In / Out tok', 'Cost', 'Latency'].map((h) => el('th', {}, [h])))]),
+    el('tbody', {}, rows),
+  ]);
+  root.appendChild(buildPanel(`Recent requests (${data.length})`, 'Limit 200, ordered by time.', table));
+}
+
+async function toggleChannel(id, currentStatus) {
+  const next = currentStatus === 'active' ? 'disabled' : 'active';
+  try {
+    await api('/admin/provider-tokens/' + encodeURIComponent(id) + '/status', {
+      method: 'POST',
+      body: JSON.stringify({ status: next }),
+    });
+    toast(next === 'active' ? 'Channel enabled' : 'Channel disabled');
+    render();
+  } catch (err) {
+    toast('Failed: ' + err.message, 'err');
+  }
+}
+
+// ---- MYC top-ups ----
+async function renderTopups(root) {
+  root.appendChild(pageHeader('MYC top-ups', '谁烧了多少 MYC、换了多少积分。每笔对应一次链上销毁，已防重放。'));
+  const { data } = await api('/admin/topups?limit=200');
+  if (!data.length) { root.appendChild(buildPanel('Top-ups', null, emptyPanel('还没有 MYC 充值记录。'))); return; }
+  const totalMyc = data.reduce((s, t) => s + (t.burned_myc || 0), 0);
+  const totalCredit = data.reduce((s, t) => s + (t.credited_micro_usd || 0), 0);
+  root.appendChild(el('div', { class: 'kpi-grid' }, [
+    kpi('充值笔数', data.length),
+    kpi('累计销毁 MYC', totalMyc.toLocaleString(), '通缩总量'),
+    kpi('累计发放积分', fmt.microUsd(totalCredit)),
+  ]));
+  root.appendChild(el('div', { class: 'spacer-y' }));
+  const rows = data.map((t) => el('tr', {}, [
+    el('td', { class: 'mono' }, [fmt.date(t.created_at)]),
+    el('td', {}, [el('span', { class: 'mono', style: { fontSize: '11px' } }, [t.account_id])]),
+    el('td', { class: 'mono' }, [el('span', { class: 'mono', style: { fontSize: '11px' } }, [fmt.truncate(t.from_address, 14)])]),
+    el('td', { class: 'mono' }, [String(t.burned_myc) + ' MYC']),
+    el('td', { class: 'mono' }, [fmt.microUsd(t.credited_micro_usd)]),
+    el('td', {}, [el('a', { href: 'https://explore.tempo.xyz/tx/' + t.tx_hash, target: '_blank', class: 'mono', style: { fontSize: '11px', color: 'var(--accent)' } }, [fmt.truncate(t.tx_hash, 16)])]),
+  ]));
+  const table = el('table', { class: 'data' }, [
+    el('thead', {}, [el('tr', {}, ['时间', '账户', '付款地址', '销毁 MYC', '到账积分', 'Tx'].map((h) => el('th', {}, [h])))]),
+    el('tbody', {}, rows),
+  ]);
+  root.appendChild(buildPanel(`充值记录 (${data.length})`, '点 Tx 查看链上详情。', table));
+}
+
+// ---- Credit requests ----
+async function renderCreditRequests(root) {
+  root.appendChild(pageHeader('Credit requests', 'Friends ask for top-ups via the buyer dashboard. Approve or reject from here.'));
+  const { data } = await api('/admin/credit-requests');
+  state.data.creditRequests = data;
+  if (!data.length) { root.appendChild(buildPanel('Pending', null, emptyPanel('No credit requests.'))); return; }
+  const rows = data.map((c) => el('tr', {}, [
+    el('td', {}, [el('span', { class: 'mono id' }, [c.id])]),
+    el('td', {}, [el('span', { class: 'mono' }, [c.account_id])]),
+    el('td', { class: 'mono' }, [fmt.microUsd(c.requested_micro_usd)]),
+    el('td', {}, [c.message ? fmt.truncate(c.message, 60) : el('span', { class: 'muted' }, ['—'])]),
+    el('td', {}, [chipFor(c.status)]),
+    el('td', {}, [fmt.date(c.created_at)]),
+    el('td', {}, c.status === 'pending' ? [
+      el('button', { class: 'btn ghost sm', onclick: async () => { await api('/admin/credit-requests/' + c.id + '/approve', { method: 'POST', body: '{}' }); toast('Approved'); render(); } }, ['Approve']),
+      el('button', { class: 'btn ghost sm danger', onclick: async () => { await api('/admin/credit-requests/' + c.id + '/reject', { method: 'POST', body: '{}' }); toast('Rejected'); render(); } }, ['Reject']),
+    ] : []),
+  ]));
+  const table = el('table', { class: 'data' }, [
+    el('thead', {}, [el('tr', {}, ['ID', 'Account', 'Amount', 'Message', 'Status', 'Created', ''].map((h) => el('th', {}, [h])))]),
+    el('tbody', {}, rows),
+  ]);
+  root.appendChild(buildPanel(`Credit requests (${data.length})`, null, table));
+}
+
+// ---- Audit log ----
+async function renderAuditLog(root) {
+  root.appendChild(pageHeader('Audit log', 'Every admin write touches this log: who, what, when. Newest first.'));
+  const { data } = await api('/admin/audit-log?limit=200');
+  state.data.auditLog = data;
+  if (!data.length) { root.appendChild(buildPanel('Events', null, emptyPanel('No audit events.'))); return; }
+  const rows = data.map((r) => el('tr', {}, [
+    el('td', {}, [fmt.date(r.created_at)]),
+    el('td', {}, [r.actor]),
+    el('td', {}, [el('span', { class: 'mono' }, [r.action])]),
+    el('td', {}, [r.target_type + ' / ', el('span', { class: 'mono' }, [r.target_id])]),
+  ]));
+  const table = el('table', { class: 'data' }, [
+    el('thead', {}, [el('tr', {}, ['When', 'Actor', 'Action', 'Target'].map((h) => el('th', {}, [h])))]),
+    el('tbody', {}, rows),
+  ]);
+  root.appendChild(buildPanel(`Recent events (${data.length})`, null, table));
+}
+
+// ---- Boot ----
+async function boot() {
+  if (!getToken()) { renderAuth(); return; }
+  // Validate token with a cheap call.
+  try {
+    await api('/admin/accounts');
+    render();
+  } catch (err) {
+    if (err.status === 401) { clearToken(); renderAuth('Session expired. Sign in again.'); return; }
+    renderShell();
+    $('#workspace').appendChild(el('div', { class: 'error-banner' }, ['Connection failed: ' + err.message]));
+  }
+}
+
+boot();
+</script>
+</body>
+</html>
