@@ -30,6 +30,14 @@
 
 ---
 
+## 🎬 演示
+
+<video src="https://github.com/makoshan/MyTokens/raw/main/docs/demo.mp4" controls muted width="720"></video>
+
+> 如果上方未自动加载，点此观看：[▶️ 演示视频（docs/demo.mp4）](./docs/demo.mp4)
+
+---
+
 ## ✨ 功能一览
 
 **🔐 保管三类 Token（桌面端，全部本地加密，绝不上云）**

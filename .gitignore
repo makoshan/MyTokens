@@ -37,3 +37,6 @@ cloud-gateway/backup-*.sql
 # Local agent / tooling scratch
 .claude/
 .playwright-mcp/
+
+# Original uncompressed demo recording (a compressed docs/demo.mp4 is committed instead)
+/演示.mp4
