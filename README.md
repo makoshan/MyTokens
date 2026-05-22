@@ -12,10 +12,12 @@
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
 </p>
 
-**MyKey** 由两部分组成：
+> **一句话：MyKey 帮你保管三类 Token —— AI Token、API Token、Crypto Token；还能把自己用不完的额度分享给别人使用，顺便把成本赚回来。**
 
-1. **MyKey Desktop** — 本地优先的 macOS 桌面应用（Tauri + React）。你的 API 密钥、AI Provider、加密钱包都加密存储在本地，绝不上云。
-2. **MyKey Compute Gateway** — 一个多租户的 Cloudflare Worker 网关。它让你把**自己授权的上游 AI 算力**（百炼/Qwen、Kimi、OpenAI、Anthropic）安全地分享给信任的朋友：朋友在网页里用 Passkey 创建钱包、领取算力红包、免 gas 兑换额度，然后直接对话或接入自己的 OpenAI 兼容客户端。
+它由两部分组成：
+
+1. **MyKey Desktop**（macOS 桌面应用，Tauri + React）— 本地优先的保险箱。AI Token、API Token、Crypto 钱包全部加密存在本地，绝不上云。
+2. **MyKey Compute Gateway**（Cloudflare Worker）— 多租户算力网关。把你订阅里**用不完的上游 AI 额度**（百炼/Qwen、Kimi、OpenAI、Anthropic）分享出去：对方用 Passkey 建钱包、领额度红包、免 gas 兑换，然后直接对话或接入自己的客户端——**你回收成本，对方拿到便宜好用的算力。**
 
 ---
 
