@@ -32,9 +32,9 @@
 
 ## 🎬 演示
 
-<video src="https://github.com/makoshan/MyTokens/raw/main/docs/demo.mp4" controls muted width="720"></video>
+[![MyKey 演示视频 — 点击播放](./docs/demo-poster.jpg)](https://github.com/makoshan/MyTokens/blob/main/docs/demo.mp4)
 
-> 如果上方未自动加载，点此观看：[▶️ 演示视频（docs/demo.mp4）](./docs/demo.mp4)
+> ▶️ 点击上方封面播放演示（约 2 分半）；也可直接下载 [`docs/demo.mp4`](./docs/demo.mp4)。
 
 ---
 
