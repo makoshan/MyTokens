@@ -1,0 +1,42 @@
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Build outputs
+node_modules/
+dist/
+dist-tests/
+src-tauri/target/
+.tmp-tests/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Archives / binaries
+*.tar.gz
+*.dmg
+*.app
+
+# Large local screenshots/assets
+image*.png
+image copy*.png
+Docs_code/
+src/assets/
+
+# Foundry build artifacts
+contracts/cache/
+contracts/out/
+
+# D1 database backups — may contain encrypted provider tokens / account data
+cloud-gateway/backup-*.sql
+
+# Local agent / tooling scratch
+.claude/
+.playwright-mcp/
+
+# Original uncompressed demo recording (a compressed docs/demo.mp4 is committed instead)
+/演示.mp4

@@ -1,0 +1,118 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "MyKey - AI Asset Vault"
+authors = ["MyKey Team"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+# Multiple bins exist (app + elevenlabs CLI helpers); pin the Tauri app so `cargo run`/`tauri dev` is unambiguous.
+default-run = "app"
+
+[features]
+# `mykey` headless CLI (vault / secret / wallet / api-key). Optional deps keep the
+# default Tauri app build untouched; build the CLI with `--features cli-tools`.
+cli-tools = ["dep:clap", "dep:rpassword"]
+
+[[bin]]
+name = "app"
+path = "src/main.rs"
+
+[[bin]]
+name = "mykey"
+path = "src/bin/mykey.rs"
+required-features = ["cli-tools"]
+
+[[bin]]
+name = "elevenlabs_stt_test"
+path = "src/bin/elevenlabs_stt_test.rs"
+
+[[bin]]
+name = "elevenlabs_tts_wav"
+path = "src/bin/elevenlabs_tts_wav.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.4", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+base64 = "0.22"
+json5 = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.10.0", features = ["macos-private-api", "tray-icon"] }
+tauri-plugin-log = "2"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1.10"
+md5 = "0.7"
+argon2 = "0.5"
+rand = "0.8"
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+sha3 = "0.10"
+k256 = { version = "0.13", features = ["ecdsa"] }
+walkdir = "2"
+dirs = "6"
+rusqlite = { version = "0.31", features = ["bundled"] }
+thiserror = "1.0"
+keyring = "2.3"
+toml = "0.8"
+shellexpand = "3.1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream", "multipart"] }
+tauri-plugin-dialog = "2.6.0"
+tauri-plugin-global-shortcut = "2.3.0"
+tauri-plugin-localhost = "2.3.2"
+handy-keys = "0.2.0"
+core-graphics = "0.24"
+core-foundation = "0.10"
+axum = { version = "0.8.4", features = ["json"] }
+tokio = { version = "1", features = ["net", "sync"] }
+# Headless CLI deps — only pulled in under the `cli-tools` feature.
+clap = { version = "4", features = ["derive"], optional = true }
+rpassword = { version = "7", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Use a non-activating NSPanel for the voice overlay so it doesn't steal focus from the
+# currently active app (critical for reliable auto-paste).
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }
+cpal = "0.15"
+hound = "3.5"
+# Native macOS passkey (Apple AuthenticationServices) for the real-domain WebAuthn PRF path.
+# Aligns with the objc2 0.6 / objc2-foundation 0.3 already in the tree (via tauri-nspanel).
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+  "NSString",
+  "NSData",
+  "NSArray",
+  "NSDictionary",
+  "NSError",
+  "NSObject",
+] }
+objc2-authentication-services = { version = "0.3", features = [
+  "ASAuthorization",
+  "ASAuthorizationRequest",
+  "ASAuthorizationCredential",
+  "ASPublicKeyCredential",
+  "ASAuthorizationController",
+  "ASAuthorizationPlatformPublicKeyCredentialProvider",
+  "ASAuthorizationPlatformPublicKeyCredentialRegistrationRequest",
+  "ASAuthorizationPlatformPublicKeyCredentialAssertionRequest",
+  "ASAuthorizationPlatformPublicKeyCredentialRegistration",
+  "ASAuthorizationPlatformPublicKeyCredentialAssertion",
+  "ASAuthorizationPlatformPublicKeyCredentialDescriptor",
+  "ASAuthorizationPublicKeyCredentialRegistration",
+  "ASAuthorizationPublicKeyCredentialAssertion",
+  "ASAuthorizationPublicKeyCredentialPRFRegistrationInput",
+  "ASAuthorizationPublicKeyCredentialPRFRegistrationOutput",
+  "ASAuthorizationPublicKeyCredentialPRFAssertionInput",
+  "ASAuthorizationPublicKeyCredentialPRFAssertionOutput",
+] }

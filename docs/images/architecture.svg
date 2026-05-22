@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" font-family="Inter, 'Noto Sans SC', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef4fc"/>
+    </linearGradient>
+    <linearGradient id="hub" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#007fff"/>
+      <stop offset="1" stop-color="#0cc5ff"/>
+    </linearGradient>
+    <filter id="card" x="-8%" y="-8%" width="116%" height="124%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#111d4a" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#007fff"/>
+    </marker>
+    <style>
+      .h1   { font-size: 26px; font-weight: 800; fill: #111d4a; letter-spacing: -0.02em; }
+      .ct   { font-size: 18px; font-weight: 800; fill: #111d4a; }
+      .ctw  { font-size: 18px; font-weight: 800; fill: #ffffff; }
+      .mut  { font-size: 13px; font-weight: 600; fill: #475467; }
+      .mutw { font-size: 13px; font-weight: 600; fill: #e3f2ff; }
+      .lbl  { font-size: 13px; font-weight: 700; fill: #006cd9; }
+      .badge{ font-size: 12px; font-weight: 700; fill: #b54708; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="520" fill="url(#bg)"/>
+  <text x="60" y="56" class="h1">MyKey 系统架构</text>
+  <rect x="980" y="36" width="160" height="30" rx="15" fill="#fff7ed" stroke="#f9b878"/>
+  <text x="1000" y="56" class="badge">Alpha · 测试网</text>
+
+  <!-- ===== main row ===== -->
+  <!-- 运营者 -->
+  <g filter="url(#card)">
+    <rect x="60" y="110" width="300" height="120" rx="16" fill="#f8f9fa" stroke="#ecedf1"/>
+    <rect x="60" y="110" width="6" height="120" rx="3" fill="#007fff"/>
+  </g>
+  <text x="88" y="158" class="ct">🧑‍💻 运营者 · 桌面 App</text>
+  <text x="88" y="188" class="mut">密钥库 · 算力网关运营台</text>
+  <text x="88" y="210" class="mut">Crypto 钱包 · CLI / Skill</text>
+
+  <!-- 网关 -->
+  <g filter="url(#card)">
+    <rect x="450" y="110" width="300" height="120" rx="16" fill="url(#hub)"/>
+  </g>
+  <text x="478" y="158" class="ctw">☁️ MyKey 网关</text>
+  <text x="478" y="186" class="mutw">Cloudflare Worker</text>
+  <text x="478" y="210" class="mutw">兼容 relay · µUSD 计费 · 多租户</text>
+
+  <!-- 朋友 -->
+  <g filter="url(#card)">
+    <rect x="840" y="110" width="300" height="120" rx="16" fill="#f8f9fa" stroke="#ecedf1"/>
+    <rect x="840" y="110" width="6" height="120" rx="3" fill="#007fff"/>
+  </g>
+  <text x="868" y="158" class="ct">🧑‍🤝‍🧑 朋友 · 浏览器</text>
+  <text x="868" y="188" class="mut">Passkey 钱包 · 领红包</text>
+  <text x="868" y="210" class="mut">免 gas 兑换 · AI 对话</text>
+
+  <!-- arrows: 运营者 -> 网关 -> 朋友 -->
+  <path d="M 360 170 L 446 170" stroke="#007fff" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="372" y="160" class="lbl">分享 AI 额度</text>
+  <path d="M 840 188 L 754 188" stroke="#007fff" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 754 152 L 840 152" stroke="#007fff" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="772" y="142" class="lbl">领取 / 对话</text>
+
+  <!-- ===== bottom row ===== -->
+  <!-- 上游 AI -->
+  <g filter="url(#card)">
+    <rect x="380" y="350" width="290" height="110" rx="16" fill="#f8f9fa" stroke="#ecedf1"/>
+    <rect x="380" y="350" width="6" height="110" rx="3" fill="#0cc5ff"/>
+  </g>
+  <text x="408" y="396" class="ct">🤖 上游 AI Providers</text>
+  <text x="408" y="426" class="mut">百炼/Qwen · Kimi · OpenAI · Anthropic</text>
+
+  <!-- 链上 -->
+  <g filter="url(#card)">
+    <rect x="730" y="350" width="290" height="110" rx="16" fill="#f8f9fa" stroke="#ecedf1"/>
+    <rect x="730" y="350" width="6" height="110" rx="3" fill="#0cc5ff"/>
+  </g>
+  <text x="758" y="396" class="ct">🔗 链上 · Sepolia</text>
+  <text x="758" y="426" class="mut">MYC 额度币 · Relayer 代付 · USDT</text>
+
+  <!-- arrows: 网关 -> 上游 / 链上 -->
+  <path d="M 560 230 L 520 346" stroke="#007fff" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="430" y="300" class="lbl">代调模型</text>
+  <path d="M 640 230 L 830 346" stroke="#007fff" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="772" y="300" class="lbl">充值 / 代付</text>
+</svg>

@@ -1,0 +1,241 @@
+.key-list {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.key-list-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.key-list-search {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.key-list-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 127, 255, 0.14);
+}
+
+.group-mode-switch {
+  display: inline-flex;
+  align-self: flex-start;
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 4px;
+  gap: 4px;
+}
+
+.group-mode-btn {
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-pill);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.group-mode-btn.active {
+  background: #fff;
+  color: var(--accent-dark);
+  box-shadow: var(--shadow-soft);
+}
+
+.group-mode-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.provider-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.provider-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.provider-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  color: white;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.provider-badge-btn {
+  border: none;
+  cursor: pointer;
+}
+
+.provider-badge-btn:hover {
+  filter: brightness(0.95);
+}
+
+.provider-count {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.keys-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.key-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.key-item:hover {
+  background: var(--panel-alt);
+  border-color: rgba(0, 127, 255, 0.36);
+  box-shadow: var(--shadow-soft);
+}
+
+.key-item.selected {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-soft);
+}
+
+.key-item.inactive {
+  opacity: 0.6;
+}
+
+.key-item-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.key-item-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.key-item-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
+.key-item-preview {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.key-item-status {
+  font-size: 10px;
+  color: var(--status-warning);
+  border: 1px solid #f6a87c;
+  background: var(--status-warning-bg);
+  border-radius: var(--radius-pill);
+  padding: 2px 7px;
+}
+
+.key-item-meta {
+  margin-top: 7px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.key-provider-tag {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-pill);
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+  line-height: 1.2;
+}
+
+.key-provider-tag-btn {
+  border: none;
+  cursor: pointer;
+}
+
+.key-provider-tag-btn:hover {
+  background: rgba(0, 127, 255, 0.14);
+}
+
+.key-source-path {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.key-item-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: 10px;
+}
+
+.action-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+  opacity: 0.7;
+}
+
+.key-item:hover .action-btn {
+  opacity: 1;
+}
+
+.action-btn:hover {
+  background: rgba(0, 127, 255, 0.12);
+}
+
+.copy-btn:hover {
+  background: rgba(14, 165, 233, 0.16);
+}
+
+.key-list-empty {
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}

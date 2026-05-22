@@ -1,0 +1,11 @@
+# Local Wrangler dev secrets — never commit real values.
+.dev.vars
+.dev.vars.local
+
+# Wrangler local D1 / KV state.
+.wrangler/
+
+# Build outputs.
+dist/
+dist-tests/
+node_modules/

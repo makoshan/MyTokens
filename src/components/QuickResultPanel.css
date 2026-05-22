@@ -1,0 +1,138 @@
+.quick-result-window {
+  height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 55%, #f1f5f9 100%);
+  color: #0f172a;
+  font-family: "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.quick-result-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.quick-result-header h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.quick-result-header p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.quick-close-btn {
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #fff;
+  color: #334155;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.quick-result-body {
+  margin-top: 12px;
+  flex: 1;
+  overflow: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: #ffffffd9;
+  padding: 12px;
+}
+
+.quick-result-body.empty,
+.quick-result-body.error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: #64748b;
+}
+
+.quick-error-title {
+  margin: 0 0 8px;
+  color: #b91c1c;
+  font-weight: 700;
+}
+
+.quick-error-code {
+  margin: 0;
+  color: #dc2626;
+  font-size: 12px;
+}
+
+.quick-result-block + .quick-result-block {
+  margin-top: 12px;
+}
+
+.quick-result-label {
+  font-size: 12px;
+  color: #475569;
+  margin-bottom: 6px;
+}
+
+.quick-select {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #fff;
+  color: #0f172a;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.quick-result-block pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 10px;
+  color: #0f172a;
+  line-height: 1.45;
+}
+
+.quick-provider-select-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quick-ocr-label {
+  margin-top: 4px;
+}
+
+.quick-result-error pre {
+  color: #b91c1c;
+}
+
+.quick-result-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+@media (max-width: 640px) {
+  .quick-result-window {
+    padding: 10px;
+  }
+
+  .quick-result-footer {
+    flex-wrap: wrap;
+    justify-content: stretch;
+  }
+
+  .quick-result-footer .btn {
+    flex: 1;
+  }
+}

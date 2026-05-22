@@ -1,0 +1,68 @@
+name = "mykey-compute-gateway"
+main = "src/index.ts"
+compatibility_date = "2026-05-19"
+compatibility_flags = ["nodejs_compat"]
+
+# Public, non-secret variables. Secrets (SERVER_PEPPER, ADMIN_TOKEN,
+# MASTER_KEY_V1) are uploaded via `wrangler secret put` — never committed.
+[vars]
+PUBLIC_GATEWAY_URL = "https://mykey-compute-gateway.v2eth.workers.dev"
+
+# Comma-separated IPv4 / CIDR list that may reach /admin/*. Empty value =
+# unrestricted (dev). Production deploys MUST narrow this — e.g.
+# "203.0.113.5,10.0.0.0/24" — so a leaked admin token alone cannot drive
+# the control plane.
+ADMIN_IP_ALLOWLIST = ""
+
+# Per-account rate limit (requests per minute) enforced inside the Account
+# Durable Object. Empty / unset = no limit. Counter survives DO hibernation.
+ACCOUNT_RPM_LIMIT = ""
+
+# MYC on-chain top-up. Buyers burn MYC and submit the tx hash; the gateway
+# verifies the burn via RPC and credits balance. 1 MYC = $1.
+# Currently pointed at Ethereum Sepolia (validation). For production, switch to
+# the chosen chain (e.g. Base mainnet) + that chain's MYC address.
+# (Var names keep the TEMPO_ prefix for code compat; values are chain-neutral.)
+TEMPO_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com"
+TEMPO_CHAIN_ID = "11155111"
+MYC_TOKEN_ADDRESS = "0x826fc283d2007A261347Cf4c0ff316e486506eBb"
+MYC_MICRO_USD_PER_TOKEN = "1000000"
+
+# Buy MYC with stablecoin (USDT). The buyer pays USDT to the relayer (gasless,
+# passkey-signed) and the relayer hands back MYC, which they redeem to credit.
+# Fill STABLECOIN_TOKEN_ADDRESS after running contracts/script/deploy-stablecoin.sh;
+# until then the buyer dashboard hides the USDT purchase option. On mainnet point
+# this at real USDC. STABLECOIN_MYC_RATE = MYC per 1 stablecoin (1:1 default).
+# The faucet (STABLECOIN_FAUCET_AMOUNT, raw 6-decimal) is testnet-only.
+# Test USDT (MockStablecoin) on Sepolia, owner = relayer (so faucet can mint).
+# Deployed 2026-05-22, tx 0x5366d91c…e92a06.
+STABLECOIN_TOKEN_ADDRESS = "0x6aF00A6ec507aE429b2baF6484F834FeD2B1B868"
+STABLECOIN_MYC_RATE = "1"
+STABLECOIN_FAUCET_AMOUNT = "20000000"
+
+[observability]
+enabled = true
+
+# Static SPA assets (buyer dashboard at /, admin console at /manage). Worker
+# handles all API and the /accept invite landing; everything else falls
+# through to the bundled assets. `not_found_handling = "none"` prevents an
+# SPA fallback from swallowing API 404s.
+[assets]
+directory = "./static"
+binding = "ASSETS"
+not_found_handling = "none"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mykey-compute-gateway"
+# Replace after running: wrangler d1 create mykey-compute-gateway
+database_id = "d9cfa3b8-b84d-44ff-9e69-2a2b7da179ed"
+migrations_dir = "migrations"
+
+[[durable_objects.bindings]]
+name = "ACCOUNT_DO"
+class_name = "AccountDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AccountDurableObject"]

@@ -1,0 +1,24 @@
+{
+  "name": "@mykey/buyer-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "rm -rf dist-tests && tsc -p tsconfig.test.json && node --test dist-tests/tests/*.test.js"
+  },
+  "dependencies": {
+    "@consenlabs/tcx-wasm": "^0.9.1",
+    "@vitejs/plugin-react": "^5.1.4",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "typescript": "^5.9.3",
+    "viem": "^2.50.3",
+    "vite": "^7.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.13",
+    "@types/react-dom": "^19.2.3"
+  }
+}

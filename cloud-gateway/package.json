@@ -1,0 +1,27 @@
+{
+  "name": "@mykey/cloud-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "rm -rf dist-tests && tsc -p tsconfig.test.json && node --test dist-tests/tests/*.test.js",
+    "dev": "wrangler dev --local --persist-to .wrangler/state",
+    "deploy": "wrangler deploy",
+    "migrate:local": "wrangler d1 migrations apply mykey-compute-gateway --local --persist-to .wrangler/state",
+    "migrate:remote": "wrangler d1 migrations apply mykey-compute-gateway --remote",
+    "gen-secrets": "node scripts/gen-secrets.mjs",
+    "bootstrap": "node scripts/bootstrap.mjs",
+    "test:workers": "vitest run --config vitest.config.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.7",
+    "@cloudflare/workers-types": "^4.20260519.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.6",
+    "wrangler": "^4.93.0"
+  },
+  "dependencies": {
+    "viem": "^2.50.3"
+  }
+}

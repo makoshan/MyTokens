@@ -1,0 +1,450 @@
+.app-manager-panel {
+  height: 100%;
+}
+
+.app-manager-empty {
+  min-height: 260px;
+  justify-content: center;
+  align-items: center;
+}
+
+.app-manager-notice {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-alt);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 10px;
+}
+
+.app-manager-gateway-notice {
+  margin-bottom: 0;
+  font-weight: 500;
+}
+
+.app-manager-gateway-notice code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px 6px;
+}
+
+.app-manager-list {
+  display: grid;
+  gap: 14px;
+  overflow: auto;
+}
+
+.app-manager-shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.7fr) minmax(360px, 1fr);
+  gap: 14px;
+  min-height: 0;
+  flex: 1;
+}
+
+.app-manager-nav {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel-alt);
+  padding: 10px;
+  min-height: 0;
+}
+
+.app-manager-nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  max-height: 100%;
+}
+
+.app-manager-nav-item {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  padding: 10px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.app-manager-nav-item.active {
+  border-color: rgba(0, 127, 255, 0.34);
+  background: var(--surface-blue);
+}
+
+.app-manager-nav-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.app-manager-nav-subtitle {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.app-manager-nav-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.app-manager-search {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.app-manager-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 127, 255, 0.14);
+}
+
+.app-manager-item {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel-alt);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.app-manager-detail-item {
+  min-height: 0;
+  overflow: auto;
+}
+
+.app-manager-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.app-manager-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.app-manager-subtitle {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.app-manager-badges {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.app-manager-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 11px;
+  border: 1px solid transparent;
+}
+
+.app-manager-badge.running {
+  background: rgba(34, 197, 94, 0.12);
+  color: #166534;
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.app-manager-badge.stopped {
+  background: rgba(107, 114, 128, 0.12);
+  color: #4b5563;
+  border-color: rgba(107, 114, 128, 0.3);
+}
+
+.app-manager-badge.enabled {
+  background: var(--surface-blue);
+  color: var(--accent);
+  border-color: rgba(0, 127, 255, 0.34);
+}
+
+.app-manager-badge.disabled {
+  background: rgba(107, 114, 128, 0.12);
+  color: #4b5563;
+  border-color: rgba(107, 114, 128, 0.3);
+}
+
+.app-manager-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.app-manager-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.app-manager-field label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.app-manager-field select,
+.app-manager-field input {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.app-manager-model-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(140px, 1fr);
+  gap: 8px;
+}
+
+.app-manager-model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.app-manager-model-chip {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--muted);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.app-manager-model-chip.active {
+  border-color: rgba(0, 127, 255, 0.34);
+  background: var(--surface-blue);
+  color: var(--accent);
+}
+
+.app-manager-chip-hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.app-manager-preset-box {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.78);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.app-manager-preset-title {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.app-manager-preset-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.app-manager-preset-chip {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 7px 10px;
+  background: #fff;
+  font-size: 12px;
+  color: #0f172a;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.app-manager-preset-chip span {
+  color: var(--muted);
+  font-size: 11px;
+  font-family: var(--mono);
+}
+
+.app-manager-preset-chip.active {
+  border-color: rgba(0, 127, 255, 0.34);
+  background: var(--surface-blue);
+  color: var(--accent);
+}
+
+.app-manager-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.app-manager-tab-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.app-manager-tab {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--muted);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.app-manager-tab.active {
+  border-color: rgba(0, 127, 255, 0.34);
+  background: var(--surface-blue);
+  color: var(--accent);
+}
+
+.app-manager-tab-panel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.75);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.app-manager-tab-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.app-manager-json-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.app-manager-json-editor label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.app-manager-json-editor textarea {
+  width: 100%;
+  min-height: 190px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px;
+  font-size: 12px;
+  font-family: var(--mono);
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.app-manager-doc-links {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.app-manager-doc-link {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  text-decoration: none;
+  background: #fff;
+}
+
+.app-manager-doc-link:hover {
+  border-color: rgba(0, 127, 255, 0.34);
+  color: var(--accent);
+}
+
+.app-manager-tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.app-manager-tool-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.78);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.app-manager-tool-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.app-manager-tool-empty {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  color: var(--muted);
+  text-align: center;
+  font-size: 12px;
+}
+
+@media (max-width: 720px) {
+  .app-manager-tool-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.app-manager-updated {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+@media (max-width: 860px) {
+  .app-manager-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .app-manager-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .app-manager-model-row {
+    grid-template-columns: 1fr;
+  }
+}
