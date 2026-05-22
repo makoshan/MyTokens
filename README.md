@@ -8,6 +8,7 @@
   <img src="https://img.shields.io/badge/Platform-macOS-lightgrey?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/Desktop-Tauri%20%2B%20React-blue?style=flat-square" alt="Desktop">
   <img src="https://img.shields.io/badge/Gateway-Cloudflare%20Worker-f38020?style=flat-square" alt="Gateway">
+  <img src="https://img.shields.io/badge/AI%20friendly-CLI%20%2B%20Skill-007fff?style=flat-square" alt="AI friendly">
   <img src="https://img.shields.io/badge/Status-Alpha-orange?style=flat-square" alt="Status">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
 </p>
@@ -79,6 +80,34 @@ OpenAI / Anthropic 兼容的多租户 AI 网关，单部署服务多个运营者
 
 ---
 
+## 🤖 AI 友好 · CLI + Skill
+
+MyKey 不止有图形界面——它能被 AI Agent / 脚本直接驱动，**不必打开桌面 App**。
+
+### `mykey` 命令行
+一个 headless Rust CLI，复用桌面 App 同一个加密 `vault.db`（同样的 AES-256-GCM、同样的 tcx-wasm keystore 引擎，CLI 建的钱包 GUI 能直接解锁签名）。
+
+```bash
+cd src-tauri && cargo build --features cli-tools --bin mykey   # 默认 App 构建不受影响
+
+mykey vault status                 # 保险箱状态 / 解锁方式
+mykey secret list [--reveal]       # 密钥库：API 凭据（默认打码）
+mykey secret add --provider openai --name prod   # 省略 --key 时从 stdin / 隐藏提示读入
+mykey wallet create --name main    # 随机助记词 → tcx keystore
+mykey apikey providers             # 已配置的 AI Provider
+mykey gateway creds claude_code    # 取算力网关接入凭据
+mykey --json wallet list           # 任意命令加 --json 输出机器可读结果
+```
+
+- **主密码永不进 argv**：走 `MYKEY_MASTER_PASSWORD` 环境变量或隐藏提示。
+- **`--json`**：所有命令支持机器可读输出，方便 Agent 解析。
+- 覆盖：vault 生命周期、密钥库、Crypto 钱包（创建/导入/观察/导出）、Provider/数据源 API Key、网关凭据。
+
+### Claude Code Skill
+仓库内置 [`skills/mykey/SKILL.md`](./skills/mykey/SKILL.md)。把它复制到 `~/.claude/skills/mykey/`，Claude Code 就能在你说「密钥库」「创建钱包」「取网关凭据」时自动调用上面的 CLI——AI 直接、安全地操作你的本地保险箱。
+
+---
+
 ## 📁 仓库结构
 
 ```
@@ -93,6 +122,7 @@ mykey/
 ├── contracts/           # Solidity 合约 (MYC 额度代币 + 测试 USDT) + Foundry 测试
 ├── cloudflare/          # passkey AASA worker
 ├── scripts/             # tcx-keygen 等工具
+├── skills/              # Claude Code skill (mykey — AI 驱动 CLI)
 └── docs/                # 设计、计划、运营手册、配图
 ```
 
