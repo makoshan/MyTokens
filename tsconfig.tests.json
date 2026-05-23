@@ -32,6 +32,8 @@
     "tests/cryptoWalletCache.test.ts",
     "tests/oklinkApi.test.ts",
     "tests/computeGateway.test.ts",
+    "tests/computeGatewayManager.test.ts",
+    "tests/desktopPackaging.test.ts",
     "tests/homeNavigation.test.ts",
     "tests/vaultUnlock.test.ts",
     "tests/clippyModelTesting.test.ts"

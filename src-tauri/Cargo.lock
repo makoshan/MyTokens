@@ -195,55 +195,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
 
 [[package]]
-name = "app"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "argon2",
- "axum",
- "base64 0.22.1",
- "chrono",
- "clap",
- "core-foundation 0.10.1",
- "core-graphics 0.24.0",
- "cpal",
- "dirs",
- "handy-keys",
- "hkdf",
- "hound",
- "json5",
- "k256",
- "keyring",
- "log",
- "md5",
- "objc2",
- "objc2-authentication-services",
- "objc2-foundation",
- "rand 0.8.5",
- "regex",
- "reqwest 0.12.28",
- "rpassword",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "sha3",
- "shellexpand",
- "tauri",
- "tauri-build",
- "tauri-nspanel",
- "tauri-plugin-dialog",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-localhost",
- "tauri-plugin-log",
- "thiserror 1.0.69",
- "tokio",
- "toml 0.8.2",
- "uuid",
- "walkdir",
-]
-
-[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3250,6 +3201,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "mykey-desktop"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "core-foundation 0.10.1",
+ "core-foundation 0.9.4",
+ "core-graphics 0.24.0",
+ "cpal",
+ "dirs",
+ "handy-keys",
+ "hkdf",
+ "hound",
+ "json5",
+ "k256",
+ "keyring",
+ "log",
+ "md5",
+ "objc2",
+ "objc2-authentication-services",
+ "objc2-foundation",
+ "rand 0.8.5",
+ "regex",
+ "reqwest 0.12.28",
+ "rpassword",
+ "rusqlite",
+ "security-framework",
+ "security-framework-sys",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sha3",
+ "shellexpand",
+ "tauri",
+ "tauri-build",
+ "tauri-nspanel",
+ "tauri-plugin-dialog",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-localhost",
+ "tauri-plugin-log",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml 0.8.2",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
 name = "native-tls"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5040,6 +5043,7 @@ dependencies = [
  "core-foundation 0.9.4",
  "core-foundation-sys 0.8.7",
  "libc",
+ "num-bigint",
  "security-framework-sys",
 ]
 

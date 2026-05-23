@@ -1,9 +1,11 @@
 import { strict as assert } from 'node:assert'
 import test from 'node:test'
 import {
+  canEnableBiometricKeychain,
   canRegisterVaultPasskey,
   classifyPasskeyError,
   describeVaultUnlockState,
+  shouldShowBiometricLogin,
   shouldShowVaultPasskeyLogin,
   type VaultUnlockState,
 } from '../src/utils/vaultUnlock'
@@ -32,8 +34,17 @@ test('describeVaultUnlockState reports password, passkey and recovery availabili
 test('canRegisterVaultPasskey only allows master-password sessions that are not busy', () => {
   assert.equal(canRegisterVaultPasskey('master-password', configuredState, false), true)
   assert.equal(canRegisterVaultPasskey('passkey-prf', configuredState, false), false)
+  assert.equal(canRegisterVaultPasskey('biometric-keychain', configuredState, false), false)
   assert.equal(canRegisterVaultPasskey('master-password', configuredState, true), false)
   assert.equal(canRegisterVaultPasskey('master-password', { ...configuredState, configured: false }, false), false)
+})
+
+test('canEnableBiometricKeychain only allows configured master-password sessions that are not busy', () => {
+  assert.equal(canEnableBiometricKeychain('master-password', configuredState, false), true)
+  assert.equal(canEnableBiometricKeychain('passkey-prf', configuredState, false), false)
+  assert.equal(canEnableBiometricKeychain('biometric-keychain', configuredState, false), false)
+  assert.equal(canEnableBiometricKeychain('master-password', configuredState, true), false)
+  assert.equal(canEnableBiometricKeychain('master-password', { ...configuredState, configured: false }, false), false)
 })
 
 test('shouldShowVaultPasskeyLogin only shows passkey login after a passkey is configured', () => {
@@ -42,6 +53,12 @@ test('shouldShowVaultPasskeyLogin only shows passkey login after a passkey is co
   assert.equal(shouldShowVaultPasskeyLogin('login', null), false)
   assert.equal(shouldShowVaultPasskeyLogin('login', { ...configuredState, passkeys: [] }), false)
   assert.equal(shouldShowVaultPasskeyLogin('login', { ...configuredState, configured: false }), false)
+})
+
+test('shouldShowBiometricLogin only shows Touch ID login when a keychain item exists', () => {
+  assert.equal(shouldShowBiometricLogin('login', true), true)
+  assert.equal(shouldShowBiometricLogin('setup', true), false)
+  assert.equal(shouldShowBiometricLogin('login', false), false)
 })
 
 test('classifyPasskeyError identifies WKWebView NotAllowedError as browser-bridge fallback eligible', () => {

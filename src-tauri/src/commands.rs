@@ -5,10 +5,10 @@ use crate::{
     AppRoute, AppState, Credential, CryptoAccount, CryptoToken, CryptoWallet, ExternalLibraryMcp,
     ExternalLibrarySkill, GatewayAccessCredentials, GatewayPolicySettings, GatewayRequestLog,
     GatewayTrafficMetrics, GlobalSettingsPayload, IntegrationConfigSnapshot,
-    OpencodeConfigSnapshot, Project, PromptTemplate, ProviderAppBindingInput, ProviderConfig,
-    ProviderDetails, ProviderEndpointInput, ProviderEnvVarInput, QuickActionHistoryRecord,
-    QuickActionResult, QuickActionSettings, VoiceInputHistoryRecord,
-    PasskeyBridgeResult, PASSKEY_BRIDGE_PORT,
+    OpencodeConfigSnapshot, PasskeyBridgeResult, Project, PromptTemplate, ProviderAppBindingInput,
+    ProviderConfig, ProviderDetails, ProviderEndpointInput, ProviderEnvVarInput,
+    QuickActionHistoryRecord, QuickActionResult, QuickActionSettings, VoiceInputHistoryRecord,
+    PASSKEY_BRIDGE_PORT,
 };
 use base64::Engine as _;
 use regex::Regex;
@@ -219,6 +219,46 @@ pub fn authenticate(password: String, state: State<'_, AppState>) -> Result<bool
         vault.ensure_secret_encryption(&password);
     }
     Ok(ok)
+}
+
+#[tauri::command]
+pub fn biometric_keychain_available() -> bool {
+    crate::biometric_keychain::is_available()
+}
+
+#[tauri::command]
+pub fn biometric_keychain_configured() -> bool {
+    crate::biometric_keychain::is_configured()
+}
+
+#[tauri::command]
+pub fn enable_biometric_keychain_unlock(
+    master_password: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Invalid master password".to_string());
+    }
+    crate::biometric_keychain::store_master_password(&master_password)?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn unlock_with_biometric_keychain(state: State<'_, AppState>) -> Result<String, String> {
+    let master_password = crate::biometric_keychain::read_master_password()?;
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    if !vault.authenticate(&master_password) {
+        return Err("Stored Touch ID unlock is no longer valid".to_string());
+    }
+    vault.ensure_secret_encryption(&master_password);
+    Ok(master_password)
+}
+
+#[tauri::command]
+pub fn remove_biometric_keychain_unlock() -> Result<bool, String> {
+    crate::biometric_keychain::remove_master_password()?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -6176,7 +6216,11 @@ pub async fn compute_gateway_operator_connect(
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("operator_register HTTP {}: {}", status.as_u16(), text));
+        return Err(format!(
+            "operator_register HTTP {}: {}",
+            status.as_u16(),
+            text
+        ));
     }
     let body: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     let session = body
@@ -6219,6 +6263,7 @@ pub async fn compute_gateway_operator_request(
         "GET" => client.get(&url),
         "POST" => client.post(&url),
         "PATCH" => client.patch(&url),
+        "DELETE" => client.delete(&url),
         other => return Err(format!("unsupported method: {other}")),
     };
     req = req

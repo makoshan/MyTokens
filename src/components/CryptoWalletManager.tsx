@@ -248,6 +248,18 @@ function formatUsd(value?: string | null): string | null {
   return `$${num.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
 }
 
+// Compact a balance for table/summary display: thousands separators, at most 6
+// fraction digits, trailing zeros trimmed. Exact precision stays available in
+// the token 详情 drawer. Non-numeric text passes through unchanged.
+function formatAmount(text?: string | null): string {
+  if (!text || text === '--') return '--'
+  const num = Number(text.replace(/,/g, ''))
+  if (!Number.isFinite(num)) return text
+  // Don't show a non-zero balance as a flat "0"; flag it as a tiny dust amount.
+  if (num !== 0 && Math.abs(num) < 0.000001) return '<0.000001'
+  return num.toLocaleString(undefined, { maximumFractionDigits: 6 })
+}
+
 const trustWalletChain: Record<string, string> = {
   ETHEREUM: 'ethereum',
   BASE: 'base',
@@ -355,8 +367,10 @@ export default function CryptoWalletManager({
   const [loadingGasDefaults, setLoadingGasDefaults] = useState(false)
   const [broadcastingTx, setBroadcastingTx] = useState(false)
   const [signingTx, setSigningTx] = useState(false)
-  const [balanceByAccount, setBalanceByAccount] = useState<Record<string, string>>({})
-  const [balanceByToken, setBalanceByToken] = useState<Record<string, string>>({})
+  // Seed from the cached snapshot so balances render instantly on open; the
+  // background scan overwrites them with fresh values when it returns.
+  const [balanceByAccount, setBalanceByAccount] = useState<Record<string, string>>(initialCache.balanceByAccount)
+  const [balanceByToken, setBalanceByToken] = useState<Record<string, string>>(initialCache.balanceByToken)
   const [broadcastHash, setBroadcastHash] = useState('')
   const [walletUnlockSecret, setWalletUnlockSecret] = useState('')
   const [pendingTxInput, setPendingTxInput] = useState<Record<string, unknown> | null>(null)
@@ -557,13 +571,15 @@ export default function CryptoWalletManager({
     if (wallets.length === 0) return
     cache.logoByToken = logoByToken
     cache.valueByToken = valueByToken
+    cache.balanceByToken = balanceByToken
     cache.trustWalletStatusByToken = trustWalletStatusByToken
+    cache.balanceByAccount = balanceByAccount
     const liveTokenIds = new Set(wallets.flatMap((wallet) => wallet.tokens.map((token) => token.id)))
     const liveAccountIds = new Set(wallets.flatMap((wallet) => wallet.accounts.map((account) => account.id)))
     const pruned = pruneCryptoWalletCache(cache, liveTokenIds, liveAccountIds)
     cacheRef.current = pruned
     saveCryptoWalletCache(pruned)
-  }, [logoByToken, valueByToken, trustWalletStatusByToken, wallets])
+  }, [logoByToken, valueByToken, balanceByToken, trustWalletStatusByToken, balanceByAccount, wallets])
 
   // Show the active account's last-scanned portfolio total from cache while a
   // fresh scan (if any) is still in flight.
@@ -2059,9 +2075,7 @@ export default function CryptoWalletManager({
         ))}
       </div>
       <div className="crypto-top-actions">
-        <button className="crypto-mini-action" onClick={onRefresh} disabled={loading}>
-          {loading ? '刷新中' : '刷新'}
-        </button>
+        {/* 「刷新」入口先隐藏（自动扫描仍在 mount/TTL 时跑）。需要可恢复。 */}
         <button className="crypto-action primary" onClick={() => setCryptoMode('create')}>
           Create / Import
         </button>
@@ -2549,6 +2563,8 @@ export default function CryptoWalletManager({
             <span className="crypto-account-chevron">⌄</span>
           </button>
 
+          {/* 「全链扫描 / Refresh / Balance」按钮组和扫描状态文字先隐藏；
+              全链扫描仍在 mount + TTL 时自动跑，余额照常更新。需要可恢复。 */}
           <section className="crypto-balance-hero">
             <div>
               <div className="crypto-eyebrow">CURRENT ACCOUNT</div>
@@ -2556,35 +2572,8 @@ export default function CryptoWalletManager({
               <p>
                 <span className="crypto-loss">24h --</span>
                 <span className="crypto-scope-chip">All chains</span>
-                <span>
-                  {scanningAllChains
-                    ? scanStatus || '全链扫描中 ...'
-                    : scanStatus
-                      ? scanStatus
-                      : primaryAccount
-                        ? `Updated from ${activeTokens.length} tracked tokens`
-                        : 'No active account'}
-                </span>
               </p>
             </div>
-            <button
-              className="crypto-mini-action primary"
-              onClick={handleScanAllChains}
-              disabled={!primaryAccount || scanningAllChains}
-              title="一键扫描所有 EVM 链的原生余额与 ERC-20 资产"
-            >
-              {scanningAllChains ? '扫描中' : '全链扫描'}
-            </button>
-            <button className="crypto-mini-action" onClick={onRefresh} disabled={loading}>
-              {loading ? '...' : 'Refresh'}
-            </button>
-            <button
-              className="crypto-mini-action"
-              onClick={() => primaryAccount && handleQueryBalance(primaryAccount)}
-              disabled={!primaryAccount || !rpcForm.rpcUrl || queryingBalance === primaryAccount.id}
-            >
-              {queryingBalance === primaryAccount?.id ? '...' : 'Balance'}
-            </button>
           </section>
 
           <div className="crypto-action-bar crypto-home-actions">
@@ -2664,19 +2653,21 @@ export default function CryptoWalletManager({
                         <strong>{balanceByToken[token.id] || token.balance || '--'}</strong>
                         <small>{formatUsd(valueByToken[token.id]) || token.network}</small>
                       </span>
-                      <button
-                        className="crypto-mini-action"
-                        onClick={() => handleShowTokenInfo(token)}
-                      >
-                        详情
-                      </button>
-                      <button
-                        className="crypto-mini-action"
-                        disabled={!primaryAccount}
-                        onClick={() => handleUseTokenForSend(token)}
-                      >
-                        Send
-                      </button>
+                      <span className="crypto-token-actions">
+                        <button
+                          className="crypto-mini-action"
+                          onClick={() => handleShowTokenInfo(token)}
+                        >
+                          详情
+                        </button>
+                        <button
+                          className="crypto-mini-action"
+                          disabled={!primaryAccount}
+                          onClick={() => handleUseTokenForSend(token)}
+                        >
+                          Send
+                        </button>
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -2860,11 +2851,11 @@ export default function CryptoWalletManager({
                     </span>
                     <span>{row.chainCount}</span>
                     <span>{row.accountCount || '--'}</span>
-                    <span>
-                      {row.balanceText}
-                      {extra && extra.valueUsd > 0
-                        ? ` · $${extra.valueUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-                        : ''}
+                    <span className="crypto-token-amount">
+                      <strong>{formatAmount(row.balanceText)}</strong>
+                      {extra && extra.valueUsd > 0 && (
+                        <small>${extra.valueUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}</small>
+                      )}
                     </span>
                   </div>
                 )
@@ -2975,26 +2966,28 @@ export default function CryptoWalletManager({
                         <strong>{balanceByToken[token.id] || token.balance || '--'}</strong>
                         <small>{formatUsd(valueByToken[token.id]) || token.network}</small>
                       </span>
-                      <button
-                        className="crypto-mini-action"
-                        disabled={!rpcForm.rpcUrl || !token.contractAddress || queryingTokenBalance === token.id}
-                        onClick={() => handleQueryTokenBalance(token)}
-                      >
-                        {queryingTokenBalance === token.id ? '...' : 'ERC20'}
-                      </button>
-                      <button
-                        className="crypto-mini-action"
-                        onClick={() => handleShowTokenInfo(token)}
-                      >
-                        详情
-                      </button>
-                      <button
-                        className="crypto-mini-action"
-                        disabled={!primaryAccount}
-                        onClick={() => handleUseTokenForSend(token)}
-                      >
-                        Send
-                      </button>
+                      <span className="crypto-token-actions">
+                        <button
+                          className="crypto-mini-action"
+                          disabled={!rpcForm.rpcUrl || !token.contractAddress || queryingTokenBalance === token.id}
+                          onClick={() => handleQueryTokenBalance(token)}
+                        >
+                          {queryingTokenBalance === token.id ? '...' : 'ERC20'}
+                        </button>
+                        <button
+                          className="crypto-mini-action"
+                          onClick={() => handleShowTokenInfo(token)}
+                        >
+                          详情
+                        </button>
+                        <button
+                          className="crypto-mini-action"
+                          disabled={!primaryAccount}
+                          onClick={() => handleUseTokenForSend(token)}
+                        >
+                          Send
+                        </button>
+                      </span>
                     </div>
                   ))}
                 </div>

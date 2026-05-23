@@ -1,5 +1,5 @@
 [package]
-name = "app"
+name = "mykey-desktop"
 version = "0.1.0"
 description = "MyKey - AI Asset Vault"
 authors = ["MyKey Team"]
@@ -7,8 +7,8 @@ license = ""
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
-# Multiple bins exist (app + elevenlabs CLI helpers); pin the Tauri app so `cargo run`/`tauri dev` is unambiguous.
-default-run = "app"
+# Multiple bins exist (desktop app + CLI helpers); pin the Tauri app so `cargo run`/`tauri dev` is unambiguous.
+default-run = "mykey-desktop"
 
 [features]
 # `mykey` headless CLI (vault / secret / wallet / api-key). Optional deps keep the
@@ -16,7 +16,7 @@ default-run = "app"
 cli-tools = ["dep:clap", "dep:rpassword"]
 
 [[bin]]
-name = "app"
+name = "mykey-desktop"
 path = "src/main.rs"
 
 [[bin]]
@@ -116,3 +116,6 @@ objc2-authentication-services = { version = "0.3", features = [
   "ASAuthorizationPublicKeyCredentialPRFAssertionInput",
   "ASAuthorizationPublicKeyCredentialPRFAssertionOutput",
 ] }
+security-framework = { version = "2.11", features = ["OSX_10_13"] }
+security-framework-sys = "2.15"
+core-foundation-09 = { package = "core-foundation", version = "0.9" }

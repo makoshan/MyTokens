@@ -213,7 +213,7 @@ function getStablecoinConfig(env?: GatewayEnv): StablecoinConfig {
   return {
     tokenAddress,
     mycRate: env?.STABLECOIN_MYC_RATE ? Number(env.STABLECOIN_MYC_RATE) : 1,
-    faucetAmountRaw: BigInt(env?.STABLECOIN_FAUCET_AMOUNT ?? '20000000'),
+    faucetAmountRaw: BigInt(env?.STABLECOIN_FAUCET_AMOUNT ?? '10000000'),
     // Only Sepolia (11155111) — mainnet (e.g. Base 8453) uses real USDC, no faucet.
     faucetEnabled: chainId === 11155111,
   }
@@ -807,6 +807,22 @@ async function handleRequest(
     })
   }
 
+  const operatorInviteDeleteMatch = /^\/operator\/invites\/([^/]+)$/.exec(url.pathname)
+  if (operatorInviteDeleteMatch && request.method === 'DELETE') {
+    const operatorId = await authenticateOperator(request, store, now)
+    const inviteId = operatorInviteDeleteMatch[1]
+    const ownInvite = (await store.listInvites({ operatorId })).find((invite) => invite.id === inviteId)
+    if (!ownInvite) throw new GatewayError('invite_not_found', 404)
+    const deleted = await store.deleteInvite(inviteId)
+    if (!deleted) throw new GatewayError('invite_not_found', 404)
+    return json({
+      id: deleted.id,
+      account_id: deleted.accountId,
+      status: 'deleted',
+      account_status: 'unchanged',
+    })
+  }
+
   const operatorInviteMatch = /^\/operator\/accounts\/([^/]+)\/invites$/.exec(url.pathname)
   if (operatorInviteMatch && request.method === 'POST') {
     const operatorId = await authenticateOperator(request, store, now)
@@ -1225,17 +1241,33 @@ async function handleRequest(
   // Testnet faucet: mint test-USDT to a wallet so the buy-MYC flow can be
   // exercised end to end without real funds. Disabled on mainnet.
   if (url.pathname === '/dashboard/faucet-usdt' && request.method === 'POST') {
-    await authenticateDashboard(request, store, now)
+    const accountId = await authenticateDashboard(request, store, now)
     const body = await readJsonObject(request)
     const toAddress = requireString(body, 'to_address')
     if (!/^0x[0-9a-fA-F]{40}$/.test(toAddress)) throw new GatewayError('invalid_address', 400)
     const config = getStablecoinConfig(env)
     if (!config.faucetEnabled) throw new GatewayError('faucet_disabled', 403)
-    const txHash = await (options.relayer?.mint ?? relayerMint)(env, {
-      tokenAddress: config.tokenAddress,
-      to: toAddress,
-      value: config.faucetAmountRaw,
+    const claimId = `faucet_${crypto.randomUUID()}`
+    const claimed = await store.claimStablecoinFaucet({
+      id: claimId,
+      accountId,
+      toAddress,
+      amountRaw: config.faucetAmountRaw.toString(),
+      createdAt: now,
     })
+    if (!claimed) throw new GatewayError('faucet_already_claimed', 409)
+    let txHash: `0x${string}`
+    try {
+      txHash = await (options.relayer?.mint ?? relayerMint)(env, {
+        tokenAddress: config.tokenAddress,
+        to: toAddress,
+        value: config.faucetAmountRaw,
+      })
+      await store.setStablecoinFaucetTx({ id: claimId, txHash })
+    } catch (error) {
+      await store.revertStablecoinFaucetClaim({ id: claimId })
+      throw error
+    }
     return json({ tx_hash: txHash, minted_usdt: Number(config.faucetAmountRaw) / 1e6, to_address: toAddress })
   }
 

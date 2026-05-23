@@ -3,8 +3,11 @@ import test from 'node:test'
 import { extractAssistantText } from '../src/api.js'
 import { buildChatModelOptions, composeChatInput, friendlyError } from '../src/chatHelpers.js'
 import {
+  appLockStateAfterInviteClaimDismiss,
   buildDashboardViewModel,
+  claimWalletAction,
   formatMicroUsd,
+  shouldDeferPasskeyLockForInviteClaim,
   maskApiKey,
   tabAfterRedpacketRedeem,
 } from '../src/dashboardViewModel.js'
@@ -88,11 +91,12 @@ test('dashboard view model exposes balance, usage, model quality, and docs base 
   // operator-leaning views are marked advanced (hidden behind a toggle in the UI).
   assert.deepEqual(
     viewModel.navigation.map((item) => item.label),
-    ['AI 对话', 'MyKey API Key', '接入说明', '总览', '渠道', '日志', '模型检测', '额度', '充值']
+    ['AI 对话', '💳 充值额度', 'MyKey API Key', '接入说明', '总览', '渠道', '日志', '模型检测', '额度']
   )
+  // 充值 is promoted to the primary nav (no longer behind 高级功能).
   assert.deepEqual(
     viewModel.navigation.filter((item) => !item.advanced).map((item) => item.id),
-    ['chat', 'keys', 'docs']
+    ['chat', 'topup', 'keys', 'docs']
   )
   assert.equal(viewModel.channelSummary.active, 1)
   assert.equal(viewModel.tokenSummary.active, 1)
@@ -106,6 +110,25 @@ test('formatting helpers avoid leaking full keys and keep micro USD precision', 
 
 test('red packet completion lands buyers in the web AI chat to test immediately', () => {
   assert.equal(tabAfterRedpacketRedeem(), 'chat')
+})
+
+test('invite claim overlays render before the passkey lock screen', () => {
+  assert.equal(shouldDeferPasskeyLockForInviteClaim(new URLSearchParams('welcome=1&tab=keys'), true), true)
+  assert.equal(shouldDeferPasskeyLockForInviteClaim(new URLSearchParams('redpacket=gift-code'), true), true)
+  assert.equal(shouldDeferPasskeyLockForInviteClaim(new URLSearchParams('tab=keys'), true), false)
+  assert.equal(shouldDeferPasskeyLockForInviteClaim(new URLSearchParams('welcome=1'), false), false)
+})
+
+test('claim buttons require passkey verification when a cached wallet is locked', () => {
+  assert.equal(claimWalletAction({ hasStoredWallet: true, passkeyLocked: true }), 'unlock')
+  assert.equal(claimWalletAction({ hasStoredWallet: false, passkeyLocked: true }), 'unlock')
+  assert.equal(claimWalletAction({ hasStoredWallet: true, passkeyLocked: false }), 'reuse')
+  assert.equal(claimWalletAction({ hasStoredWallet: false, passkeyLocked: false }), 'create')
+})
+
+test('successful invite claim dismissal mirrors the actual passkey lock storage state', () => {
+  assert.equal(appLockStateAfterInviteClaimDismiss(false), false)
+  assert.equal(appLockStateAfterInviteClaimDismiss(true), true)
 })
 
 test('chat model options only expose active routed models', () => {

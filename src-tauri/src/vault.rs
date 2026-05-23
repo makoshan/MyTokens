@@ -5218,7 +5218,9 @@ impl Vault {
                 note: Some("operator_signing_key".to_string()),
             },
         };
-        self.secret_manager.set(id, &secret).map_err(|e| e.to_string())?;
+        self.secret_manager
+            .set(id, &secret)
+            .map_err(|e| e.to_string())?;
         Ok(key)
     }
 

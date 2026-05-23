@@ -10,16 +10,18 @@ import { Overview } from './components/Overview.js'
 import { RedpacketClaim } from './components/RedpacketClaim.js'
 import { WelcomeClaim } from './components/WelcomeClaim.js'
 import { WalletButton } from './components/WalletButton.js'
+import { PasskeyLock } from './components/PasskeyLock.js'
 import { Topup } from './components/Topup.js'
-import { isWalletConnected } from './wallet.js'
+import { isWalletConnected, isPasskeyLocked } from './wallet.js'
 import { Usage } from './components/Usage.js'
 import {
+  appLockStateAfterInviteClaimDismiss,
   buildDashboardViewModel,
   DEFAULT_DASHBOARD_TAB,
+  shouldDeferPasskeyLockForInviteClaim,
   tabAfterRedpacketRedeem,
   type DashboardTab,
 } from './dashboardViewModel.js'
-import { Button } from './token-ui.js'
 import type { DashboardSnapshot } from './types.js'
 import './styles.css'
 
@@ -46,6 +48,12 @@ export function App({ snapshot }: { snapshot: DashboardSnapshot }) {
     [currentSnapshot.routingRules]
   )
   const [walletConnected, setWalletConnected] = useState<boolean>(() => isWalletConnected())
+  // After 退出 the dashboard is veiled until a fresh passkey (Touch ID) check.
+  const [locked, setLocked] = useState<boolean>(() => isPasskeyLocked())
+  const deferPasskeyLockForInviteClaim = shouldDeferPasskeyLockForInviteClaim(
+    new URLSearchParams(window.location.search),
+    locked
+  )
 
   // The dashboard is served BY the gateway, so its own origin is the real Base URL —
   // far more reliable than the server's PUBLIC_GATEWAY_URL (often a placeholder).
@@ -75,6 +83,8 @@ export function App({ snapshot }: { snapshot: DashboardSnapshot }) {
     const url = new URL(window.location.href)
     url.searchParams.delete('redpacket')
     window.history.replaceState({}, '', url.toString())
+    setWalletConnected(isWalletConnected()) // the claim may have created + connected the wallet
+    setLocked(appLockStateAfterInviteClaimDismiss(isPasskeyLocked()))
   }
 
   function finishRedpacketFlow() {
@@ -88,7 +98,22 @@ export function App({ snapshot }: { snapshot: DashboardSnapshot }) {
     url.searchParams.delete('welcome')
     window.history.replaceState({}, '', url.toString())
     setWalletConnected(isWalletConnected()) // welcome just created + connected the wallet
+    setLocked(appLockStateAfterInviteClaimDismiss(isPasskeyLocked()))
     setActiveTab('chat')
+  }
+
+  // Logged out → passkey gate over everything, even though the cookie still loaded
+  // the snapshot. Unlocking re-derives the wallet and drops us back into the app.
+  if (locked && !deferPasskeyLockForInviteClaim) {
+    return (
+      <PasskeyLock
+        accountId={currentSnapshot.account.id}
+        onUnlock={() => {
+          setLocked(false)
+          setWalletConnected(true)
+        }}
+      />
+    )
   }
 
   return (
@@ -171,7 +196,10 @@ export function App({ snapshot }: { snapshot: DashboardSnapshot }) {
             accountId={currentSnapshot.account.id}
             connected={walletConnected}
             onConnect={() => setWalletConnected(true)}
-            onDisconnect={() => setWalletConnected(false)}
+            onDisconnect={() => {
+              setWalletConnected(false)
+              setLocked(true)
+            }}
           />
           <div className="status-grid">
             <div>
@@ -193,7 +221,9 @@ export function App({ snapshot }: { snapshot: DashboardSnapshot }) {
           </div>
         </header>
 
-        {activeTab === 'chat' && <ChatPlayground snapshot={currentSnapshot} onRefresh={refreshSnapshot} />}
+        {activeTab === 'chat' && (
+          <ChatPlayground snapshot={currentSnapshot} onRefresh={refreshSnapshot} onTopup={() => setActiveTab('topup')} />
+        )}
         {activeTab === 'overview' && <Overview snapshot={currentSnapshot} />}
         {activeTab === 'channels' && (
           <Channels channels={currentSnapshot.channels} routingRules={currentSnapshot.routingRules} />
@@ -216,6 +246,7 @@ export function App({ snapshot }: { snapshot: DashboardSnapshot }) {
             accountId={currentSnapshot.account.id}
             connected={walletConnected}
             onConnectChange={setWalletConnected}
+            onRefresh={refreshSnapshot}
           />
         )}
         {activeTab === 'docs' && <Docs snapshot={currentSnapshot} baseUrl={effectiveBaseUrl} />}

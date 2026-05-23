@@ -20,6 +20,7 @@ import { suppressProjectAutoScanOnce } from '../utils/project'
 import { createVaultPasskeyPrfKey, isPasskeyPrfAvailable } from '../utils/passkeyPrf'
 import { isNativePasskeyAvailable, registerNativePasskey } from '../utils/passkeyNative'
 import {
+  canEnableBiometricKeychain,
   canRegisterVaultPasskey,
   classifyPasskeyError,
   describeVaultUnlockState,
@@ -133,6 +134,8 @@ export default function GlobalSettings({ masterPassword, authMethod, onProjectDa
   const [voiceSelfTestMessage, setVoiceSelfTestMessage] = useState<string>('')
   const [debugLogs, setDebugLogs] = useState<RecentDebugLogs | null>(null)
   const [vaultUnlockState, setVaultUnlockState] = useState<VaultUnlockState | null>(null)
+  const [biometricKeychainConfigured, setBiometricKeychainConfigured] = useState(false)
+  const [biometricKeychainAvailable, setBiometricKeychainAvailable] = useState(false)
   const [vaultUnlockMessage, setVaultUnlockMessage] = useState<string>('')
   const refreshSeqRef = useRef(0)
 
@@ -182,6 +185,8 @@ export default function GlobalSettings({ masterPassword, authMethod, onProjectDa
           invoke<VoiceInputDiagnostics>('get_voice_input_diagnostics', { masterPassword }),
           invoke<MacosPermissionStatus>('get_macos_permission_status'),
           invoke<VaultUnlockState>('get_vault_unlock_state'),
+          invoke<boolean>('biometric_keychain_available'),
+          invoke<boolean>('biometric_keychain_configured'),
         ])
 
         if (seq !== refreshSeqRef.current) return
@@ -203,6 +208,8 @@ export default function GlobalSettings({ masterPassword, authMethod, onProjectDa
         const voiceDiag = settledValue<VoiceInputDiagnostics>(6)
         const perm = settledValue<MacosPermissionStatus>(7)
         const unlockState = settledValue<VaultUnlockState>(8)
+        const biometricAvailable = settledValue<boolean>(9)
+        const biometricConfigured = settledValue<boolean>(10)
 
         if (policy) {
           setGatewayPolicy(policy)
@@ -216,6 +223,8 @@ export default function GlobalSettings({ masterPassword, authMethod, onProjectDa
         if (voiceDiag) setVoiceDiagnostics(voiceDiag)
         if (perm) setMacPerm(perm)
         if (unlockState) setVaultUnlockState(unlockState)
+        setBiometricKeychainAvailable(Boolean(biometricAvailable))
+        setBiometricKeychainConfigured(Boolean(biometricAvailable && biometricConfigured))
 
         if (errors.length > 0) {
           setError(`部分信息加载失败：${errors[0]}`)
@@ -763,6 +772,41 @@ export default function GlobalSettings({ masterPassword, authMethod, onProjectDa
     }
   }
 
+  const enableBiometricKeychain = async () => {
+    if (!canEnableBiometricKeychain(authMethod, vaultUnlockState, busyKey === 'biometric-keychain')) {
+      setVaultUnlockMessage('Touch ID 快速解锁需要先用主密码登录，并初始化 vault 加密。')
+      return
+    }
+
+    setBusyKey('biometric-keychain')
+    setVaultUnlockMessage('')
+    try {
+      await invoke<boolean>('enable_biometric_keychain_unlock', { masterPassword })
+      setBiometricKeychainConfigured(true)
+      setVaultUnlockMessage('Touch ID 快速解锁已启用。下次登录可使用系统验证解锁。')
+    } catch (err) {
+      console.error(err)
+      setVaultUnlockMessage(`启用 Touch ID 失败: ${String(err)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const removeBiometricKeychain = async () => {
+    setBusyKey('biometric-keychain')
+    setVaultUnlockMessage('')
+    try {
+      await invoke<boolean>('remove_biometric_keychain_unlock')
+      setBiometricKeychainConfigured(false)
+      setVaultUnlockMessage('Touch ID 快速解锁已关闭。')
+    } catch (err) {
+      console.error(err)
+      setVaultUnlockMessage(`关闭 Touch ID 失败: ${String(err)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
   const saveQuickActionSettings = async () => {
     if (!quickSettings) return
     setBusyKey('quick-settings')
@@ -930,9 +974,9 @@ export default function GlobalSettings({ masterPassword, authMethod, onProjectDa
           <div className="settings-item">
             <div className="settings-item-header">
               <div>
-                <div className="settings-item-title">主密码 / Passkey</div>
+                <div className="settings-item-title">主密码 / Touch ID</div>
                 <div className="settings-item-subtitle">
-                  主密码和 passkey 解锁同一个本地 vault 数据密钥；passkey 使用 WebAuthn PRF 生成 32-byte key，用于解密和加密本地密钥库。
+                  主密码和 Touch ID 解锁同一个本地 vault；Touch ID 使用受系统验证保护的本机 Keychain。
                 </div>
               </div>
               <div className="settings-item-badges">
@@ -940,13 +984,40 @@ export default function GlobalSettings({ masterPassword, authMethod, onProjectDa
                   {vaultUnlockLabels?.configuredLabel || '加载中'}
                 </span>
                 <span className="service-badge running">
-                  {authMethod === 'passkey-prf' ? '当前 Passkey' : '当前主密码'}
+                  {authMethod === 'passkey-prf'
+                    ? '当前 Passkey'
+                    : authMethod === 'biometric-keychain'
+                      ? '当前 Touch ID'
+                      : '当前主密码'}
+                </span>
+                <span className={`service-badge ${biometricKeychainConfigured ? 'enabled' : 'disabled'}`}>
+                  {biometricKeychainConfigured ? 'Touch ID 已启用' : 'Touch ID 未启用'}
                 </span>
               </div>
             </div>
             <div className="settings-item-controls">
+              {biometricKeychainConfigured ? (
+                <button
+                  className="btn btn-primary"
+                  disabled={busyKey === 'biometric-keychain'}
+                  onClick={removeBiometricKeychain}
+                >
+                  {busyKey === 'biometric-keychain' ? '处理中...' : '关闭 Touch ID 解锁'}
+                </button>
+              ) : (
+                <button
+                  className="btn btn-primary"
+                  disabled={
+                    !biometricKeychainAvailable ||
+                    !canEnableBiometricKeychain(authMethod, vaultUnlockState, busyKey === 'biometric-keychain')
+                  }
+                  onClick={enableBiometricKeychain}
+                >
+                  {busyKey === 'biometric-keychain' ? '处理中...' : '启用 Touch ID 解锁'}
+                </button>
+              )}
               <button
-                className="btn btn-primary"
+                className="btn btn-secondary"
                 disabled={!canRegisterVaultPasskey(authMethod, vaultUnlockState, busyKey === 'vault-passkey')}
                 onClick={addVaultPasskey}
               >
@@ -955,9 +1026,14 @@ export default function GlobalSettings({ masterPassword, authMethod, onProjectDa
             </div>
             <div className="settings-item-subtitle">
               {vaultUnlockLabels
-                ? `${vaultUnlockLabels.passkeyLabel}；${vaultUnlockLabels.recoveryLabel}`
+                ? `Touch ID ${biometricKeychainConfigured ? '已启用' : '未启用'}；${vaultUnlockLabels.passkeyLabel}；${vaultUnlockLabels.recoveryLabel}`
                 : '正在读取解锁方式...'}
             </div>
+            {!biometricKeychainAvailable ? (
+              <div className="settings-item-subtitle">
+                Touch ID 快速解锁仅支持 macOS。
+              </div>
+            ) : null}
             {authMethod === 'passkey-prf' ? (
               <div className="settings-item-subtitle">
                 当前用 passkey 登录，可继续读写已加密数据；新增 passkey 需要主密码验证。

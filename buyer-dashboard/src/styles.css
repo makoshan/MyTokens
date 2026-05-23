@@ -261,10 +261,10 @@ button {
   width: 8px;
 }
 .wallet-chip button {
-  background: var(--accent, #007fff);
+  background: var(--primary, rgb(0 127 255));
   border: 0;
   border-radius: 999px;
-  color: #fff;
+  color: var(--primary-foreground, rgb(255 255 255));
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
@@ -280,7 +280,8 @@ button {
   color: var(--status-critical, #c40918);
 }
 .wallet-chip button:disabled {
-  opacity: 0.6;
+  background: var(--primary-active, rgb(0 82 165));
+  color: var(--primary-foreground, rgb(255 255 255));
   cursor: default;
 }
 .wallet-chip .wallet-link {
@@ -622,10 +623,46 @@ pre {
   font-size: 13px;
   color: var(--muted-foreground);
 }
+.chat-balance-row {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
 .chat-playground .chat-balance strong {
-  display: block;
   color: var(--foreground);
   font-size: 18px;
+}
+.chat-topup-btn {
+  background: var(--primary, rgb(0 127 255));
+  border: 0;
+  border-radius: 999px;
+  color: var(--primary-foreground, rgb(255 255 255));
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  min-height: 32px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+.chat-topup-btn:hover {
+  filter: brightness(1.05);
+}
+.topup-busy {
+  align-items: center;
+  background: #eef6ff;
+  border: 1px solid #b9d9ff;
+  border-radius: var(--radius);
+  box-shadow: 0 6px 18px rgba(0, 127, 255, 0.08);
+  color: var(--foreground);
+  display: inline-flex;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 2px 0 0;
+  max-width: max-content;
+  padding: 9px 12px;
 }
 .chat-model-picker {
   display: flex;
@@ -809,6 +846,10 @@ pre {
 
   .chat-playground .chat-balance {
     text-align: left;
+  }
+
+  .chat-balance-row {
+    justify-content: flex-start;
   }
 
   .chat-message {

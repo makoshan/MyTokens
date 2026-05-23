@@ -1,18 +1,19 @@
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use axum::response::IntoResponse;
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, TcpListener};
 use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{ipc::CapabilityBuilder, Manager, Url};
 use tauri::WebviewUrl;
 use tauri::WebviewWindowBuilder;
+use tauri::{ipc::CapabilityBuilder, Manager, Url};
 use tauri_plugin_global_shortcut::ShortcutState;
 use tauri_plugin_log::{Target, TargetKind};
 use tokio::net::TcpListener as TokioTcpListener;
 
+mod biometric_keychain;
 mod commands;
 mod gateway;
 mod operator_key;
@@ -70,7 +71,10 @@ fn ensure_main_window(app: &tauri::App) -> Result<(), tauri::Error> {
         app.add_capability(
             CapabilityBuilder::new("localhost-ui")
                 .remote(url.to_string())
-                .window("main"),
+                .window("main")
+                .permission("core:default")
+                .permission("dialog:default")
+                .permission("global-shortcut:default"),
         )?;
         url
     };
@@ -182,7 +186,10 @@ async fn passkey_bridge_result(
     axum::Json(payload): axum::Json<PasskeyBridgePost>,
 ) -> impl axum::response::IntoResponse {
     let accepted = {
-        let mut tokens = state.pending_tokens.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tokens = state
+            .pending_tokens
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         tokens.remove(&payload.token)
     };
     if !accepted {
@@ -207,7 +214,10 @@ fn start_passkey_bridge_server(state: Arc<PasskeyBridgeState>) {
         };
         let app = axum::Router::new()
             .route("/passkey-bridge", axum::routing::get(passkey_bridge_page))
-            .route("/passkey-bridge/result", axum::routing::post(passkey_bridge_result))
+            .route(
+                "/passkey-bridge/result",
+                axum::routing::post(passkey_bridge_result),
+            )
             .with_state(state);
         let _ = axum::serve(listener, app).await;
     });
@@ -969,6 +979,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::set_master_password,
             commands::authenticate,
+            commands::biometric_keychain_available,
+            commands::biometric_keychain_configured,
+            commands::enable_biometric_keychain_unlock,
+            commands::unlock_with_biometric_keychain,
+            commands::remove_biometric_keychain_unlock,
             commands::is_password_set,
             commands::initialize_vault_unlock_methods,
             commands::get_vault_unlock_state,

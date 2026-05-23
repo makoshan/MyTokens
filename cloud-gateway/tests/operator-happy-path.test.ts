@@ -353,4 +353,14 @@ test('operator authorizes a friend for a subset of models; allowlist gates listi
     (row) => row.id === secondInviteId
   )
   assert.equal(revokedRow?.status, 'revoked')
+
+  const deleteInvite = await operatorRequest(app, 'DELETE', `/operator/invites/${secondInviteId}`, operatorSession)
+  assert.equal(deleteInvite.status, 200)
+  assert.equal(((await deleteInvite.json()) as { id: string }).id, secondInviteId)
+
+  const invitesAfterDelete = await operatorRequest(app, 'GET', '/operator/invites', operatorSession)
+  const deletedRow = ((await invitesAfterDelete.json()) as { data: Array<{ id: string }> }).data.find(
+    (row) => row.id === secondInviteId
+  )
+  assert.equal(deletedRow, undefined)
 })

@@ -19,13 +19,16 @@ type ChatMessage = {
 }
 
 const CAPABILITIES: ChatCapabilityId[] = ['mcp', 'skills', 'knowledge']
+const DEFAULT_CAPABILITIES: ChatCapabilityId[] = []
 
 export function ChatPlayground({
   snapshot,
   onRefresh,
+  onTopup,
 }: {
   snapshot: DashboardSnapshot
   onRefresh?: () => void | Promise<void>
+  onTopup?: () => void
 }) {
   const models = useMemo(() => buildChatModelOptions(snapshot), [snapshot])
 
@@ -34,12 +37,16 @@ export function ChatPlayground({
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const [enabledCapabilities, setEnabledCapabilities] = useState<ChatCapabilityId[]>(['mcp', 'skills'])
+  const [enabledCapabilities, setEnabledCapabilities] = useState<ChatCapabilityId[]>(DEFAULT_CAPABILITIES)
 
   useEffect(() => {
     if (models.some((option) => option.model === model)) return
     setModel(models[0]?.model ?? '')
   }, [model, models])
+
+  useEffect(() => {
+    setEnabledCapabilities(DEFAULT_CAPABILITIES)
+  }, [snapshot.account.id])
 
   const noModels = models.length === 0
   const canSend = !loading && Boolean(model) && prompt.trim().length > 0
@@ -64,13 +71,20 @@ export function ChatPlayground({
     ])
     try {
       const result = await sendChat(model, composeChatInput(userPrompt, enabledCapabilities))
+      // Per-turn token usage — concrete "it's working" feedback, since the $ cost
+      // (~$0.0004/turn) is too small to move the 2-decimal balance display.
+      const usage = (result.raw as { usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } })?.usage
+      const tokens = usage?.total_tokens ?? (usage?.prompt_tokens ?? 0) + (usage?.completion_tokens ?? 0)
+      const meta = [enabledCapabilities.map(capabilityLabel).join(' · '), tokens ? `${tokens} tokens` : '']
+        .filter(Boolean)
+        .join(' · ')
       setMessages((previous) => [
         ...previous,
         {
           id: assistantId,
           role: 'assistant',
           content: result.text || '(模型已响应，但未返回文本内容)',
-          meta: enabledCapabilities.map(capabilityLabel).join(' · ') || undefined,
+          meta: meta || undefined,
         },
       ])
     } catch (caught) {
@@ -102,7 +116,14 @@ export function ChatPlayground({
         </label>
         <div className="chat-balance">
           <span>余额</span>
-          <strong>{formatMicroUsd(snapshot.balanceMicroUsd)}</strong>
+          <div className="chat-balance-row">
+            <strong>{formatMicroUsd(snapshot.balanceMicroUsd)}</strong>
+            {onTopup && (
+              <button type="button" className="chat-topup-btn" onClick={onTopup}>
+                💳 充值
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -120,7 +141,7 @@ export function ChatPlayground({
               {messages.length === 0 ? (
                 <div className="chat-empty">
                   <strong>开始一段测试对话</strong>
-                  <span>选择模型后直接发送消息；MCP 与 Skills 会作为能力上下文带入请求。</span>
+                  <span>选择模型后直接发送消息；MCP 与 Skills 可按需开启。</span>
                 </div>
               ) : (
                 messages.map((message) => (
@@ -182,6 +203,7 @@ export function ChatPlayground({
                     onClick={() => {
                       setMessages([])
                       setError('')
+                      setEnabledCapabilities(DEFAULT_CAPABILITIES)
                     }}
                     disabled={loading || messages.length === 0}
                   >

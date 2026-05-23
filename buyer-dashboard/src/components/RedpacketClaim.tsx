@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { claimRedpacket, redeemGasless } from '../api.js'
-import { createWallet, loadStoredWallet, signBurnAuth, prfSupported } from '../wallet.js'
+import { claimWalletAction } from '../dashboardViewModel.js'
+import { createWallet, isPasskeyLocked, loadStoredWallet, signBurnAuth, prfSupported, unlockWithPasskey } from '../wallet.js'
 import { redpacketReward, humanError } from '../redpacketRewards.js'
 
 type Stage = 'sealed' | 'opening' | 'revealed' | 'redeeming' | 'done' | 'error'
@@ -29,7 +30,14 @@ export function RedpacketClaim({
     }
     setStage('opening')
     try {
-      const wallet = loadStoredWallet() ?? (await createWallet(accountId))
+      const storedWallet = loadStoredWallet()
+      const action = claimWalletAction({ hasStoredWallet: !!storedWallet, passkeyLocked: isPasskeyLocked() })
+      const wallet = action === 'unlock'
+        ? await unlockWithPasskey(accountId)
+        : action === 'create'
+          ? await createWallet(accountId)
+          : storedWallet
+      if (!wallet) throw new Error('no_wallet')
       const r = await claimRedpacket(code, wallet.address)
       setMyc(r.amount_myc)
       setStage('revealed')
@@ -148,8 +156,8 @@ const RP_CSS = `
 .rp-done { font-size: 18px; font-weight: 700; color: var(--status-healthy, #228e42); margin-top: 8px; }
 .rp-err { color: var(--status-critical, #c40918); margin-bottom: 16px; }
 .rp-cta { width: 100%; height: 48px; border-radius: 999px; border: 0; cursor: pointer; font-size: 16px; font-weight: 700;
-  background: var(--accent); color: #fff; box-shadow: 0 12px 28px rgba(0,127,255,0.3); margin-top: 6px; }
-.rp-cta:disabled { opacity: 0.6; }
+  background: var(--primary, rgb(0 127 255)); color: var(--primary-foreground, rgb(255 255 255)); box-shadow: 0 12px 28px rgba(0,127,255,0.3); margin-top: 6px; }
+.rp-cta:disabled { background: var(--primary-active, rgb(0 82 165)); color: var(--primary-foreground, rgb(255 255 255)); cursor: default; }
 .rp-later { width: 100%; height: 40px; border: 0; background: transparent; color: var(--muted); cursor: pointer; margin-top: 8px; }
 .rp-confetti { position: absolute; inset: 0; pointer-events: none; }
 .rp-confetti span { position: absolute; top: -10px; width: 8px; height: 12px; border-radius: 2px; animation: rp-fall 1.6s linear forwards; }

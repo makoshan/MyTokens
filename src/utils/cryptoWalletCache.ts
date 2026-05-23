@@ -17,19 +17,28 @@ export interface CryptoWalletCache {
   // Keyed by DB token id (stable across remounts).
   logoByToken: Record<string, string[]>
   valueByToken: Record<string, string>
+  // Last-scanned live token balance (display string). Lets a token row show its
+  // real balance instantly on remount instead of falling back to a stale DB value
+  // or "--" until the rescan returns.
+  balanceByToken: Record<string, string>
   trustWalletStatusByToken: TrustWalletTokenStatusMap
   // Keyed by account id.
   totalUsdByAccount: Record<string, string>
   scannedAtByAccount: Record<string, number>
+  // Last-scanned native balance (e.g. ETH) per account, so the native row shows
+  // a number on open rather than blank until the chain query returns.
+  balanceByAccount: Record<string, string>
 }
 
 export function emptyCryptoWalletCache(): CryptoWalletCache {
   return {
     logoByToken: {},
     valueByToken: {},
+    balanceByToken: {},
     trustWalletStatusByToken: {},
     totalUsdByAccount: {},
     scannedAtByAccount: {},
+    balanceByAccount: {},
   }
 }
 
@@ -46,9 +55,11 @@ export function parseCryptoWalletCache(raw: string | null | undefined): CryptoWa
     return {
       logoByToken: asRecord<string[]>(data.logoByToken),
       valueByToken: asRecord<string>(data.valueByToken),
+      balanceByToken: asRecord<string>(data.balanceByToken),
       trustWalletStatusByToken: asRecord<'verified' | 'missing'>(data.trustWalletStatusByToken),
       totalUsdByAccount: asRecord<string>(data.totalUsdByAccount),
       scannedAtByAccount: asRecord<number>(data.scannedAtByAccount),
+      balanceByAccount: asRecord<string>(data.balanceByAccount),
     }
   } catch {
     return emptyCryptoWalletCache()
@@ -70,9 +81,11 @@ export function pruneCryptoWalletCache(
   return {
     logoByToken: pick(cache.logoByToken, liveTokenIds),
     valueByToken: pick(cache.valueByToken, liveTokenIds),
+    balanceByToken: pick(cache.balanceByToken, liveTokenIds),
     trustWalletStatusByToken: pick(cache.trustWalletStatusByToken, liveTokenIds),
     totalUsdByAccount: pick(cache.totalUsdByAccount, liveAccountIds),
     scannedAtByAccount: pick(cache.scannedAtByAccount, liveAccountIds),
+    balanceByAccount: pick(cache.balanceByAccount, liveAccountIds),
   }
 }
 
