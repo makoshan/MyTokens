@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { assertNativePasskey, isNativePasskey } from './utils/passkeyNative'
 import './App.css'
 import KeyList from './components/KeyList'
 import KeyForm from './components/KeyForm'
@@ -23,7 +22,7 @@ import {
   type AppNavView,
 } from './utils/homeNavigation'
 import {
-  shouldShowVaultPasskeyLogin,
+  shouldShowBiometricLogin,
   type VaultAuthMethod,
   type VaultUnlockState,
 } from './utils/vaultUnlock'
@@ -141,11 +140,6 @@ type ProviderUsageStatus = {
   snapshot?: UsageSnapshot | null
 }
 
-type PasskeyBridgeStart = {
-  token: string
-  url: string
-}
-
 const statusOrder: Record<QuotaStatus, number> = {
   healthy: 0,
   warning: 1,
@@ -260,7 +254,7 @@ function App() {
   const [showImport, setShowImport] = useState(false)
   const [masterPassword, setMasterPassword] = useState('')
   const [authMethod, setAuthMethod] = useState<VaultAuthMethod>('master-password')
-  const [vaultUnlockState, setVaultUnlockState] = useState<VaultUnlockState | null>(null)
+  const [, setVaultUnlockState] = useState<VaultUnlockState | null>(null)
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [loadingKeys, setLoadingKeys] = useState(false)
   const [loadingProviders, setLoadingProviders] = useState(false)
@@ -269,6 +263,8 @@ function App() {
   const [loadingVoiceHistory, setLoadingVoiceHistory] = useState(false)
   const [voiceHistoryError, setVoiceHistoryError] = useState<string | null>(null)
   const [hasPassword, setHasPassword] = useState<boolean | null>(null)
+  const [biometricKeychainConfigured, setBiometricKeychainConfigured] = useState(false)
+  const [biometricBusy, setBiometricBusy] = useState(false)
   const [projectLabelsByCredential, setProjectLabelsByCredential] = useState<Record<string, string>>({})
   const [projectFocus, setProjectFocus] = useState<{ name: string; token: number } | null>(null)
   const [dashboardOverview, setDashboardOverview] = useState<DashboardOverview>({
@@ -461,6 +457,26 @@ function App() {
       .catch((error) => console.error('Error checking password:', error))
   }, [])
 
+  const refreshBiometricKeychainState = async () => {
+    try {
+      const [available, configured] = await Promise.all([
+        invoke<boolean>('biometric_keychain_available'),
+        invoke<boolean>('biometric_keychain_configured'),
+      ])
+      setBiometricKeychainConfigured(Boolean(available && configured))
+    } catch {
+      setBiometricKeychainConfigured(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!hasPassword) {
+      setBiometricKeychainConfigured(false)
+      return
+    }
+    refreshBiometricKeychainState()
+  }, [hasPassword])
+
   useEffect(() => {
     if (!hasPassword) {
       setVaultUnlockState(null)
@@ -616,54 +632,19 @@ function App() {
     }
   }
 
-  const waitForPasskeyBridgeResult = async (token: string) => {
-    const deadline = Date.now() + 120000
-    while (Date.now() < deadline) {
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((resolve) => setTimeout(resolve, 1000))
-      // eslint-disable-next-line no-await-in-loop
-      const result = await invoke<{ prfKeyHex: string } | null>('consume_passkey_browser_bridge_result', { token })
-      if (result) return result
-    }
-    throw new Error('浏览器 passkey 操作超时。')
-  }
-
-  const handleAuthenticateWithPasskey = async () => {
+  const handleBiometricAuthenticate = async () => {
     try {
-      const state = await invoke<VaultUnlockState>('get_vault_unlock_state')
-      const passkey = state.passkeys[0]
-      if (!state.configured || !passkey) {
-        alert('还没有可用的 passkey。请先用主密码登录，并在设置里添加 passkey。')
-        return
-      }
-      let prfKeyHex: string
-      if (isNativePasskey(passkey.rpId)) {
-        // Native passkeys assert directly through AuthenticationServices — no
-        // system-browser detour. (Runtime-blocked until the app is signed with
-        // the Associated Domains entitlement.)
-        const native = await assertNativePasskey(passkey.credentialId, passkey.prfSalt, passkey.rpId)
-        prfKeyHex = native.prfKeyHex
-      } else {
-        const bridge = await invoke<PasskeyBridgeStart>('begin_passkey_browser_bridge', {
-          mode: 'login',
-          credentialId: passkey.credentialId,
-          prfSalt: passkey.prfSalt,
-          rpId: passkey.rpId,
-        })
-        await invoke<boolean>('open_external_url', { url: bridge.url })
-        prfKeyHex = (await waitForPasskeyBridgeResult(bridge.token)).prfKeyHex
-      }
-      const result = await invoke<boolean>('authenticate_with_passkey_prf', { prfKeyHex })
-      if (result) {
-        setMasterPassword(prfKeyHex)
-        setAuthMethod('passkey-prf')
-        setIsAuthenticated(true)
-      } else {
-        alert('Passkey 解锁失败')
-      }
+      setBiometricBusy(true)
+      const password = await invoke<string>('unlock_with_biometric_keychain')
+      setMasterPassword(password)
+      setAuthMethod('biometric-keychain')
+      setIsAuthenticated(true)
     } catch (error) {
-      console.error('Passkey authentication failed:', error)
-      alert(`Passkey 解锁失败: ${String(error)}`)
+      console.error('Touch ID unlock failed:', error)
+      alert(`Touch ID 解锁失败: ${String(error)}`)
+      await refreshBiometricKeychainState()
+    } finally {
+      setBiometricBusy(false)
     }
   }
 
@@ -992,9 +973,10 @@ function App() {
           <AuthForm
             onSubmit={handleSetPassword}
             onAuthenticate={handleAuthenticate}
-            onAuthenticateWithPasskey={handleAuthenticateWithPasskey}
+            onBiometricAuthenticate={handleBiometricAuthenticate}
             defaultMode={hasPassword ? 'login' : 'setup'}
-            vaultUnlockState={vaultUnlockState}
+            biometricKeychainConfigured={biometricKeychainConfigured}
+            biometricBusy={biometricBusy}
           />
         </div>
       </div>
@@ -1440,17 +1422,19 @@ function App() {
 interface AuthFormProps {
   onSubmit: (password: string) => void
   onAuthenticate: (password: string) => void
-  onAuthenticateWithPasskey: () => void
+  onBiometricAuthenticate: () => void
   defaultMode: 'setup' | 'login'
-  vaultUnlockState: VaultUnlockState | null
+  biometricKeychainConfigured: boolean
+  biometricBusy: boolean
 }
 
 function AuthForm({
   onSubmit,
   onAuthenticate,
-  onAuthenticateWithPasskey,
+  onBiometricAuthenticate,
   defaultMode,
-  vaultUnlockState,
+  biometricKeychainConfigured,
+  biometricBusy,
 }: AuthFormProps) {
   const [password, setPassword] = useState('')
   const [mode, setMode] = useState<'setup' | 'login'>(defaultMode)
@@ -1480,9 +1464,14 @@ function AuthForm({
       <button type="submit" className="btn btn-primary">
         {mode === 'setup' ? '设置密码' : '登录'}
       </button>
-      {shouldShowVaultPasskeyLogin(mode, vaultUnlockState) ? (
-        <button type="button" className="btn btn-secondary" onClick={onAuthenticateWithPasskey}>
-          使用 Passkey 登录
+      {shouldShowBiometricLogin(mode, biometricKeychainConfigured) ? (
+        <button
+          type="button"
+          className="btn btn-secondary"
+          disabled={biometricBusy}
+          onClick={onBiometricAuthenticate}
+        >
+          {biometricBusy ? '正在验证...' : '使用 Touch ID 解锁'}
         </button>
       ) : null}
       <button

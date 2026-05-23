@@ -1,4 +1,4 @@
-export type VaultAuthMethod = 'master-password' | 'passkey-prf'
+export type VaultAuthMethod = 'master-password' | 'passkey-prf' | 'biometric-keychain'
 
 export interface VaultPasskeyUnlockInfo {
   rpId: string
@@ -29,11 +29,23 @@ export function canRegisterVaultPasskey(
   return authMethod === 'master-password' && Boolean(state?.configured) && !busy
 }
 
+export function canEnableBiometricKeychain(
+  authMethod: VaultAuthMethod,
+  state: VaultUnlockState | null,
+  busy: boolean
+) {
+  return authMethod === 'master-password' && Boolean(state?.configured) && !busy
+}
+
 export function shouldShowVaultPasskeyLogin(
   mode: 'setup' | 'login',
   state: VaultUnlockState | null
 ) {
   return mode === 'login' && Boolean(state?.configured && state.passkeys.length > 0)
+}
+
+export function shouldShowBiometricLogin(mode: 'setup' | 'login', configured: boolean) {
+  return mode === 'login' && configured
 }
 
 export function classifyPasskeyError(error: unknown) {
