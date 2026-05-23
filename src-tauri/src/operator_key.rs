@@ -48,8 +48,9 @@ fn eip191_digest(message: &str) -> [u8; 32] {
 pub fn eip191_sign(privkey: &[u8; 32], message: &str) -> Result<String, String> {
     let sk = SigningKey::from_bytes(privkey.into()).map_err(|e| e.to_string())?;
     let digest = eip191_digest(message);
-    let (sig, recid): (Signature, RecoveryId) =
-        sk.sign_prehash_recoverable(&digest).map_err(|e| e.to_string())?;
+    let (sig, recid): (Signature, RecoveryId) = sk
+        .sign_prehash_recoverable(&digest)
+        .map_err(|e| e.to_string())?;
     let mut out = sig.to_bytes().to_vec(); // r || s (64)
     out.push(27 + recid.to_byte());
     Ok(format!("0x{}", to_hex(&out)))
@@ -80,7 +81,8 @@ mod tests {
         let signature = Signature::from_slice(&sig[..64]).unwrap();
         let recid = RecoveryId::from_byte(sig[64] - 27).unwrap();
         let recovered =
-            VerifyingKey::recover_from_prehash(&eip191_digest(&challenge), &signature, recid).unwrap();
+            VerifyingKey::recover_from_prehash(&eip191_digest(&challenge), &signature, recid)
+                .unwrap();
         let point = recovered.to_encoded_point(false);
         let hash = Keccak256::digest(&point.as_bytes()[1..]);
         assert_eq!(format!("0x{}", to_hex(&hash[12..])), addr);

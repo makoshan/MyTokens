@@ -62,7 +62,11 @@ function bufToB64url(buf: ArrayBuffer): string {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 function b64urlToBuf(s: string): ArrayBuffer {
-  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'))
+  // base64url drops '=' padding; atob() in Chrome rejects unpadded strings whose
+  // length isn't a multiple of 4 ("string not correctly encoded"). Re-add padding.
+  let b64 = s.replace(/-/g, '+').replace(/_/g, '/')
+  if (b64.length % 4) b64 += '='.repeat(4 - (b64.length % 4))
+  const bin = atob(b64)
   const bytes = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
   return bytes.buffer
@@ -83,18 +87,29 @@ export function loadStoredWallet(): StoredWallet | null {
 // the same wallet (and funds). Signing always re-prompts the passkey regardless,
 // so disconnect is a visibility/session toggle, not the security boundary.
 const LS_CONNECTED = 'mykey_wallet_connected'
+// Set when the user explicitly logs out (退出). While set, the dashboard veils
+// itself behind a passkey lock so coming back requires a fresh Touch ID — a
+// plain disconnect used to silently re-attach the cached keystore with no
+// verification, which defeated the point of "登录".
+const LS_LOCKED = 'mykey_passkey_locked'
 
 export function isWalletConnected(): boolean {
   return loadStoredWallet() != null && localStorage.getItem(LS_CONNECTED) !== '0'
 }
 
+/** True while the user is logged out and must re-verify a passkey to get back in. */
+export function isPasskeyLocked(): boolean {
+  return localStorage.getItem(LS_LOCKED) === '1'
+}
+
 /**
- * Connect (login): use the cached wallet if present, else restore the SAME
- * wallet from the passkey (works on a fresh device / after clearing storage).
- * Brand-new users (no passkey yet) are created via createWallet (welcome flow).
+ * Connect: use the cached wallet if present, else CREATE one (a brand-new friend
+ * has no passkey yet, so we must create — running discoverable login here finds
+ * nothing and fails without ever prompting Touch ID). Cross-device restore of an
+ * existing wallet is the separate, explicit loginWallet() action.
  */
 export async function connectWallet(accountId: string): Promise<StoredWallet> {
-  const wallet = loadStoredWallet() ?? (await loginWallet(accountId))
+  const wallet = loadStoredWallet() ?? (await createWallet(accountId))
   localStorage.setItem(LS_CONNECTED, '1')
   return wallet
 }
@@ -102,6 +117,33 @@ export async function connectWallet(accountId: string): Promise<StoredWallet> {
 /** Disconnect (logout): forget the connection but keep the keystore (safe). */
 export function disconnectWallet(): void {
   localStorage.setItem(LS_CONNECTED, '0')
+}
+
+/**
+ * Log out: disconnect AND raise the passkey lock so the next entry (this reload
+ * or a later one) forces a Touch ID verification before the dashboard shows.
+ * Keystore is kept — unlock re-derives the SAME wallet from the same passkey.
+ */
+export function logoutWallet(): void {
+  localStorage.setItem(LS_CONNECTED, '0')
+  localStorage.setItem(LS_LOCKED, '1')
+}
+
+/**
+ * Unlock the dashboard by re-verifying the passkey (Touch ID). Re-derives the
+ * SAME wallet (known credential → PRF), or restores it via a discoverable
+ * passkey if this device has no cached keystore. Clears the lock and reconnects.
+ * Throws on cancel / unsupported so the lock screen can surface the reason.
+ */
+export async function unlockWithPasskey(accountId: string): Promise<StoredWallet> {
+  await ensureWasm()
+  const stored = loadStoredWallet()
+  const wallet = stored
+    ? await deriveWalletFromPrf(accountId, stored.credentialId, await getPrfKey(stored.credentialId))
+    : await loginWallet(accountId)
+  localStorage.removeItem(LS_LOCKED)
+  localStorage.setItem(LS_CONNECTED, '1')
+  return wallet
 }
 
 export function prfSupported(): boolean {
@@ -182,7 +224,10 @@ export async function createWallet(accountId: string): Promise<StoredWallet> {
   await ensureWasm()
   const credentialId = await createPasskeyCredential(accountId)
   const prfKey = await getPrfKey(credentialId)
-  return deriveWalletFromPrf(accountId, credentialId, prfKey)
+  const wallet = await deriveWalletFromPrf(accountId, credentialId, prfKey)
+  localStorage.setItem(LS_CONNECTED, '1') // creating a wallet logs you in
+  localStorage.removeItem(LS_LOCKED)
+  return wallet
 }
 
 // Discoverable assertion — on a new device (no cached credentialId) the OS lists

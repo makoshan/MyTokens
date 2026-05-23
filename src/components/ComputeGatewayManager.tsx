@@ -17,6 +17,7 @@ import './ComputeGatewayManager.css'
 const LS_URL = 'mykey_gateway_url'
 const LS_INVITE_LINKS = 'mykey_gateway_invite_links_v1'
 const ALL_PROVIDER_MODELS = '__all_provider_models__'
+const INVITE_PAGE_SIZE = 8
 
 interface Account { id: string; display_name: string; status: string; balance_micro_usd: number; account_group: string; default_model?: string | null; model_allowlist?: string[] }
 interface Channel { id: string; label: string; provider: string; status: string; base_url: string | null }
@@ -32,6 +33,26 @@ interface PayoutOption { address: string; label: string }
 interface ComputeGatewayManagerProps { masterPassword?: string; providers?: ProviderConfig[] }
 
 function usd(micro: number) { return '$' + (micro / 1e6).toFixed(2) }
+
+function shortGatewayUrl(value: string) {
+  return value.replace(/^https?:\/\//, '').replace(/\/+$/, '')
+}
+
+function inviteStatusLabel(status: string) {
+  if (status === 'active') return '可领取'
+  if (status === 'accepted') return '已接受'
+  if (status === 'revoked') return '已取消'
+  return status
+}
+
+function formatInviteTime(value: string) {
+  return new Date(value).toLocaleString([], {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
 
 function readInviteLinks(): Record<string, string> {
   try {
@@ -60,6 +81,10 @@ async function operatorPatch<T>(url: string, masterPassword: string, path: strin
   const text = await invoke<string>('compute_gateway_operator_request', { gatewayUrl: url, method: 'PATCH', path, body: JSON.stringify(body), masterPassword })
   return JSON.parse(text) as T
 }
+async function operatorDelete<T>(url: string, masterPassword: string, path: string): Promise<T> {
+  const text = await invoke<string>('compute_gateway_operator_request', { gatewayUrl: url, method: 'DELETE', path, body: null, masterPassword })
+  return JSON.parse(text) as T
+}
 
 export function ComputeGatewayManager({ masterPassword = '', providers = [] }: ComputeGatewayManagerProps) {
   const [url, setUrl] = useState(() => localStorage.getItem(LS_URL) ?? DEFAULT_PUBLIC_COMPUTE_GATEWAY_URL)
@@ -69,6 +94,7 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
   const [channels, setChannels] = useState<Channel[]>([])
   const [routingRules, setRoutingRules] = useState<RoutingRule[]>([])
   const [invites, setInvites] = useState<OperatorInvite[]>([])
+  const [invitePage, setInvitePage] = useState(1)
   const [inviteLinksById, setInviteLinksById] = useState<Record<string, string>>(() => readInviteLinks())
   const [revenue, setRevenue] = useState<Revenue | null>(null)
   const [payoutOptions, setPayoutOptions] = useState<PayoutOption[]>([])
@@ -85,6 +111,7 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
   const [inviting, setInviting] = useState(false)
   const [updatingAccountId, setUpdatingAccountId] = useState('')
   const [revokingInviteId, setRevokingInviteId] = useState('')
+  const [deletingInviteId, setDeletingInviteId] = useState('')
   const [providerPresetId, setProviderPresetId] = useState('bailian')
   const selectedPreset = COMPUTE_GATEWAY_PROVIDER_PRESETS.find((preset) => preset.id === providerPresetId) ?? COMPUTE_GATEWAY_PROVIDER_PRESETS[0]
   const [providerLabel, setProviderLabel] = useState(() => `${selectedPreset.label} shared token`)
@@ -212,6 +239,14 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
   useEffect(() => {
     void autoFillProviderToken(selectedPreset.provider)
   }, [autoFillProviderToken, selectedPreset.provider])
+
+  const invitePageCount = Math.max(1, Math.ceil(invites.length / INVITE_PAGE_SIZE))
+  const clampedInvitePage = Math.min(invitePage, invitePageCount)
+  const pagedInvites = invites.slice((clampedInvitePage - 1) * INVITE_PAGE_SIZE, clampedInvitePage * INVITE_PAGE_SIZE)
+
+  useEffect(() => {
+    if (invitePage > invitePageCount) setInvitePage(invitePageCount)
+  }, [invitePage, invitePageCount])
 
   useEffect(() => {
     if (!configuredProvider) return
@@ -344,6 +379,7 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
       const nextInviteLinks = { ...inviteLinksById, [inv.invite_id]: link }
       setInviteLinksById(nextInviteLinks)
       writeInviteLinks(nextInviteLinks)
+      setInvitePage(1)
       setInviteLink(link)
       setInviteNote(`已建账户「${name}」· 模型 ${modelAllowlist.join(', ')}${amount > 0 ? ` · 初始额度 $${amount}` : '（无额度）'}`)
       setFriendName('')
@@ -400,7 +436,7 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
 
   async function revokeInvite(invite: OperatorInvite) {
     // 取消 = 彻底断开该朋友：停用账户，其 API Key 与网页访问立即失效（不只是作废链接）。
-    if (!window.confirm(`取消「${invite.account_display_name}」后，TA 的 API Key 和网页访问会立即失效（账户被停用）。确定？`)) return
+    if (!window.confirm(`停用「${invite.account_display_name}」后，TA 的 API Key 和网页访问会立即失效（账户被停用）。确定？`)) return
     setRevokingInviteId(invite.id)
     setError('')
     try {
@@ -413,9 +449,32 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
     }
   }
 
+  async function deleteInvite(invite: OperatorInvite) {
+    const activeNote = invite.status === 'active' ? '未领取链接会失效，但不会停用账户。' : '不会影响对方账户、API Key 或网页访问。'
+    if (!window.confirm(`删除「${invite.account_display_name}」的分享记录？${activeNote}`)) return
+    setDeletingInviteId(invite.id)
+    setError('')
+    try {
+      await operatorDelete<{ id: string }>(url, masterPassword, `/operator/invites/${invite.id}`)
+      setInvites((current) => current.filter((item) => item.id !== invite.id))
+      setInviteLinksById((current) => {
+        const next = { ...current }
+        delete next[invite.id]
+        writeInviteLinks(next)
+        return next
+      })
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setDeletingInviteId('')
+    }
+  }
+
   // First-run setup until the operator is connected with at least one channel.
   const showFirstRunSetup = !connected && !connecting && channels.length === 0
-  const statusLabel = connecting ? '连接中…' : connected ? url : '未连接'
+  const statusLabel = connecting ? '连接中…' : connected ? shortGatewayUrl(url) : '未连接'
+  const connectedSummary = `${channels.length} 个渠道 · ${modelOptions.length} 个可邀模型 · ${invites.length} 条分享链接`
   const modelControl =
     providerModelOptions.length > 0 ? (
       <select value={providerModel} onChange={(e) => setProviderModel(e.target.value)}>
@@ -433,8 +492,14 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
   return (
     <section className="compute-gateway-manager">
       <header className="compute-gateway-manager__header">
-        <div><span>Compute Gateway</span><h2>运营控制台</h2></div>
-        <code>{statusLabel}</code>
+        <div>
+          <span>Compute Gateway</span>
+          <h2>运营控制台</h2>
+          {connected && <p>{connectedSummary}</p>}
+        </div>
+        <code className={connected ? 'compute-gateway-manager__status-pill is-online' : 'compute-gateway-manager__status-pill'}>
+          {statusLabel}
+        </code>
       </header>
 
       {showFirstRunSetup ? (
@@ -486,14 +551,19 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
         </section>
       ) : (
         <section className="compute-gateway-manager__panel">
-          <h3>连接</h3>
+          <div className="compute-gateway-manager__panel-heading">
+            <div>
+              <h3>网关连接</h3>
+              <p>运营者身份由本机密钥自动注册和续期。</p>
+            </div>
+          </div>
           <div className="compute-gateway-manager__connect-row">
             <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="网关 URL" />
-            <button onClick={connect} disabled={connecting || !masterPassword}>
+            <button className="compute-gateway-manager__button-primary" onClick={connect} disabled={connecting || !masterPassword}>
               {connecting ? '连接中…' : '连接 / 刷新'}
             </button>
           </div>
-          <p className="compute-gateway-manager__source">运营者身份：本机密钥（自动注册，无需 Admin Token）</p>
+          <p className="compute-gateway-manager__source">无需 Admin Token；会话只保存在本机。</p>
           {error && <p className="compute-gateway-manager__error">{error}</p>}
         </section>
       )}
@@ -501,7 +571,12 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
       {connected && (
         <>
           <section className="compute-gateway-manager__panel compute-gateway-manager__revenue">
-            <h3>💰 收入</h3>
+            <div className="compute-gateway-manager__panel-heading">
+              <div>
+                <h3>收入概览</h3>
+                <p>查看可提现 USDC 和算力转售账面利润。</p>
+              </div>
+            </div>
             <div className="compute-gateway-manager__revenue-grid">
               <div className="compute-gateway-manager__revenue-card">
                 <span className="compute-gateway-manager__revenue-label">Treasury USDC（可提现）</span>
@@ -527,28 +602,47 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
                 </select>
               )}
               <input value={payoutAddress} onChange={(e) => setPayoutAddress(e.target.value)} placeholder="提现到钱包地址 0x…" />
-              <button onClick={withdrawTreasury} disabled={withdrawing || !revenue || revenue.treasury.withdrawable_micro_usd <= 0}>
+              <button className="compute-gateway-manager__button-primary" onClick={withdrawTreasury} disabled={withdrawing || !revenue || revenue.treasury.withdrawable_micro_usd <= 0}>
                 {withdrawing ? '提现中…' : '提现到钱包'}
               </button>
             </div>
             {withdrawNote && <p className="compute-gateway-manager__ok">✓ {withdrawNote}</p>}
-            <p className="compute-gateway-manager__muted" style={{ marginTop: 8, fontSize: 12 }}>
+            <p className="compute-gateway-manager__fineprint">
               Treasury 是朋友买 MYC 付的 USDC，存在网关共享 relayer，只能提现你名下的份额。账面利润是 Σ(售价−上游成本)，随调用累计，不可直接提现。
             </p>
           </section>
 
           <section className="compute-gateway-manager__panel">
-            <h3>共享 AI Token</h3>
+            <div className="compute-gateway-manager__panel-heading">
+              <div>
+                <h3>共享 AI Token</h3>
+                <p>添加上游渠道后，系统会自动创建默认价格和路由规则。</p>
+              </div>
+              <span className="compute-gateway-manager__count-badge">{channels.length} 个渠道</span>
+            </div>
             <div className="compute-gateway-manager__channel-form">
-              <select value={providerPresetId} onChange={(e) => updatePreset(e.target.value)}>
-                {COMPUTE_GATEWAY_PROVIDER_PRESETS.map((preset) => (
-                  <option key={preset.id} value={preset.id}>{preset.label}</option>
-                ))}
-              </select>
-              {modelControl}
-              <input value={providerLabel} onChange={(e) => setProviderLabel(e.target.value)} placeholder="渠道名称" />
-              <input value={providerToken} onChange={(e) => setProviderToken(e.target.value)} placeholder={`${selectedPreset.label} 上游 API Key`} type="password" />
+              <label>
+                <span>Provider</span>
+                <select value={providerPresetId} onChange={(e) => updatePreset(e.target.value)}>
+                  {COMPUTE_GATEWAY_PROVIDER_PRESETS.map((preset) => (
+                    <option key={preset.id} value={preset.id}>{preset.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>模型</span>
+                {modelControl}
+              </label>
+              <label>
+                <span>渠道名称</span>
+                <input value={providerLabel} onChange={(e) => setProviderLabel(e.target.value)} placeholder="渠道名称" />
+              </label>
+              <label>
+                <span>上游 API Key</span>
+                <input value={providerToken} onChange={(e) => setProviderToken(e.target.value)} placeholder={`${selectedPreset.label} 上游 API Key`} type="password" />
+              </label>
               <button
+                className="compute-gateway-manager__button-primary"
                 onClick={async () => {
                   try {
                     setError('')
@@ -565,94 +659,141 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
           </section>
 
           <section className="compute-gateway-manager__panel">
-            <h3>👥 邀请朋友用模型</h3>
-            <div className="compute-gateway-manager__invite-controls">
-              <div className="compute-gateway-manager__model-checks">
-                {modelOptions.length === 0 && <span className="compute-gateway-manager__muted">无可用模型</span>}
-                {modelOptions.map((m) => (
-                  <label key={m.model}>
-                    <input
-                      type="checkbox"
-                      checked={selectedInviteModels.includes(m.model)}
-                      onChange={() => toggleFriendModel(m.model)}
-                    />
-                    <span>{m.model}</span>
-                  </label>
-                ))}
+            <div className="compute-gateway-manager__panel-heading">
+              <div>
+                <h3>邀请朋友用模型</h3>
+                <p>生成一个可自动登录的链接，只暴露你授权的模型。</p>
               </div>
-              <input value={friendRp} onChange={(e) => setFriendRp(e.target.value)} type="number" style={{ width: 110 }} />
-              <span>初始额度 $（0 = 不送）</span>
-              <button onClick={inviteFriend} disabled={inviting || modelOptions.length === 0}>{inviting ? '生成中…' : '生成邀请链接'}</button>
             </div>
-            {inviteNote && <p style={{ marginTop: 8, color: '#228e42' }}>✓ {inviteNote}</p>}
+            <div className="compute-gateway-manager__invite-builder">
+              <div className="compute-gateway-manager__invite-models">
+                <div className="compute-gateway-manager__section-label">可用模型</div>
+                <div className="compute-gateway-manager__model-checks">
+                  {modelOptions.length === 0 && <span className="compute-gateway-manager__muted">无可用模型</span>}
+                  {modelOptions.map((m) => (
+                    <label className={selectedInviteModels.includes(m.model) ? 'is-selected' : ''} key={m.model}>
+                      <input
+                        type="checkbox"
+                        checked={selectedInviteModels.includes(m.model)}
+                        onChange={() => toggleFriendModel(m.model)}
+                      />
+                      <span>{m.model}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="compute-gateway-manager__invite-settings">
+                <label>
+                  <span>朋友名称</span>
+                  <input value={friendName} onChange={(e) => setFriendName(e.target.value)} placeholder={`朋友 ${accounts.length + 1}`} />
+                </label>
+                <label>
+                  <span>初始额度 USD</span>
+                  <input value={friendRp} onChange={(e) => setFriendRp(e.target.value)} type="number" min="0" step="0.1" />
+                </label>
+                <button className="compute-gateway-manager__button-primary" onClick={inviteFriend} disabled={inviting || modelOptions.length === 0}>
+                  {inviting ? '生成中…' : '生成邀请链接'}
+                </button>
+              </div>
+            </div>
+            {inviteNote && <p className="compute-gateway-manager__ok">✓ {inviteNote}</p>}
             {inviteLink && (
-              <p style={{ marginTop: 8 }}>
-                <code style={{ wordBreak: 'break-all' }}>{inviteLink}</code>{' '}
+              <div className="compute-gateway-manager__link-result">
+                <code>{inviteLink}</code>
                 <button onClick={() => navigator.clipboard?.writeText(inviteLink)}>复制</button>
-              </p>
+              </div>
             )}
-            <p style={{ marginTop: 8, fontSize: 12, color: '#667' }}>
+            <p className="compute-gateway-manager__fineprint">
               直接从已共享渠道里多选模型；对方点开链接即自动登录，只能看到并使用你授权的模型。后续可在账户表应用当前选择修改授权。
             </p>
           </section>
 
           <section className="compute-gateway-manager__panel">
-            <h3>分享链接 ({invites.length})</h3>
-            <p className="compute-gateway-manager__muted" style={{ marginTop: -4, marginBottom: 10, fontSize: 12 }}>
-              「取消」会停用该朋友的账户：TA 的 API Key 和网页访问都会立即失效，不只是作废链接。
-            </p>
-            <table><thead><tr><th>账户</th><th>状态</th><th>过期时间</th><th>链接</th><th>操作</th></tr></thead>
-              <tbody>
-                {invites.length === 0 && <tr><td colSpan={5}>还没有生成分享链接</td></tr>}
-                {invites.map((invite) => {
-                  const link = inviteLinksById[invite.id]
-                  const active = invite.status === 'active'
-                  return (
-                    <tr key={invite.id}>
-                      <td>{invite.account_display_name}</td>
-                      <td>{invite.status}</td>
-                      <td>{new Date(invite.expires_at).toLocaleString()}</td>
-                      <td>
-                        {link ? (
-                          <code className="compute-gateway-manager__invite-link">{link}</code>
-                        ) : (
-                          <span className="compute-gateway-manager__muted">此设备没有保存完整链接</span>
-                        )}
-                      </td>
-                      <td>
-                        <div className="compute-gateway-manager__row-actions">
-                          <button disabled={!link} onClick={() => link && window.open(link, '_blank', 'noopener,noreferrer')}>查看</button>
-                          <button disabled={!link} onClick={() => link && navigator.clipboard?.writeText(link)}>复制</button>
-                          <button disabled={!active || revokingInviteId === invite.id} onClick={() => revokeInvite(invite)}>
-                            {revokingInviteId === invite.id ? '取消中…' : '取消'}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+            <div className="compute-gateway-manager__panel-heading">
+              <div>
+                <h3>分享链接</h3>
+                <p>停用会让 API Key 和网页立即失效；删除只移除这条分享记录。</p>
+              </div>
+              <span className="compute-gateway-manager__count-badge">{invites.length}</span>
+            </div>
+            <div className="compute-gateway-manager__table-wrap">
+              <table className="compute-gateway-manager__share-table"><thead><tr><th>账户</th><th>状态</th><th>过期</th><th>链接</th><th>操作</th></tr></thead>
+                <tbody>
+                  {invites.length === 0 && <tr><td className="compute-gateway-manager__empty-cell" colSpan={5}>还没有生成分享链接</td></tr>}
+                  {pagedInvites.map((invite) => {
+                    const link = inviteLinksById[invite.id]
+                    const active = invite.status === 'active'
+                    return (
+                      <tr key={invite.id}>
+                        <td><strong>{invite.account_display_name}</strong></td>
+                        <td><span className={`compute-gateway-manager__status-badge is-${invite.status}`}>{inviteStatusLabel(invite.status)}</span></td>
+                        <td>{formatInviteTime(invite.expires_at)}</td>
+                        <td>
+                          {link ? (
+                            <code className="compute-gateway-manager__invite-link">{link}</code>
+                          ) : (
+                            <span className="compute-gateway-manager__muted">此设备没有保存完整链接</span>
+                          )}
+                        </td>
+                        <td>
+                          <div className="compute-gateway-manager__row-actions">
+                            <button disabled={!link} onClick={() => link && window.open(link, '_blank', 'noopener,noreferrer')}>打开</button>
+                            <button disabled={!link} onClick={() => link && navigator.clipboard?.writeText(link)}>复制</button>
+                            <button className="compute-gateway-manager__danger-button" disabled={!active || revokingInviteId === invite.id} onClick={() => revokeInvite(invite)}>
+                              {revokingInviteId === invite.id ? '停用中…' : '停用'}
+                            </button>
+                            <button className="compute-gateway-manager__action-delete" disabled={deletingInviteId === invite.id} onClick={() => deleteInvite(invite)}>
+                              {deletingInviteId === invite.id ? '删除中…' : '删除'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {invites.length > INVITE_PAGE_SIZE && (
+              <div className="compute-gateway-manager__pagination">
+                <span>
+                  第 {clampedInvitePage} / {invitePageCount} 页 · 每页 {INVITE_PAGE_SIZE} 条
+                </span>
+                <div>
+                  <button type="button" disabled={clampedInvitePage <= 1} onClick={() => setInvitePage((page) => Math.max(1, page - 1))}>上一页</button>
+                  <button type="button" disabled={clampedInvitePage >= invitePageCount} onClick={() => setInvitePage((page) => Math.min(invitePageCount, page + 1))}>下一页</button>
+                </div>
+              </div>
+            )}
           </section>
 
           <div className="compute-gateway-manager__grid">
             <section className="compute-gateway-manager__panel">
-              <h3>账户 ({accounts.length})</h3>
-              <table><thead><tr><th>名称</th><th>授权模型</th><th>状态</th><th>余额</th><th>操作</th></tr></thead>
-                <tbody>{accounts.map((a) => <tr key={a.id}>
-                  <td>{a.display_name}</td>
-                  <td>{(a.model_allowlist && a.model_allowlist.length > 0 ? a.model_allowlist : [a.default_model || '全部组模型']).join(', ')}</td>
-                  <td>{a.status}</td>
-                  <td>{usd(a.balance_micro_usd)}</td>
-                  <td><button onClick={() => updateAccountModels(a)} disabled={updatingAccountId === a.id || selectedInviteModels.length === 0}>{updatingAccountId === a.id ? '更新中…' : '应用当前选择'}</button></td>
-                </tr>)}</tbody>
-              </table>
+              <div className="compute-gateway-manager__panel-heading">
+                <div><h3>账户</h3></div>
+                <span className="compute-gateway-manager__count-badge">{accounts.length}</span>
+              </div>
+              <div className="compute-gateway-manager__table-wrap">
+                <table><thead><tr><th>名称</th><th>授权模型</th><th>状态</th><th>余额</th><th>操作</th></tr></thead>
+                  <tbody>{accounts.map((a) => <tr key={a.id}>
+                    <td><strong>{a.display_name}</strong></td>
+                    <td>{(a.model_allowlist && a.model_allowlist.length > 0 ? a.model_allowlist : [a.default_model || '全部组模型']).join(', ')}</td>
+                    <td><span className={`compute-gateway-manager__status-badge is-${a.status}`}>{a.status}</span></td>
+                    <td>{usd(a.balance_micro_usd)}</td>
+                    <td><button onClick={() => updateAccountModels(a)} disabled={updatingAccountId === a.id || selectedInviteModels.length === 0}>{updatingAccountId === a.id ? '更新中…' : '应用当前选择'}</button></td>
+                  </tr>)}</tbody>
+                </table>
+              </div>
             </section>
             <section className="compute-gateway-manager__panel">
-              <h3>渠道 ({channels.length})</h3>
-              <table><thead><tr><th>Label</th><th>Provider</th><th>状态</th></tr></thead>
-                <tbody>{channels.map((c) => <tr key={c.id}><td>{c.label}</td><td>{c.provider}</td><td>{c.status}</td></tr>)}</tbody>
-              </table>
+              <div className="compute-gateway-manager__panel-heading">
+                <div><h3>渠道</h3></div>
+                <span className="compute-gateway-manager__count-badge">{channels.length}</span>
+              </div>
+              <div className="compute-gateway-manager__table-wrap">
+                <table><thead><tr><th>Label</th><th>Provider</th><th>状态</th></tr></thead>
+                  <tbody>{channels.map((c) => <tr key={c.id}><td><strong>{c.label}</strong></td><td>{c.provider}</td><td><span className={`compute-gateway-manager__status-badge is-${c.status}`}>{c.status}</span></td></tr>)}</tbody>
+                </table>
+              </div>
             </section>
           </div>
         </>

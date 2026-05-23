@@ -13,9 +13,11 @@ function sampleCache(): CryptoWalletCache {
   return {
     logoByToken: { 't1': ['https://logo/1.png'], 't2': ['https://logo/2.png'] },
     valueByToken: { 't1': '12.5', 't2': '3.0' },
+    balanceByToken: { 't1': '1.5', 't2': '0.25' },
     trustWalletStatusByToken: { 't1': 'verified', 't2': 'missing' },
     totalUsdByAccount: { 'a1': '$15.50', 'a2': '$0' },
     scannedAtByAccount: { 'a1': 1_000, 'a2': 2_000 },
+    balanceByAccount: { 'a1': '0.0142605', 'a2': '2.0' },
   }
 }
 
@@ -44,9 +46,11 @@ test('pruneCryptoWalletCache: drops entries for tokens/accounts that no longer e
   assert.deepEqual(pruned, {
     logoByToken: { 't1': ['https://logo/1.png'] },
     valueByToken: { 't1': '12.5' },
+    balanceByToken: { 't1': '1.5' },
     trustWalletStatusByToken: { 't1': 'verified' },
     totalUsdByAccount: { 'a2': '$0' },
     scannedAtByAccount: { 'a2': 2_000 },
+    balanceByAccount: { 'a2': '2.0' },
   })
 })
 

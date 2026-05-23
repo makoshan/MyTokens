@@ -182,7 +182,7 @@ test('buy-myc rejects a malformed wallet address', async () => {
   assert.equal(s.transferWithSigCalls.length, 0)
 })
 
-test('faucet mints test-USDT to a wallet on testnet', async () => {
+test('faucet mints 10 test-USDT only once per account on testnet', async () => {
   const s = stubRelayer()
   const app = createGatewayApp(appOptions(seedStore(), s.relayer))
   const session = await openSession(app)
@@ -190,11 +190,17 @@ test('faucet mints test-USDT to a wallet on testnet', async () => {
   assert.equal(res.status, 200)
   const body = (await res.json()) as { tx_hash: string; minted_usdt: number; to_address: string }
   assert.equal(body.tx_hash, MINT_TX)
-  assert.equal(body.minted_usdt, 20) // default 20_000_000 raw
+  assert.equal(body.minted_usdt, 10)
   assert.equal(s.mintCalls.length, 1)
   assert.equal(s.mintCalls[0].tokenAddress, USDT)
   assert.equal(s.mintCalls[0].to, WALLET)
-  assert.equal(s.mintCalls[0].value, 20_000_000n)
+  assert.equal(s.mintCalls[0].value, 10_000_000n)
+
+  const second = await faucet(app, session, { to_address: '0x99991234567890abcdef1234567890abcdef9999' })
+  assert.equal(second.status, 409)
+  const error = (await second.json()) as { error: { code: string } }
+  assert.equal(error.error.code, 'faucet_already_claimed')
+  assert.equal(s.mintCalls.length, 1)
 })
 
 test('faucet is disabled on mainnet (no minting fake USDT in prod)', async () => {

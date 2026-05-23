@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { connectWallet, createWallet, disconnectWallet, loadStoredWallet, prfSupported } from '../wallet.js'
+import { connectWallet, loginWallet, logoutWallet, loadStoredWallet, prfSupported } from '../wallet.js'
 
 function shortAddr(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`
@@ -47,12 +47,13 @@ export function WalletButton({
     }
   }
 
-  // Brand-new wallet (no passkey yet) — explicit so we never create a duplicate.
-  async function create() {
+  // Cross-device restore: pick an existing (synced) passkey to recover the same
+  // wallet. Only for users who already created one elsewhere.
+  async function login() {
     setErr('')
     setBusy(true)
     try {
-      await createWallet(accountId)
+      await loginWallet(accountId)
       onConnect()
     } catch (e) {
       setErr(humanErr(e))
@@ -69,7 +70,7 @@ export function WalletButton({
         <button
           type="button"
           onClick={() => {
-            disconnectWallet()
+            logoutWallet()
             onDisconnect()
           }}
         >
@@ -82,13 +83,14 @@ export function WalletButton({
   return (
     <div className="wallet-chip wallet-chip--out">
       <button type="button" onClick={connect} disabled={busy}>
-        {busy ? '连接中…' : wallet ? '🔑 连接钱包' : '🔑 登录钱包'}
+        {busy ? '连接中…' : wallet ? '🔑 连接钱包' : '🔑 创建钱包'}
       </button>
-      {/* No cached wallet: connect restores via the synced passkey; if the user
-          has none yet, offer an explicit create so we never duplicate a passkey. */}
+      {/* No cached wallet: the primary button CREATES a new passkey wallet (the
+          common first-time case). If you already have one on another device,
+          restore it via discoverable login instead. */}
       {!wallet && (
-        <button type="button" className="wallet-link" onClick={create} disabled={busy} title="还没有钱包？新建一个">
-          新建
+        <button type="button" className="wallet-link" onClick={login} disabled={busy} title="在其他设备已创建过钱包？登录恢复">
+          已有钱包？登录
         </button>
       )}
       {err && <span className="wallet-err">{err}</span>}

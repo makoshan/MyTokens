@@ -68,6 +68,15 @@ export interface TreasuryWithdrawalRecord {
   createdAt: string
 }
 
+export interface StablecoinFaucetClaimRecord {
+  id: string
+  accountId: string
+  toAddress: string
+  amountRaw: string
+  txHash?: string | null
+  createdAt: string
+}
+
 /** Per-operator income view: real USDC collected vs. accounting compute margin. */
 export interface OperatorRevenue {
   // Real money: USDC paid into the shared relayer by this operator's friends,
@@ -244,6 +253,7 @@ export interface GatewayStore {
   findInviteByHash(hash: string): Promise<AccountInvite | null>
   markInviteAccepted(inviteId: string, now: string): Promise<void>
   revokeInvite(inviteId: string, now: string): Promise<AccountInvite | null>
+  deleteInvite(inviteId: string): Promise<AccountInvite | null>
   getAccount(accountId: string): Promise<GatewayAccountRecord | null>
   listAccounts(operatorId?: string): Promise<GatewayAccountRecord[]>
   createAccount(account: GatewayAccountRecord): Promise<GatewayAccountRecord>
@@ -323,6 +333,9 @@ export interface GatewayStore {
   recordTreasuryCredit(record: TreasuryCreditRecord): Promise<void>
   recordTreasuryWithdrawal(record: TreasuryWithdrawalRecord): Promise<void>
   getOperatorRevenue(operatorId: string): Promise<OperatorRevenue>
+  claimStablecoinFaucet(record: StablecoinFaucetClaimRecord): Promise<boolean>
+  setStablecoinFaucetTx(input: { id: string; txHash: string }): Promise<void>
+  revertStablecoinFaucetClaim(input: { id: string }): Promise<void>
 }
 
 export class InMemoryGatewayStore implements GatewayStore {
@@ -343,6 +356,7 @@ export class InMemoryGatewayStore implements GatewayStore {
   readonly redpackets: RedpacketRecord[] = []
   readonly treasuryCredits: TreasuryCreditRecord[] = []
   readonly treasuryWithdrawals: TreasuryWithdrawalRecord[] = []
+  readonly stablecoinFaucetClaims: StablecoinFaucetClaimRecord[] = []
   readonly ledger: Array<{ id: string; accountId: string; type: string; amountMicroUsd: number; createdAt: string }>
   readonly auditLog: AdminAuditRecord[]
   readonly baseUrl: string
@@ -499,6 +513,13 @@ export class InMemoryGatewayStore implements GatewayStore {
     if (!invite) return null
     invite.status = 'revoked'
     invite.acceptedAt = invite.acceptedAt ?? now
+    return invite
+  }
+
+  async deleteInvite(inviteId: string): Promise<AccountInvite | null> {
+    const index = this.invites.findIndex((candidate) => candidate.id === inviteId)
+    if (index < 0) return null
+    const [invite] = this.invites.splice(index, 1)
     return invite
   }
 
@@ -936,6 +957,22 @@ export class InMemoryGatewayStore implements GatewayStore {
       totalTokens,
     }
   }
+
+  async claimStablecoinFaucet(record: StablecoinFaucetClaimRecord): Promise<boolean> {
+    if (this.stablecoinFaucetClaims.some((claim) => claim.accountId === record.accountId)) return false
+    this.stablecoinFaucetClaims.push(record)
+    return true
+  }
+
+  async setStablecoinFaucetTx(input: { id: string; txHash: string }): Promise<void> {
+    const claim = this.stablecoinFaucetClaims.find((row) => row.id === input.id)
+    if (claim) claim.txHash = input.txHash.toLowerCase()
+  }
+
+  async revertStablecoinFaucetClaim(input: { id: string }): Promise<void> {
+    const idx = this.stablecoinFaucetClaims.findIndex((row) => row.id === input.id)
+    if (idx >= 0) this.stablecoinFaucetClaims.splice(idx, 1)
+  }
 }
 
 export interface D1RunResult {
@@ -1203,6 +1240,16 @@ export class D1GatewayStore implements GatewayStore {
       .bind(inviteId)
       .first<Record<string, unknown>>()
     return row ? this.inviteFromRow(row) : null
+  }
+
+  async deleteInvite(inviteId: string): Promise<AccountInvite | null> {
+    const row = await this.db
+      .prepare('SELECT * FROM compute_account_invites WHERE id = ? LIMIT 1')
+      .bind(inviteId)
+      .first<Record<string, unknown>>()
+    if (!row) return null
+    await this.db.prepare('DELETE FROM compute_account_invites WHERE id = ?').bind(inviteId).run()
+    return this.inviteFromRow(row)
   }
 
   private inviteFromRow(row: Record<string, unknown>): AccountInvite {
@@ -2101,6 +2148,27 @@ export class D1GatewayStore implements GatewayStore {
       calls: numberValue(margin?.calls),
       totalTokens: numberValue(margin?.tokens),
     }
+  }
+
+  async claimStablecoinFaucet(record: StablecoinFaucetClaimRecord): Promise<boolean> {
+    const res = await this.db
+      .prepare(
+        'INSERT OR IGNORE INTO compute_stablecoin_faucet_claims (id, account_id, to_address, amount_raw, created_at) VALUES (?, ?, ?, ?, ?)'
+      )
+      .bind(record.id, record.accountId, record.toAddress.toLowerCase(), record.amountRaw, record.createdAt)
+      .run()
+    return (res.meta?.changes ?? 0) > 0
+  }
+
+  async setStablecoinFaucetTx(input: { id: string; txHash: string }): Promise<void> {
+    await this.db
+      .prepare('UPDATE compute_stablecoin_faucet_claims SET tx_hash=? WHERE id=?')
+      .bind(input.txHash.toLowerCase(), input.id)
+      .run()
+  }
+
+  async revertStablecoinFaucetClaim(input: { id: string }): Promise<void> {
+    await this.db.prepare('DELETE FROM compute_stablecoin_faucet_claims WHERE id=?').bind(input.id).run()
   }
 
   private async listModelQuality(): Promise<ModelQualityRecord[]> {

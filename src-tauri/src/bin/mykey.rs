@@ -47,6 +47,14 @@ enum Cmd {
     /// Compute-gateway access credentials.
     #[command(subcommand)]
     Gateway(GatewayCmd),
+    /// Cache the master password in the macOS keychain so commands within the TTL skip the prompt.
+    Login {
+        /// Session lifetime: e.g. 15m, 1h, 90s, or a bare number (minutes). Default 15m.
+        #[arg(long, default_value = "15m")]
+        ttl: String,
+    },
+    /// Clear the cached login session from the keychain.
+    Logout,
 }
 
 #[derive(Subcommand)]
@@ -152,6 +160,13 @@ enum ApikeyCmd {
     Wallet(ApikeyWalletCmd),
     /// List configured AI providers.
     Providers,
+    /// Show one AI provider's config; --reveal prints its API key.
+    Provider {
+        /// Provider id (e.g. qwen, bailian-token-plan, anthropic).
+        name: String,
+        #[arg(long)]
+        reveal: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -188,6 +203,137 @@ fn run(cli: &Cli) -> Result<(), String> {
         Cmd::Wallet(cmd) => run_wallet(cli, cmd),
         Cmd::Apikey(cmd) => run_apikey(cli, cmd),
         Cmd::Gateway(cmd) => run_gateway(cli, cmd),
+        Cmd::Login { ttl } => run_login(cli, ttl),
+        Cmd::Logout => run_logout(cli),
+    }
+}
+
+// ---- login session --------------------------------------------------------
+
+fn run_login(cli: &Cli, ttl: &str) -> Result<(), String> {
+    let secs = parse_ttl(ttl)?;
+    let pw = read_password_for_login()?;
+    let mut vault = Vault::new();
+    if !vault.is_password_set() {
+        return Err("vault is not initialized — run `mykey vault init` first".into());
+    }
+    if !vault.authenticate(&pw) {
+        return Err("invalid master password".into());
+    }
+    vault.ensure_secret_encryption(&pw);
+    let expires_at = now_unix() + secs;
+    session_set(&pw, expires_at)?;
+    if cli.json {
+        print_json(&json!({ "ok": true, "ttlSeconds": secs, "expiresAt": expires_at }));
+    } else {
+        println!(
+            "logged in — no password needed for the next {}",
+            fmt_dur(secs)
+        );
+        println!("(cached in macOS keychain; run `mykey logout` to clear)");
+    }
+    Ok(())
+}
+
+fn run_logout(cli: &Cli) -> Result<(), String> {
+    session_clear();
+    if cli.json {
+        print_json(&json!({ "ok": true }));
+    } else {
+        println!("logged out (keychain session cleared)");
+    }
+    Ok(())
+}
+
+const SESSION_SERVICE: &str = "MyKey-CLI-session";
+
+/// Scope the session per-vault so distinct DBs don't share a login.
+fn session_account() -> String {
+    std::env::var("MYKEY_VAULT_DB")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "default".into())
+}
+
+fn session_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new(SESSION_SERVICE, &session_account()).map_err(|e| e.to_string())
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn session_set(password: &str, expires_at: u64) -> Result<(), String> {
+    let payload = json!({ "password": password, "expiresAt": expires_at }).to_string();
+    session_entry()?
+        .set_password(&payload)
+        .map_err(|e| e.to_string())
+}
+
+/// Cached master password if a non-expired session exists; expired entries are purged.
+fn session_get() -> Option<String> {
+    let entry = session_entry().ok()?;
+    let raw = entry.get_password().ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    let exp = v.get("expiresAt").and_then(|x| x.as_u64())?;
+    let pw = v.get("password").and_then(|x| x.as_str())?.to_string();
+    if exp > now_unix() {
+        Some(pw)
+    } else {
+        let _ = entry.delete_password();
+        None
+    }
+}
+
+/// Seconds left on the session, without exposing the cached password.
+fn session_remaining() -> Option<u64> {
+    let entry = session_entry().ok()?;
+    let raw = entry.get_password().ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    let exp = v.get("expiresAt").and_then(|x| x.as_u64())?;
+    let now = now_unix();
+    (exp > now).then(|| exp - now)
+}
+
+fn session_clear() {
+    if let Ok(entry) = session_entry() {
+        let _ = entry.delete_password();
+    }
+}
+
+fn parse_ttl(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("ttl must not be empty".into());
+    }
+    let (num, mult) = if let Some(n) = s.strip_suffix('s') {
+        (n, 1u64)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 60)
+    } else if let Some(n) = s.strip_suffix('h') {
+        (n, 3600)
+    } else {
+        (s, 60) // bare number = minutes
+    };
+    let val: u64 = num
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid ttl '{s}' (use forms like 15m, 1h, 90s)"))?;
+    Ok(val.saturating_mul(mult).max(1))
+}
+
+fn fmt_dur(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}h{m}m")
+    } else if m > 0 {
+        format!("{m}m{s}s")
+    } else {
+        format!("{s}s")
     }
 }
 
@@ -199,12 +345,24 @@ fn run_vault(cli: &Cli, cmd: &VaultCmd) -> Result<(), String> {
             let vault = Vault::new();
             let configured = vault.is_password_set();
             let unlock = vault.get_vault_unlock_state()?;
+            let session = session_remaining();
             if cli.json {
-                print_json(&json!({ "configured": configured, "unlock": unlock }));
+                print_json(&json!({
+                    "configured": configured,
+                    "unlock": unlock,
+                    "loginSessionSecondsLeft": session,
+                }));
             } else {
                 println!("vault configured : {configured}");
                 println!("passkey unlocks  : {}", unlock.passkeys.len());
                 println!("recovery key set : {}", unlock.has_recovery_key);
+                println!(
+                    "login session    : {}",
+                    match session {
+                        Some(s) => format!("active (~{} left)", fmt_dur(s)),
+                        None => "none".into(),
+                    }
+                );
             }
             Ok(())
         }
@@ -279,11 +437,15 @@ fn run_secret(cli: &Cli, cmd: &SecretCmd) -> Result<(), String> {
                 Some(k) => k.clone(),
                 None => read_secret_input("Secret value: ")?,
             };
-            let cred = vault.add_credential(provider.clone(), name.clone(), secret, source.clone())?;
+            let cred =
+                vault.add_credential(provider.clone(), name.clone(), secret, source.clone())?;
             if cli.json {
                 print_json(&json!({ "id": cred.id, "provider": cred.provider, "name": cred.name }));
             } else {
-                println!("added credential {} ({} / {})", cred.id, cred.provider, cred.name);
+                println!(
+                    "added credential {} ({} / {})",
+                    cred.id, cred.provider, cred.name
+                );
             }
             Ok(())
         }
@@ -337,7 +499,11 @@ fn run_wallet(cli: &Cli, cmd: &WalletCmd) -> Result<(), String> {
                 println!("(no wallets)");
             } else {
                 for w in &wallets {
-                    let addr = w.accounts.first().map(|a| a.address.as_str()).unwrap_or("-");
+                    let addr = w
+                        .accounts
+                        .first()
+                        .map(|a| a.address.as_str())
+                        .unwrap_or("-");
                     println!("{}  {:<18} {:<22} {}", w.id, w.name, w.wallet_type, addr);
                 }
             }
@@ -372,9 +538,9 @@ fn run_wallet(cli: &Cli, cmd: &WalletCmd) -> Result<(), String> {
                 return Err("provide --mnemonic or --keystore".into());
             }
             let keystore_json = match keystore {
-                Some(path) => Some(
-                    std::fs::read_to_string(path).map_err(|e| format!("read keystore: {e}"))?,
-                ),
+                Some(path) => {
+                    Some(std::fs::read_to_string(path).map_err(|e| format!("read keystore: {e}"))?)
+                }
                 None => None,
             };
             let secret = resolve_unlock_secret(unlock_secret, false)?;
@@ -413,7 +579,11 @@ fn run_wallet(cli: &Cli, cmd: &WalletCmd) -> Result<(), String> {
         }
         WalletCmd::Export { id, reveal } => {
             let material = vault.get_crypto_wallet_secret(id)?;
-            let shown = if *reveal { material.clone() } else { mask(&material) };
+            let shown = if *reveal {
+                material.clone()
+            } else {
+                mask(&material)
+            };
             if cli.json {
                 print_json(&json!({ "id": id, "secret": shown }));
             } else {
@@ -455,7 +625,11 @@ fn store_tcx_wallet(
         .and_then(|a| a.get("derivationPath"))
         .and_then(|v| v.as_str())
         .map(String::from)
-        .or_else(|| build_derivation(chain, network, None)["derivationPath"].as_str().map(String::from));
+        .or_else(|| {
+            build_derivation(chain, network, None)["derivationPath"]
+                .as_str()
+                .map(String::from)
+        });
     let wallet = vault.add_crypto_wallet(
         name.to_string(),
         // Match the GUI's stored `walletType` so it can unlock + sign later.
@@ -477,7 +651,11 @@ fn report_wallet(cli: &Cli, wallet: &app_lib::CryptoWallet) -> Result<(), String
     if cli.json {
         print_json(&serde_json::to_value(wallet).map_err(|e| e.to_string())?);
     } else {
-        let addr = wallet.accounts.first().map(|a| a.address.as_str()).unwrap_or("-");
+        let addr = wallet
+            .accounts
+            .first()
+            .map(|a| a.address.as_str())
+            .unwrap_or("-");
         println!("created wallet {} ({})", wallet.id, wallet.name);
         println!("  type   : {}", wallet.wallet_type);
         println!("  address: {addr}");
@@ -552,9 +730,73 @@ fn run_apikey(cli: &Cli, cmd: &ApikeyCmd) -> Result<(), String> {
                 println!("(no providers)");
             } else {
                 for p in &providers {
-                    let has = if p.api_key.trim().is_empty() { "no-key" } else { "key" };
+                    let has = if p.api_key.trim().is_empty() {
+                        "no-key"
+                    } else {
+                        "key"
+                    };
                     let active = if p.is_active { "active" } else { "off" };
                     println!("{:<16} {:<8} {:<7} {}", p.provider, active, has, p.base_url);
+                }
+            }
+            Ok(())
+        }
+        ApikeyCmd::Provider { name, reveal } => {
+            let want = name.trim().to_ascii_lowercase();
+            let p = vault
+                .get_providers()
+                .into_iter()
+                .find(|p| {
+                    p.provider.to_ascii_lowercase() == want || p.label.to_ascii_lowercase() == want
+                })
+                .ok_or_else(|| format!("no provider matching '{name}'"))?;
+            let key = p.api_key.trim().to_string();
+            let shown = if key.is_empty() {
+                String::new()
+            } else if *reveal {
+                key.clone()
+            } else {
+                mask(&key)
+            };
+            // The key may live in `api_key` and/or a provider env var (e.g. DASHSCOPE_API_KEY).
+            let env_pairs: Vec<(String, String)> = p
+                .env_vars
+                .iter()
+                .map(|e| {
+                    (
+                        e.key.clone(),
+                        if *reveal {
+                            e.value.clone()
+                        } else {
+                            mask(&e.value)
+                        },
+                    )
+                })
+                .collect();
+            if cli.json {
+                let envs: Vec<Value> = env_pairs
+                    .iter()
+                    .map(|(k, v)| json!({ "name": k, "value": v }))
+                    .collect();
+                print_json(&json!({
+                    "provider": p.provider, "label": p.label, "baseUrl": p.base_url,
+                    "apiKey": shown, "hasKey": !key.is_empty(), "isActive": p.is_active,
+                    "envVars": envs,
+                }));
+            } else {
+                println!("provider: {}", p.provider);
+                println!("label   : {}", p.label);
+                println!("baseUrl : {}", p.base_url);
+                println!(
+                    "apiKey  : {}",
+                    if key.is_empty() {
+                        "(not set)".into()
+                    } else {
+                        shown
+                    }
+                );
+                for (k, v) in &env_pairs {
+                    println!("  env {k} = {v}");
                 }
             }
             Ok(())
@@ -600,6 +842,20 @@ fn open_authed(_cli: &Cli) -> Result<(Vault, String), String> {
 }
 
 fn resolve_master_password() -> Result<String, String> {
+    if let Ok(pw) = std::env::var("MYKEY_MASTER_PASSWORD") {
+        if !pw.is_empty() {
+            return Ok(pw);
+        }
+    }
+    // A live `mykey login` session (cached in the keychain) skips the prompt.
+    if let Some(pw) = session_get() {
+        return Ok(pw);
+    }
+    rpassword::prompt_password("Master password: ").map_err(|e| e.to_string())
+}
+
+/// For `login` itself: take a fresh password (env or prompt), never reuse a session.
+fn read_password_for_login() -> Result<String, String> {
     if let Ok(pw) = std::env::var("MYKEY_MASTER_PASSWORD") {
         if !pw.is_empty() {
             return Ok(pw);
@@ -756,5 +1012,8 @@ fn mask(value: &str) -> String {
 }
 
 fn print_json(value: &Value) {
-    println!("{}", serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+    );
 }

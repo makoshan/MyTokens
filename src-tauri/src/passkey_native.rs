@@ -71,7 +71,10 @@ struct Request {
 
 /// `Send`-safe result delivered from the delegate callback back to the caller.
 enum Outcome {
-    Ok { credential_id: Vec<u8>, prf_first: Vec<u8> },
+    Ok {
+        credential_id: Vec<u8>,
+        prf_first: Vec<u8>,
+    },
     Err(String),
 }
 
@@ -144,7 +147,10 @@ fn run(app: &AppHandle, request: Request) -> Result<PasskeyBridgeResult, String>
     .map_err(|e| format!("failed to dispatch passkey request to main thread: {e}"))?;
 
     match rx.recv_timeout(PASSKEY_TIMEOUT) {
-        Ok(Outcome::Ok { credential_id, prf_first }) => Ok(PasskeyBridgeResult {
+        Ok(Outcome::Ok {
+            credential_id,
+            prf_first,
+        }) => Ok(PasskeyBridgeResult {
             credential_id: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&credential_id),
             user_id: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&request.user_id),
             rp_id: request.rp_id,
@@ -339,8 +345,8 @@ impl PasskeyDelegate {
         match self.ivars().mode {
             Mode::Register => {
                 let registration = match credential
-                    .downcast::<ASAuthorizationPlatformPublicKeyCredentialRegistration>()
-                {
+                    .downcast::<ASAuthorizationPlatformPublicKeyCredentialRegistration>(
+                ) {
                     Ok(value) => value,
                     Err(_) => {
                         return Outcome::Err(
@@ -358,7 +364,10 @@ impl PasskeyDelegate {
                     }
                 };
                 match unsafe { prf.first() } {
-                    Some(first) => Outcome::Ok { credential_id, prf_first: first.to_vec() },
+                    Some(first) => Outcome::Ok {
+                        credential_id,
+                        prf_first: first.to_vec(),
+                    },
                     None => Outcome::Err("PRF registration output was empty".to_string()),
                 }
             }
@@ -383,7 +392,10 @@ impl PasskeyDelegate {
                     }
                 };
                 let first = unsafe { prf.first() };
-                Outcome::Ok { credential_id, prf_first: first.to_vec() }
+                Outcome::Ok {
+                    credential_id,
+                    prf_first: first.to_vec(),
+                }
             }
         }
     }

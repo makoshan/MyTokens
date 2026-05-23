@@ -22,11 +22,11 @@ export const APP_NAV_ITEMS: readonly AppNavItem[] = [
   { view: 'keys', label: '密钥库' },
   { view: 'providers', label: '提供商' },
   { view: 'crypto', label: 'Crypto' },
-  { view: 'apps', label: '应用' },
   { view: 'compute', label: '算力网关' },
   { view: 'settings', label: '全局设置' },
-  // MVP: 项目 / MCP / Skills / 提示词 / 历史记录 入口暂不展示。
-  // 视图与功能仍保留（可被程序内跳转触达），随时把对应行加回即可。
+  // MVP: 项目 / MCP / Skills / 提示词 / 历史记录 / 应用 入口暂不展示。
+  // 视图与功能仍保留（可被程序内跳转触达），随时把对应行加回即可：
+  // { view: 'apps', label: '应用' },
 ]
 
 export type HomeQuickView = 'keys' | 'crypto' | 'providers' | 'apps'
@@ -52,7 +52,8 @@ const HOME_QUICK_LABELS: Record<HomeQuickView, string> = {
   apps: '应用',
 }
 
-const HOME_QUICK_ENTRY_ORDER: readonly HomeQuickView[] = ['keys', 'crypto', 'providers', 'apps']
+// 应用入口暂时隐藏（与侧边栏一致）；恢复时把 'apps' 加回即可。
+const HOME_QUICK_ENTRY_ORDER: readonly HomeQuickView[] = ['keys', 'crypto', 'providers']
 
 export function buildHomeQuickStats(counts: HomeQuickCounts): HomeQuickEntry[] {
   return HOME_QUICK_ENTRY_ORDER.map((view) => ({

@@ -19,6 +19,20 @@ export function tabAfterRedpacketRedeem(): DashboardTab {
 
 export const DEFAULT_DASHBOARD_TAB: DashboardTab = 'chat'
 
+export function shouldDeferPasskeyLockForInviteClaim(searchParams: URLSearchParams, passkeyLocked: boolean): boolean {
+  if (!passkeyLocked) return false
+  return searchParams.get('welcome') === '1' || !!searchParams.get('redpacket')
+}
+
+export function claimWalletAction(input: { hasStoredWallet: boolean; passkeyLocked: boolean }): 'create' | 'reuse' | 'unlock' {
+  if (input.passkeyLocked) return 'unlock'
+  return input.hasStoredWallet ? 'reuse' : 'create'
+}
+
+export function appLockStateAfterInviteClaimDismiss(passkeyLockedInStorage: boolean): boolean {
+  return passkeyLockedInStorage
+}
+
 export function formatMicroUsd(value: number): string {
   const usd = value / 1_000_000
   if (value > 0 && value < 10_000) return `$${usd.toFixed(6)}`
@@ -46,6 +60,7 @@ export function buildDashboardViewModel(snapshot: DashboardSnapshot) {
   // (channels, logs, quality, credits…) move behind an "高级" toggle.
   const navigation: Array<{ id: DashboardTab; label: string; advanced?: boolean }> = [
     { id: 'chat', label: 'AI 对话' },
+    { id: 'topup', label: '💳 充值额度' },
     { id: 'keys', label: 'MyKey API Key' },
     { id: 'docs', label: '接入说明' },
     { id: 'overview', label: '总览', advanced: true },
@@ -53,7 +68,6 @@ export function buildDashboardViewModel(snapshot: DashboardSnapshot) {
     { id: 'usage', label: '日志', advanced: true },
     { id: 'quality', label: '模型检测', advanced: true },
     { id: 'credits', label: '额度', advanced: true },
-    { id: 'topup', label: '充值', advanced: true },
   ]
   const channelSummary = {
     total: snapshot.channels.length,

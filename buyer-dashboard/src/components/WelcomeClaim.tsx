@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { createWallet, loadStoredWallet, prfSupported } from '../wallet.js'
+import { claimWalletAction } from '../dashboardViewModel.js'
+import { createWallet, isPasskeyLocked, loadStoredWallet, prfSupported, unlockWithPasskey } from '../wallet.js'
 import { redpacketReward, humanError } from '../redpacketRewards.js'
 
 type Stage = 'sealed' | 'opening' | 'revealed' | 'error'
@@ -33,7 +34,10 @@ export function WelcomeClaim({
     setStage('opening')
     try {
       // 先创建 passkey 钱包（已有则复用）——之后充值 / 用 USDT 买额度都用它。
-      if (!loadStoredWallet()) await createWallet(accountId)
+      const storedWallet = loadStoredWallet()
+      const action = claimWalletAction({ hasStoredWallet: !!storedWallet, passkeyLocked: isPasskeyLocked() })
+      if (action === 'unlock') await unlockWithPasskey(accountId)
+      if (action === 'create') await createWallet(accountId)
       setStage('revealed')
     } catch (e) {
       setError(humanError(e))
@@ -141,7 +145,7 @@ const WC_CSS = `
 .wc-tip { font-size: 12px; color: var(--muted, #667); margin: 12px 0; }
 .wc-err { color: var(--status-critical, #c40918); margin-bottom: 16px; }
 .wc-cta { width: 100%; height: 48px; border-radius: 999px; border: 0; cursor: pointer; font-size: 16px; font-weight: 700;
-  background: var(--accent); color: #fff; box-shadow: 0 12px 28px rgba(0,127,255,0.3); margin-top: 6px; }
+  background: var(--primary, rgb(0 127 255)); color: var(--primary-foreground, rgb(255 255 255)); box-shadow: 0 12px 28px rgba(0,127,255,0.3); margin-top: 6px; }
 .wc-later { width: 100%; height: 40px; border: 0; background: transparent; color: var(--muted); cursor: pointer; margin-top: 8px; }
 .wc-confetti { position: absolute; inset: 0; pointer-events: none; }
 .wc-confetti span { position: absolute; top: -10px; width: 8px; height: 12px; border-radius: 2px; animation: wc-fall 1.6s linear forwards; }

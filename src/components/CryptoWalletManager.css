@@ -1,20 +1,22 @@
 .crypto-view {
-  --wallet-primary: #007fff;
-  --wallet-primary-hover: #006cd9;
-  --wallet-secondary: #0cc5ff;
-  --wallet-foreground: #111d4a;
-  --wallet-muted: #6f7787;
-  --wallet-surface: #ffffff;
-  --wallet-card: #ffffff;
-  --wallet-soft: #f8f9fa;
-  --wallet-blue-soft: #e7f1fc;
-  --wallet-blue-dim: #cfe4fa;
-  --wallet-border: #ecedf1;
-  --wallet-success: #228e42;
-  --wallet-success-surface: #daf1e1;
-  --wallet-danger: #f3636f;
-  --wallet-shadow: 0 8px 24px rgba(17, 29, 74, 0.08);
-  --wallet-shadow-cta: 0 10px 24px rgba(0, 127, 255, 0.24);
+  /* Map wallet aliases onto the canonical design tokens in src/index.css
+     (design.md) so colors stay in one source of truth. */
+  --wallet-primary: var(--accent);
+  --wallet-primary-hover: var(--accent-dark);
+  --wallet-secondary: var(--brand-secondary);
+  --wallet-foreground: var(--text);
+  --wallet-muted: var(--muted-strong);
+  --wallet-surface: var(--surface-page);
+  --wallet-card: var(--surface-page);
+  --wallet-soft: var(--panel);
+  --wallet-blue-soft: var(--surface-blue);
+  --wallet-blue-dim: var(--surface-blue-light);
+  --wallet-border: var(--border);
+  --wallet-success: var(--status-healthy);
+  --wallet-success-surface: var(--status-healthy-bg);
+  --wallet-danger: var(--status-critical);
+  --wallet-shadow: var(--shadow);
+  --wallet-shadow-cta: var(--shadow-cta);
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -40,14 +42,14 @@
   align-items: center;
   gap: 6px;
   border: 1px solid var(--wallet-border);
-  border-radius: 999px;
-  background: #fff;
+  border-radius: var(--radius-pill);
+  background: var(--wallet-card);
   padding: 4px;
 }
 
 .crypto-view-tab {
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--wallet-muted);
   min-height: 34px;
@@ -80,8 +82,8 @@
 .crypto-account-hero {
   width: 100%;
   border: 1px solid var(--wallet-border);
-  border-radius: 18px;
-  background: #fff;
+  border-radius: var(--radius-lg);
+  background: var(--wallet-card);
   box-shadow: var(--wallet-shadow);
   padding: 14px;
   display: grid;
@@ -106,7 +108,7 @@
 
 .crypto-balance-hero {
   border: 1px solid var(--wallet-border);
-  border-radius: 22px;
+  border-radius: var(--radius-xl);
   padding: 24px;
   background:
     radial-gradient(circle at 78% 16%, rgba(12, 197, 255, 0.24), transparent 34%),
@@ -137,12 +139,12 @@
 }
 
 .crypto-loss {
-  color: #d53f4b;
+  color: var(--status-critical);
   font-weight: 700;
 }
 
 .crypto-scope-chip {
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 4px 10px;
   background: var(--wallet-blue-soft);
   color: var(--wallet-primary);
@@ -151,7 +153,7 @@
 
 .crypto-home-actions .crypto-action {
   min-height: 72px;
-  border-radius: 18px;
+  border-radius: var(--radius-lg);
   font-size: 15px;
 }
 
@@ -162,19 +164,24 @@
 .crypto-asset-tabs {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 22px;
   flex-wrap: wrap;
-  margin-bottom: 6px;
+  margin-bottom: 10px;
 }
 
 .crypto-asset-tab {
   border: 0;
   background: transparent;
   color: var(--wallet-muted);
-  font-size: 18px;
-  font-weight: 800;
-  padding: 8px 0;
+  font-size: 16px;
+  font-weight: 700;
+  padding: 8px 2px;
   cursor: pointer;
+}
+
+/* The "..." overflow button sits a little apart from the text tabs. */
+.crypto-asset-tabs .crypto-mini-action {
+  margin-left: auto;
 }
 
 .crypto-asset-tab.active {
@@ -188,13 +195,23 @@
 
 .crypto-token-row {
   border: 1px solid var(--wallet-border);
-  border-radius: 14px;
-  background: #fff;
+  border-radius: var(--radius-md);
+  background: var(--wallet-card);
   padding: 12px;
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr) minmax(120px, auto) auto;
   align-items: center;
   gap: 12px;
+}
+
+/* Group a row's trailing buttons (详情 / Send / ERC20) into one grid cell so they
+   stay on a single line with proper padding instead of wrapping into the narrow
+   logo column. */
+.crypto-token-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .crypto-portfolio-overview {
@@ -215,7 +232,7 @@
 
 .crypto-portfolio-kpis span {
   border: 1px solid var(--wallet-border);
-  border-radius: 14px;
+  border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.72);
   padding: 12px;
   color: var(--wallet-muted);
@@ -242,7 +259,7 @@
 
 .crypto-chain-row {
   border: 1px solid var(--wallet-border);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: var(--wallet-soft);
   padding: 12px;
   display: grid;
@@ -262,7 +279,7 @@
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--wallet-border);
-  border-radius: 14px;
+  border-radius: var(--radius-md);
 }
 
 .crypto-token-table-head,
@@ -282,9 +299,35 @@
 }
 
 .crypto-token-table-row {
-  background: #fff;
+  background: var(--wallet-card);
   border-top: 1px solid var(--wallet-border);
   font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Numeric columns (Chains / Accounts / Amount) read better right-aligned. */
+.crypto-token-table-head span:not(:first-child),
+.crypto-token-table-row > span:not(:first-child) {
+  justify-self: end;
+  text-align: right;
+}
+
+/* Amount cell: balance as the primary figure, USD value muted underneath. */
+.crypto-token-amount {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.crypto-token-amount strong {
+  color: var(--wallet-foreground);
+  font-weight: 700;
+}
+
+.crypto-token-amount small {
+  color: var(--wallet-muted);
+  font-size: 12px;
 }
 
 .crypto-drawer-backdrop {
@@ -299,7 +342,7 @@
 .crypto-account-drawer {
   width: min(420px, 100%);
   height: 100%;
-  background: #fff;
+  background: var(--wallet-card);
   border-left: 1px solid var(--wallet-border);
   box-shadow: -24px 0 60px rgba(17, 29, 74, 0.16);
   padding: 18px;
@@ -329,7 +372,7 @@
 .crypto-account-search {
   min-height: 44px;
   border: 1px solid var(--wallet-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--wallet-soft);
   padding: 0 16px;
   font: inherit;
@@ -367,7 +410,7 @@
 
 .crypto-drawer-account {
   border: 1px solid transparent;
-  border-radius: 14px;
+  border-radius: var(--radius-md);
   background: var(--wallet-soft);
   padding: 10px;
   display: grid;
@@ -385,8 +428,8 @@
 
 .crypto-drawer-add {
   border: 1px dashed var(--wallet-border);
-  border-radius: 12px;
-  background: #fff;
+  border-radius: var(--radius-md);
+  background: var(--wallet-card);
   color: var(--wallet-primary);
   padding: 10px;
   font-weight: 700;
@@ -403,7 +446,7 @@
 
 .crypto-portfolio-card {
   border: 1px solid var(--wallet-border);
-  border-radius: 20px;
+  border-radius: var(--radius-xl);
   padding: 24px;
   background:
     radial-gradient(circle at 16% 12%, rgba(12, 197, 255, 0.28), transparent 34%),
@@ -438,7 +481,7 @@
 
 .crypto-balance-block {
   min-width: 180px;
-  border-radius: 18px;
+  border-radius: var(--radius-lg);
   padding: 16px;
   background: rgba(255, 255, 255, 0.72);
   border: 1px solid rgba(255, 255, 255, 0.8);
@@ -468,10 +511,10 @@
 .crypto-mini-action,
 .crypto-danger-action {
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0 18px;
   height: 40px;
-  background: #f0f1f3;
+  background: var(--panel-alt);
   color: var(--wallet-foreground);
   font-weight: 600;
   font-size: 14px;
@@ -498,6 +541,16 @@
   cursor: not-allowed;
 }
 
+/* design.md: every interactive control needs a visible focus state. */
+.crypto-view button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(0, 127, 255, 0.14);
+}
+
+.crypto-action.primary:focus-visible {
+  box-shadow: var(--wallet-shadow-cta), 0 0 0 3px rgba(0, 127, 255, 0.14);
+}
+
 .crypto-main-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(300px, 0.42fr);
@@ -521,7 +574,7 @@
 .crypto-tools-panel,
 .crypto-import-card {
   border: 1px solid var(--wallet-border);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   background: var(--wallet-card);
   box-shadow: var(--wallet-shadow);
   padding: 16px;
@@ -544,7 +597,7 @@
 }
 
 .crypto-pill {
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 5px 10px;
   background: var(--wallet-blue-soft);
   color: var(--wallet-primary);
@@ -556,7 +609,7 @@
 .crypto-asset-row,
 .crypto-account-row {
   border: 1px solid transparent;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: var(--wallet-soft);
   padding: 12px;
   display: grid;
@@ -579,7 +632,7 @@
 .crypto-token-avatar {
   width: 40px;
   height: 40px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--wallet-blue-dim);
   color: var(--wallet-primary);
   display: inline-flex;
@@ -589,7 +642,7 @@
 }
 
 .crypto-token-avatar {
-  background: #fff;
+  background: var(--wallet-card);
   border: 1px solid var(--wallet-border);
 }
 
@@ -619,7 +672,7 @@
 }
 
 .crypto-asset-row {
-  grid-template-columns: 40px minmax(0, 1fr) auto auto auto;
+  grid-template-columns: 40px minmax(0, 1fr) auto auto;
 }
 
 .crypto-asset-value {
@@ -631,7 +684,7 @@
 }
 
 .crypto-network-badge {
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 6px 10px;
   background: var(--wallet-blue-soft);
   color: var(--wallet-primary);
@@ -668,7 +721,7 @@
 
 .crypto-rpc-hint {
   font-size: 12px;
-  color: var(--wallet-muted, #6b7280);
+  color: var(--wallet-muted);
   line-height: 1.4;
 }
 
@@ -682,9 +735,9 @@
 .crypto-token-logo {
   width: 32px;
   height: 32px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   object-fit: cover;
-  background: #f0f1f3;
+  background: var(--panel-alt);
   flex-shrink: 0;
 }
 
@@ -705,7 +758,7 @@
 .crypto-token-info-head p {
   margin: 2px 0 0;
   font-size: 12px;
-  color: var(--wallet-muted, #6b7280);
+  color: var(--wallet-muted);
 }
 
 .crypto-token-info-body {
@@ -760,7 +813,7 @@
 
 .crypto-rpc-preset {
   border: 1px solid rgba(0, 127, 255, 0.18);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: var(--wallet-blue-soft);
   padding: 10px;
   display: grid;
@@ -795,7 +848,7 @@
 
 .crypto-empty-state {
   border: 1px dashed var(--wallet-border);
-  border-radius: 14px;
+  border-radius: var(--radius-md);
   padding: 18px;
   background: var(--wallet-soft);
   color: var(--wallet-muted);
@@ -817,11 +870,29 @@
   width: 100%;
   min-height: 44px;
   border: 1px solid var(--wallet-border);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 10px 12px;
   font: inherit;
-  background: #f8f9fa;
+  background: var(--wallet-soft);
   color: var(--wallet-foreground);
+}
+
+/* design.md: standard blue focus ring for inputs. */
+.crypto-form input:focus-visible,
+.crypto-form select:focus-visible,
+.crypto-form textarea:focus-visible,
+.crypto-tools-panel input:focus-visible,
+.crypto-tools-panel select:focus-visible,
+.crypto-tools-panel textarea:focus-visible,
+.crypto-modal-form input:focus-visible,
+.crypto-modal-form select:focus-visible,
+.crypto-amount-row input:focus-visible,
+.crypto-amount-row select:focus-visible,
+.crypto-swap-advanced input:focus-visible,
+.crypto-account-search:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 127, 255, 0.14);
 }
 
 .crypto-form textarea,
@@ -841,7 +912,7 @@
 .crypto-tx-hash {
   display: block;
   border: 1px solid var(--wallet-border);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 10px;
   background: var(--wallet-soft);
 }
@@ -872,7 +943,7 @@
 
 .crypto-watch-callout {
   border: 1px solid rgba(0, 127, 255, 0.22);
-  border-radius: 14px;
+  border-radius: var(--radius-md);
   background: linear-gradient(135deg, #f4f9ff 0%, #ffffff 100%);
   padding: 14px;
   display: flex;
@@ -913,7 +984,7 @@
   max-height: min(760px, calc(100vh - 48px));
   overflow: auto;
   border: 1px solid var(--wallet-border);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   background: var(--wallet-card);
   box-shadow: 0 24px 60px rgba(17, 29, 74, 0.2);
   padding: 18px;
@@ -943,7 +1014,7 @@
   width: 100%;
   min-height: 180px;
   border: 1px solid var(--wallet-border);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 12px;
   background: var(--wallet-soft);
   color: var(--wallet-foreground);
@@ -1032,7 +1103,7 @@
 .crypto-modal-form select {
   width: 100%;
   border: 1px solid var(--wallet-border);
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   padding: 10px 12px;
   font-size: 14px;
   background: var(--wallet-card);
@@ -1076,9 +1147,9 @@
   width: 208px;
   height: 208px;
   border: 1px solid var(--wallet-border);
-  border-radius: 14px;
+  border-radius: var(--radius-md);
   padding: 10px;
-  background: #fff;
+  background: var(--wallet-card);
   image-rendering: pixelated;
 }
 
@@ -1089,7 +1160,7 @@
   text-align: center;
   color: var(--wallet-foreground);
   background: var(--wallet-soft);
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   padding: 10px 12px;
   width: 100%;
 }
@@ -1104,7 +1175,7 @@
   border: 1px solid var(--wallet-border);
   background: var(--wallet-card);
   color: var(--wallet-foreground);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 5px 14px;
   font-size: 13px;
   font-weight: 600;
@@ -1133,7 +1204,7 @@
 .crypto-swap-advanced input {
   width: 100%;
   border: 1px solid var(--wallet-border);
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   padding: 9px 12px;
   font-size: 13px;
   margin-bottom: 8px;
@@ -1166,7 +1237,7 @@ a.crypto-tx-hash {
 
 .crypto-nft-card {
   border: 1px solid var(--wallet-border);
-  border-radius: 14px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   background: var(--wallet-card);
 }
@@ -1202,7 +1273,7 @@ a.crypto-tx-hash {
   background: rgba(17, 29, 74, 0.72);
   color: #fff;
   padding: 2px 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 .crypto-nft-meta {
@@ -1249,7 +1320,7 @@ a.crypto-tx-hash {
   flex-shrink: 0;
   font-size: 12px;
   font-weight: 700;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 4px 10px;
   background: var(--wallet-soft);
   color: var(--wallet-muted);
@@ -1257,7 +1328,7 @@ a.crypto-tx-hash {
 
 .crypto-activity-dir.in {
   background: rgba(36, 174, 96, 0.14);
-  color: #1c9c54;
+  color: var(--wallet-success);
 }
 
 .crypto-activity-dir.out {
