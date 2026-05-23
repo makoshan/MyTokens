@@ -18,6 +18,8 @@ const LS_URL = 'mykey_gateway_url'
 const LS_INVITE_LINKS = 'mykey_gateway_invite_links_v1'
 const ALL_PROVIDER_MODELS = '__all_provider_models__'
 const INVITE_PAGE_SIZE = 8
+const ACCOUNT_PAGE_SIZE = 6
+const CHANNEL_PAGE_SIZE = 6
 
 interface Account { id: string; display_name: string; status: string; balance_micro_usd: number; account_group: string; default_model?: string | null; model_allowlist?: string[] }
 interface Channel { id: string; label: string; provider: string; status: string; base_url: string | null }
@@ -95,6 +97,8 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
   const [routingRules, setRoutingRules] = useState<RoutingRule[]>([])
   const [invites, setInvites] = useState<OperatorInvite[]>([])
   const [invitePage, setInvitePage] = useState(1)
+  const [accountPage, setAccountPage] = useState(1)
+  const [channelPage, setChannelPage] = useState(1)
   const [inviteLinksById, setInviteLinksById] = useState<Record<string, string>>(() => readInviteLinks())
   const [revenue, setRevenue] = useState<Revenue | null>(null)
   const [payoutOptions, setPayoutOptions] = useState<PayoutOption[]>([])
@@ -243,10 +247,24 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
   const invitePageCount = Math.max(1, Math.ceil(invites.length / INVITE_PAGE_SIZE))
   const clampedInvitePage = Math.min(invitePage, invitePageCount)
   const pagedInvites = invites.slice((clampedInvitePage - 1) * INVITE_PAGE_SIZE, clampedInvitePage * INVITE_PAGE_SIZE)
+  const accountPageCount = Math.max(1, Math.ceil(accounts.length / ACCOUNT_PAGE_SIZE))
+  const clampedAccountPage = Math.min(accountPage, accountPageCount)
+  const pagedAccounts = accounts.slice((clampedAccountPage - 1) * ACCOUNT_PAGE_SIZE, clampedAccountPage * ACCOUNT_PAGE_SIZE)
+  const channelPageCount = Math.max(1, Math.ceil(channels.length / CHANNEL_PAGE_SIZE))
+  const clampedChannelPage = Math.min(channelPage, channelPageCount)
+  const pagedChannels = channels.slice((clampedChannelPage - 1) * CHANNEL_PAGE_SIZE, clampedChannelPage * CHANNEL_PAGE_SIZE)
 
   useEffect(() => {
     if (invitePage > invitePageCount) setInvitePage(invitePageCount)
   }, [invitePage, invitePageCount])
+
+  useEffect(() => {
+    if (accountPage > accountPageCount) setAccountPage(accountPageCount)
+  }, [accountPage, accountPageCount])
+
+  useEffect(() => {
+    if (channelPage > channelPageCount) setChannelPage(channelPageCount)
+  }, [channelPage, channelPageCount])
 
   useEffect(() => {
     if (!configuredProvider) return
@@ -294,6 +312,7 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
       )
     }
     setProviderToken('')
+    setChannelPage(1)
     return providerPayload.models.length > 1
       ? `${providerPayload.label} / ${providerPayload.models.length} 个模型`
       : `${providerPayload.label} / ${providerPayload.models[0]}`
@@ -380,6 +399,7 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
       setInviteLinksById(nextInviteLinks)
       writeInviteLinks(nextInviteLinks)
       setInvitePage(1)
+      setAccountPage(1)
       setInviteLink(link)
       setInviteNote(`已建账户「${name}」· 模型 ${modelAllowlist.join(', ')}${amount > 0 ? ` · 初始额度 $${amount}` : '（无额度）'}`)
       setFriendName('')
@@ -774,7 +794,7 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
               </div>
               <div className="compute-gateway-manager__table-wrap">
                 <table><thead><tr><th>名称</th><th>授权模型</th><th>状态</th><th>余额</th><th>操作</th></tr></thead>
-                  <tbody>{accounts.map((a) => <tr key={a.id}>
+                  <tbody>{pagedAccounts.map((a) => <tr key={a.id}>
                     <td><strong>{a.display_name}</strong></td>
                     <td>{(a.model_allowlist && a.model_allowlist.length > 0 ? a.model_allowlist : [a.default_model || '全部组模型']).join(', ')}</td>
                     <td><span className={`compute-gateway-manager__status-badge is-${a.status}`}>{a.status}</span></td>
@@ -783,6 +803,17 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
                   </tr>)}</tbody>
                 </table>
               </div>
+              {accounts.length > ACCOUNT_PAGE_SIZE && (
+                <div className="compute-gateway-manager__pagination">
+                  <span>
+                    第 {clampedAccountPage} / {accountPageCount} 页 · 每页 {ACCOUNT_PAGE_SIZE} 条
+                  </span>
+                  <div>
+                    <button type="button" disabled={clampedAccountPage <= 1} onClick={() => setAccountPage((page) => Math.max(1, page - 1))}>上一页</button>
+                    <button type="button" disabled={clampedAccountPage >= accountPageCount} onClick={() => setAccountPage((page) => Math.min(accountPageCount, page + 1))}>下一页</button>
+                  </div>
+                </div>
+              )}
             </section>
             <section className="compute-gateway-manager__panel">
               <div className="compute-gateway-manager__panel-heading">
@@ -791,9 +822,20 @@ export function ComputeGatewayManager({ masterPassword = '', providers = [] }: C
               </div>
               <div className="compute-gateway-manager__table-wrap">
                 <table><thead><tr><th>Label</th><th>Provider</th><th>状态</th></tr></thead>
-                  <tbody>{channels.map((c) => <tr key={c.id}><td><strong>{c.label}</strong></td><td>{c.provider}</td><td><span className={`compute-gateway-manager__status-badge is-${c.status}`}>{c.status}</span></td></tr>)}</tbody>
+                  <tbody>{pagedChannels.map((c) => <tr key={c.id}><td><strong>{c.label}</strong></td><td>{c.provider}</td><td><span className={`compute-gateway-manager__status-badge is-${c.status}`}>{c.status}</span></td></tr>)}</tbody>
                 </table>
               </div>
+              {channels.length > CHANNEL_PAGE_SIZE && (
+                <div className="compute-gateway-manager__pagination">
+                  <span>
+                    第 {clampedChannelPage} / {channelPageCount} 页 · 每页 {CHANNEL_PAGE_SIZE} 条
+                  </span>
+                  <div>
+                    <button type="button" disabled={clampedChannelPage <= 1} onClick={() => setChannelPage((page) => Math.max(1, page - 1))}>上一页</button>
+                    <button type="button" disabled={clampedChannelPage >= channelPageCount} onClick={() => setChannelPage((page) => Math.min(channelPageCount, page + 1))}>下一页</button>
+                  </div>
+                </div>
+              )}
             </section>
           </div>
         </>

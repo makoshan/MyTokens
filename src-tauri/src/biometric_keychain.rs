@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 mod platform {
+    use security_framework::access_control::{ProtectionMode, SecAccessControl};
     use security_framework::base::{Error as SecError, Result as SecResult};
     use security_framework::item::{ItemClass, ItemSearchOptions};
     use security_framework::passwords::{delete_generic_password, get_generic_password};
@@ -32,7 +33,7 @@ mod platform {
 
         let _ = delete_generic_password(SERVICE, ACCOUNT);
         let mut options = PasswordOptions::new_generic_password(SERVICE, ACCOUNT);
-        options.set_access_control_options(AccessControlOptions::USER_PRESENCE);
+        set_user_presence_access_control(&mut options)?;
         set_password_with_options(&mut options, master_password.as_bytes())
             .map_err(|e| format!("failed to store biometric unlock item: {e}"))
     }
@@ -66,6 +67,23 @@ mod platform {
 
         let params = CFDictionary::from_CFType_pairs(&options.query);
         cvt(unsafe { SecItemAdd(params.as_concrete_TypeRef(), std::ptr::null_mut()) })
+    }
+
+    fn set_user_presence_access_control(options: &mut PasswordOptions) -> Result<(), String> {
+        use core_foundation_09::base::TCFType;
+        use core_foundation_09::string::CFString;
+        use security_framework_sys::item::kSecAttrAccessControl;
+
+        let access = SecAccessControl::create_with_protection(
+            Some(ProtectionMode::AccessibleWhenUnlocked),
+            AccessControlOptions::USER_PRESENCE.bits(),
+        )
+        .map_err(|e| format!("failed to create Touch ID keychain access control: {e}"))?;
+        options.query.push((
+            unsafe { CFString::wrap_under_get_rule(kSecAttrAccessControl) },
+            access.into_CFType(),
+        ));
+        Ok(())
     }
 
     fn cvt(status: i32) -> SecResult<()> {

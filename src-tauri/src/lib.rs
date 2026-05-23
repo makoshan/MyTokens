@@ -71,7 +71,10 @@ fn ensure_main_window(app: &tauri::App) -> Result<(), tauri::Error> {
         app.add_capability(
             CapabilityBuilder::new("localhost-ui")
                 .remote(url.to_string())
-                .window("main"),
+                .window("main")
+                .permission("core:default")
+                .permission("dialog:default")
+                .permission("global-shortcut:default"),
         )?;
         url
     };

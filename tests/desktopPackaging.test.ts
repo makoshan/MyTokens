@@ -26,3 +26,16 @@ test('web entrypoint uses the bundled MyKey icon instead of the Vite default', (
   assert.match(html, /href="\/icons\/icon\.png"/)
   assert.doesNotMatch(html, /vite\.svg/)
 })
+
+test('release localhost main window keeps the default Tauri permissions', () => {
+  const libRs = readRepoFile('src-tauri/src/lib.rs')
+  const start = libRs.indexOf('CapabilityBuilder::new("localhost-ui")')
+  const end = libRs.indexOf('        )?;', start)
+  const localhostCapability = start >= 0 && end >= 0 ? libRs.slice(start, end) : ''
+
+  assert.match(localhostCapability, /\.remote\(url\.to_string\(\)\)/)
+  assert.match(localhostCapability, /\.window\("main"\)/)
+  assert.match(localhostCapability, /\.permission\("core:default"\)/)
+  assert.match(localhostCapability, /\.permission\("dialog:default"\)/)
+  assert.match(localhostCapability, /\.permission\("global-shortcut:default"\)/)
+})
